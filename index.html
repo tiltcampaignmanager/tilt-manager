@@ -1943,7 +1943,23 @@ var Fb = {
       Object.keys(data).forEach(function(k) {
         if (k === '_lastEditedAt' || k === '_lastEditedBy' || k === '_lastEditedByName') return;
         if (PER_USER_UI_FIELDS[k]) return;
+        // Id counters must only ever move forward. A stale writer with a lower counter
+        // must never roll ours back — doing so would let the next created record reuse an
+        // id that already belongs to another record, overwriting it (a "disappearing"
+        // video/campaign). Clamp to the max of incoming and current instead of assigning.
+        if (k === 'nextAssetId' || k === 'nextCampaignId' || k === 'nextBatchItemId') {
+          STATE[k] = Math.max(Number(data[k]) || 0, Number(STATE[k]) || 0);
+          return;
+        }
         if (campaignsAreStale && (k === 'campaigns' || k === 'nextCampaignId')) return;
+        // Assets live SOLELY in the state/app/assets subcollection (see subscribeAssets /
+        // _applyAssets). The main doc must never carry them, but a legacy document or an
+        // old-version writer could still have a stale `assets` array baked in. Applying it
+        // here would momentarily replace STATE.assets with an outdated set — dropping
+        // recently-added videos (e.g. international ones another machine just created)
+        // until the subcollection listener re-fires. Never let the main-doc apply touch
+        // assets; the subcollection is the only source of truth.
+        if (k === 'assets' || k === 'assetCount') return;
 
         STATE[k] = data[k];
       });
@@ -2887,16 +2903,59 @@ var STATE = {
 
 };
 
-function todayISO() { return new Date().toISOString().slice(0, 10); }
-function todayLocalISO() { var d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
-function todayUK() { return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' }); }
+// ── Business timezone: the single clock every machine agrees on ──────────────
+// Tilt is UK-based and the primary metric is UK Paid Ads/month, so the business
+// day boundary is Europe/London. ALL civil-date logic (what "today" is, which
+// week/month an asset falls in) and ALL date STAMPS (dateApproved, chDateApproved,
+// assignedAt, scheduledFor) resolve through this one timezone.
+//
+// Why this matters: previously "today" was read as UTC (todayISO) but stamps were
+// written in the approver's LOCAL date (todayLocalISO), while week/month grids used
+// the viewer's LOCAL date. So a video's day depended on who approved it and where
+// each viewer sat — a US editor (UTC-7/-8) approving in the afternoon stamped a date
+// already "yesterday" in UTC, and the board's today-only columns dropped the card.
+// Anchoring everything to Europe/London makes the calendar date of every asset
+// identical on every computer, in every timezone.
+var BIZ_TZ = 'Europe/London';
+function todayUK() { return new Date().toLocaleDateString('en-CA', { timeZone: BIZ_TZ }); }
+// todayISO / todayLocalISO are kept as names (used across the app for both reads and
+// stamps) but now BOTH resolve to the business-timezone civil date, so a stamp made
+// on one machine always matches a read on any other machine.
+function todayISO() { return todayUK(); }
+function todayLocalISO() { return todayUK(); }
+// A Date object whose LOCAL fields (getFullYear/getMonth/getDate/getDay) equal the
+// business timezone's civil date — regardless of the viewer's actual timezone. Use
+// this as the "now" seed for any week/month/workday arithmetic so those grids are
+// London-anchored on every machine. Constructed at local midnight of the London
+// civil date, so getDay()/setDate() math is DST-safe (no time component to shift).
+function bizNow() { var p = todayUK().split('-'); return new Date(+p[0], (+p[1]) - 1, +p[2]); }
+
+// ── Collision-proof local IDs ────────────────────────────────────────────────
+// Assets live as individual documents in the state/app/assets subcollection keyed
+// by their id, and campaigns live in an array keyed by id. IDs must therefore be
+// unique across ALL machines. The old scheme derived them from a shared
+// `nextAssetId` / `nextCampaignId` counter stored in the synced main doc — so two
+// people (e.g. on different computers) adding a video within the same sync window
+// both minted the SAME id and wrote to the SAME subcollection doc; the second write
+// silently overwrote the first and one just-added video "disappeared". A stale
+// remote snapshot could also roll the counter backward, causing id reuse for a
+// single user across sessions.
+//
+// newLocalId() produces a globally-unique id from a millisecond timestamp plus
+// random entropy, so two independent clients cannot collide even minting at the
+// same instant. The nextAssetId / nextCampaignId counters are still advanced at
+// each creation site (the stale-writer guard in applySnapshot relies on
+// nextCampaignId being monotonic) but they no longer determine identity.
+function newLocalId(prefix) {
+  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
 
 // Returns { start, end } as YYYY-MM-DD ISO strings covering the current ISO week
 // (Monday \u2192 Sunday). Used by the This Week row on the Board tab to filter assets
 // whose relevant dates (assignedAt, estDelivery, dateApproved) fall inside the
 // current week. The range is inclusive on both ends.
 function getThisWeekRange() {
-  var now = new Date();
+  var now = bizNow();
   var dow = now.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
   // Days since Monday: Sunday maps back to 6 days ago so the week is Mon\u2013Sun.
   var daysFromMon = (dow + 6) % 7;
@@ -2923,7 +2982,7 @@ function getEditorDailyTarget(editor) { return EDITOR_DAILY_APPROVAL_TARGET[edit
 // Returns { start, end, year, month, label } describing the current calendar month.
 // 'month' is 0-indexed to match Date API. 'label' is "April 2026".
 function getThisMonthRange() {
-  var now = new Date();
+  var now = bizNow();
   var y = now.getFullYear();
   var m = now.getMonth();
   var first = new Date(y, m, 1);
@@ -2955,7 +3014,7 @@ function getMonthRange(year, month) {
 // Returns months that appear in any campaign's monthYear field, plus the current month.
 // Newest first.
 function getAvailableTallyMonths() {
-  var now = new Date();
+  var now = bizNow();
   var cy = now.getFullYear(), cm = now.getMonth();
   var currentKey = cy + '-' + (cm < 9 ? '0' : '') + (cm + 1);
   var seen = {};
@@ -4319,7 +4378,7 @@ function releaseScheduled() {
 // option is "\u2014 No month set \u2014" with empty value, so the field is fully optional.
 // `selected` is an ISO 'YYYY-MM' string (or empty).
 function monthYearPickerHtml(selected) {
-  var now = new Date();
+  var now = bizNow();
   var startYear = now.getFullYear();
   var opts = ['<option value=""' + (!selected ? ' selected' : '') + '>\u2014 No month set \u2014</option>'];
   for (var y = startYear; y <= startYear + 1; y++) {
@@ -4501,8 +4560,9 @@ function showAddSubCampaignModal(forCountry) {
     if (!name) { toast('Campaign name is required', 'error'); return; }
     var country = document.getElementById('f-ccountry').value;
     // New campaigns append to the end of their country's order \u2014 reorder the list below.
+    STATE.nextCampaignId++;
     var camp = {
-      id: STATE.nextCampaignId++, country: country, name: name,
+      id: newLocalId('c'), country: country, name: name,
       rank: getSubCampaignsForCountry(country).length + 1,
       brief: document.getElementById('f-cbrief').value,
       category: document.getElementById('f-ccat').value,
@@ -4885,7 +4945,7 @@ function showAssetModal(existing) {
       toast('Asset updated', 'success');
       emitAssetChangeNotifications(a, { oldEditor: oldEditor, oldStatus: oldStatus });
     } else {
-      payload.id = STATE.nextAssetId++;
+      payload.id = newLocalId('a'); STATE.nextAssetId++;
       payload.campaignId = camp.id;
       payload.scheduledFor = '';
       payload.released = false;
@@ -4938,8 +4998,9 @@ function deleteAsset(id) {
 function duplicateAsset(id) {
   var src = findAssetById(id);
   if (!src) return;
+  STATE.nextAssetId++;
   var copy = {
-    id: STATE.nextAssetId++,
+    id: newLocalId('a'),
     pn: getNextPn(src.campaignId),
     campaignId: src.campaignId,
     name: src.name + '_copy',
@@ -5890,7 +5951,7 @@ function classifyMonthPace(actual, expected, target) {
 }
 
 function renderMonthPanel() {
-  var now = new Date();
+  var now = bizNow();
   var cy = now.getFullYear(), cm = now.getMonth();
   var currentKey = cy + '-' + (cm < 9 ? '0' : '') + (cm + 1);
   var selectedKey = window._tallyMonthKey || currentKey;
@@ -6236,7 +6297,7 @@ function toLocalISODate(d) {
 }
 function getLastNWorkdays(n) {
   var days = [];
-  var d = new Date();
+  var d = bizNow();
   // Start from today and walk back, collecting workdays until we have n.
   while (days.length < n) {
     var dow = d.getDay(); // 0=Sun, 6=Sat (local)
@@ -6258,8 +6319,8 @@ function getLastNWorkdays(n) {
 // Monday is 5 or 6 days back respectively). This is what people usually mean by
 // "this week" on a weekend; the upcoming week has no data yet anyway.
 function getCurrentWeekWorkdays() {
-  var d = new Date();
-  var dow = d.getDay(); // 0=Sun .. 6=Sat (local)
+  var d = bizNow();
+  var dow = d.getDay(); // 0=Sun .. 6=Sat (business tz)
   var daysToMonday = dow === 0 ? -6 : (1 - dow);
   var monday = new Date(d);
   monday.setDate(d.getDate() + daysToMonday);
@@ -6275,7 +6336,7 @@ function getCurrentWeekWorkdays() {
 // Returns Mon–Fri dates for the week at `offset` from the current week.
 // offset=0 → this week, offset=-1 → last week, offset=-2 → two weeks ago, etc.
 function getWorkdaysForOffset(offset) {
-  var d = new Date();
+  var d = bizNow();
   var dow = d.getDay();
   var daysToMonday = dow === 0 ? -6 : (1 - dow);
   var monday = new Date(d);
@@ -6361,9 +6422,9 @@ function renderDailyLogDayHeader(dateISO) {
   var dow = dayNames[d.getDay()];
   var dayNum = d.getDate();
   var monthName = monthNames[d.getMonth()];
-  // Compare against today's LOCAL date (not UTC, which todayISO uses) so the
-  // highlight lands on the right column in timezones ahead of UTC.
-  var isToday = dateISO === toLocalISODate(new Date());
+  // Compare against the business-timezone civil date so the highlight lands on the
+  // same column for every viewer, regardless of their machine timezone.
+  var isToday = dateISO === toLocalISODate(bizNow());
   return '<div class="log-day-head' + (isToday ? ' is-today' : '') + '">' +
     '<div class="log-day-dow">' + dow + '</div>' +
     '<div class="log-day-date">' + dayNum + ' ' + monthName + '</div>' +
@@ -7659,7 +7720,7 @@ function findOrCreateCampaign(countryCode, campaignName) {
 
   if (existing) return existing.id;
 
-  var newId = 'c' + (++STATE.nextCampaignId);
+  ++STATE.nextCampaignId; var newId = newLocalId('c');
   var rank = (STATE.campaigns.filter(function(c) { return c.country === countryCode; }).length) + 1;
 
   var newCamp = {
@@ -7706,7 +7767,7 @@ function importCampaignsAndAssets(campaignsData, assetsData) {
       if (isDup) {
         skippedCampaigns++;
       } else {
-        var newId = 'c' + (++STATE.nextCampaignId);
+        ++STATE.nextCampaignId; var newId = newLocalId('c');
         var rank = (STATE.campaigns.filter(function(c) { return c.country === row.country; }).length) + 1;
 
         STATE.campaigns.push({
@@ -7761,7 +7822,7 @@ function importCampaignsAndAssets(campaignsData, assetsData) {
       } else {
         findOrCreateCategory(row.category);
 
-        var newAssetId = 'a' + (++STATE.nextAssetId);
+        ++STATE.nextAssetId; var newAssetId = newLocalId('a');
         var campaignAssetCount = STATE.assets.filter(function(a) { return a.campaignId === campId; }).length;
         var pn = campaignAssetCount + 1;
 
@@ -8232,7 +8293,7 @@ function executeSheetImport() {
           (c.category || '').toLowerCase() === (campaignInfo.category || '').toLowerCase();
       }).id;
     } else {
-      campaignId = 'c' + (++STATE.nextCampaignId);
+      ++STATE.nextCampaignId; campaignId = newLocalId('c');
       var rank = (STATE.campaigns.filter(function(c) { return c.country === 'UK'; }).length) + 1;
 
       STATE.campaigns.push({
@@ -8272,7 +8333,7 @@ function executeSheetImport() {
           existingAsset.finalVideo = getCol(row, ['Final Video', 'Video']) || '';
         }
       } else {
-        var newAssetId = 'a' + (++STATE.nextAssetId);
+        ++STATE.nextAssetId; var newAssetId = newLocalId('a');
         var campaignAssetCount = STATE.assets.filter(function(a) { return a.campaignId === campaignId; }).length;
         var pn = campaignAssetCount + 1;
 
@@ -8559,7 +8620,7 @@ function executeItalyImport() {
   if (existingCamp) {
     campaignId = existingCamp.id;
   } else {
-    campaignId = 'c' + (++STATE.nextCampaignId);
+    ++STATE.nextCampaignId; campaignId = newLocalId('c');
     var rank = STATE.campaigns.filter(function(c){ return c.country === 'IT'; }).length + 1;
     STATE.campaigns.push({ id: campaignId, country: 'IT', rank: rank, name: campName, brief: '', driveId: '', category: category, type: 'Paid Ads', slackOverride: '', monthYear: monthYear, hideAssetLinkCols: false });
     newCampaign = true;
@@ -8600,7 +8661,7 @@ function executeItalyImport() {
       if (changed) updated++;
       else skipped++;
     } else {
-      var assetId = 'a' + (++STATE.nextAssetId);
+      ++STATE.nextAssetId; var assetId = newLocalId('a');
       var asset = mkAsset(assetId, pnRaw || (STATE.assets.filter(function(a){ return String(a.campaignId)===String(campaignId); }).length + 1), campaignId, name, editorName, 'Low', '', 'V1');
       asset.category = category;
       asset.sparksCode = spark;
@@ -8635,7 +8696,7 @@ function renderReportingView() {
   var view     = STATE.reportingView     || 'table';
   var approval = STATE.reportingApproval || 'all';
 
-  var now = new Date();
+  var now = bizNow();
   var cy = now.getFullYear(), cm = now.getMonth();
   var MONTH_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -9269,7 +9330,7 @@ function renderContentView() {
   var selectedCC = STATE.contentCountryFilter || 'all';
   var period     = STATE.contentPeriod || 'monthly';
   var countries  = STATE.countries.map(function(c) { return c.code; });
-  var now = new Date(); var cy = now.getFullYear(); var cm = now.getMonth();
+  var now = bizNow(); var cy = now.getFullYear(); var cm = now.getMonth();
 
   // ── build date range (identical logic to Reporting tab) ──
   var range, periodPickerHtml;
@@ -11683,7 +11744,7 @@ var App = {
     var category = STATE.reportingCategory || 'all';
     var approval = STATE.reportingApproval || 'all';
     var SIMPLE   = ['IT','ES','PL'];
-    var now = new Date();
+    var now = bizNow();
     var cy = now.getFullYear(), cm = now.getMonth();
     var MONTH_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -11794,7 +11855,7 @@ var App = {
     var category = STATE.reportingCategory || 'all';
     var approval = STATE.reportingApproval || 'all';
     var SIMPLE   = ['IT','ES','PL'];
-    var now = new Date();
+    var now = bizNow();
     var cy = now.getFullYear(), cm = now.getMonth();
     var MONTH_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -13096,7 +13157,7 @@ var App = {
       newName = source.name + ' (copy ' + suffix + ')';
       suffix++;
     }
-    var newId = STATE.nextCampaignId++;
+    STATE.nextCampaignId++; var newId = newLocalId('c');
     var cloned = {
       id: newId,
       country: source.country,
@@ -13118,7 +13179,7 @@ var App = {
     if (includeVideos) {
       var sourceAssets = STATE.assets.filter(function(a) { return a.campaignId === source.id; });
       sourceAssets.forEach(function(a) {
-        var newAssetId = STATE.nextAssetId++;
+        STATE.nextAssetId++; var newAssetId = newLocalId('a');
         var copy = {};
         Object.keys(a).forEach(function(k) { copy[k] = a[k]; });
         copy.id = newAssetId;
