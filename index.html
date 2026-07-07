@@ -2027,7 +2027,13 @@ var Fb = {
         if (!hasStreetwear) {
           STATE.categories.push({ name: 'Streetwear', color: CATEGORY_PALETTE[5] });
         }
-        var CANONICAL_ORDER = ['Sneakers','TCG','Stone Island','Luxury','Vintage','Bags and Accessories','Y2K','Streetwear','Health and Beauty','Jewellery','Essentials','BTS'];
+        // Ensure Womenswear exists (added when Avy became its category head).
+        var hasWomenswear = STATE.categories.some(function(c) { return c.name === 'Womenswear'; });
+        if (!hasWomenswear) {
+          STATE.categories.push({ name: 'Womenswear', color: CATEGORY_PALETTE[0] });
+          setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
+        }
+        var CANONICAL_ORDER = ['Sneakers','TCG','Stone Island','Luxury','Vintage','Bags and Accessories','Y2K','Streetwear','Health and Beauty','Jewellery','Womenswear','Essentials','BTS'];
         STATE.categories.sort(function(a, b) {
           var ai = CANONICAL_ORDER.indexOf(a.name);
           var bi = CANONICAL_ORDER.indexOf(b.name);
@@ -2035,6 +2041,12 @@ var Fb = {
           if (bi === -1) bi = CANONICAL_ORDER.length;
           return ai - bi;
         });
+      }
+      // Migration: seed Avy's category-head Slack ID if a stored snapshot's
+      // categoryHeadSlackIds map predates Womenswear/Avy being added.
+      if (STATE.categoryHeadSlackIds && !STATE.categoryHeadSlackIds.Avy) {
+        STATE.categoryHeadSlackIds.Avy = 'U08L1NJB1LG';
+        setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
       }
       // Migration: add Elsa to dailyThreads if not present.
       if (STATE.dailyThreads && !STATE.dailyThreads.hasOwnProperty('Elsa')) {
@@ -2656,6 +2668,7 @@ var DEFAULT_CATEGORIES = [
   { name: 'Streetwear',            color: CATEGORY_PALETTE[5] }, // red (reuse)
   { name: 'Health and Beauty',     color: CATEGORY_PALETTE[1] }, // teal (reuse)
   { name: 'Jewellery',             color: CATEGORY_PALETTE[7] }, // sage (reuse)
+  { name: 'Womenswear',            color: CATEGORY_PALETTE[0] }, // purple (reuse)
   { name: 'Essentials',            color: CATEGORY_PALETTE[1] }, // teal
   { name: 'BTS',                   color: CATEGORY_PALETTE[2] }  // amber
 ];
@@ -2689,6 +2702,7 @@ var CATEGORY_HEADS = {
   'Streetwear':           'Jacob',
   'Watches':              'Jacob',
   'Mixed Deals':          'Anand',
+  'Womenswear':           'Avy',
   'Event - Stone Island': 'Millie'
 };
 
@@ -2807,7 +2821,7 @@ var STATE = {
   // when set, asset-change notifications mention the head so they get pinged.
   // Heads are derived from category via CATEGORY_HEADS; this map is keyed by
   // the head's display name (Anand, Hanyan, Jacob, Cristian).
-  categoryHeadSlackIds: { Anand: '', Hanyan: '', Jacob: '', Cristian: '', Millie: '' },
+  categoryHeadSlackIds: { Anand: '', Hanyan: '', Jacob: '', Cristian: '', Millie: '', Avy: 'U08L1NJB1LG' },
   // Overrides for CATEGORY_HEADS — keyed by category name, value is the head's
   // display name. When set, getCategoryHead() returns this instead of the
   // hardcoded default. New categories added via Config use this map.
