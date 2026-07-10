@@ -233,6 +233,10 @@
   tbody tr:hover td { background: rgba(127,119,221,0.03); }
   @keyframes rowFlash { 0%,100% { background: transparent; } 20%,60% { background: rgba(127,119,221,0.18); } }
   tr.row-highlight-flash td { animation: rowFlash 2.5s ease; }
+  /* Purple flash for a block element (cat-head section header when arriving from a
+     "Tracker" deep link). Rounded so the highlight hugs the header nicely. */
+  @keyframes blockFlash { 0%,100% { background: transparent; } 20%,60% { background: rgba(127,119,221,0.22); } }
+  .block-highlight-flash { animation: blockFlash 2.5s ease; border-radius: 8px; }
   /* Cat Heads Review approve animation: the approved card swipes right + fades while its
      height collapses to 0, so the cards below slide up to take its place. Only the
      .cr-card-approving state transitions — a normal re-render never animates. */
@@ -5623,7 +5627,7 @@ function renderCampaignsView() {
   return '<div class="content"><div class="camp-header">' +
     '<div class="breadcrumb"><span class="breadcrumb-flag-inline flag-' + camp.country + '">' + camp.country + '</span><span class="breadcrumb-country">' + (country ? country.name : camp.country) + '</span><span class="breadcrumb-sep">/</span><span>Campaign #' + camp.rank + '</span></div>' +
     '<div class="camp-title-row"><div class="camp-title" style="display:flex;align-items:center;gap:8px;"><span class="ad-status-dot ' + (camp.killedDate ? 'dot-killed' : camp.goneLive ? 'dot-live' : 'dot-notlive') + '" style="width:10px;height:10px;flex-shrink:0;" title="' + (camp.killedDate ? (camp.goneLive ? 'Live ' + formatDate(camp.goneLive) + ' → Killed ' + formatDate(camp.killedDate) : 'Killed ' + formatDate(camp.killedDate) + ' (no live date)') : camp.goneLive ? 'Live since ' + formatDate(camp.goneLive) : 'Not yet live') + '"></span>' + escapeHtml(camp.name) + '</div>' + typeBadgeHtml(camp.type) + categoryBadgeSelectHtml(camp) + '<button class="edit-btn ml-auto" onclick="App.toggleCampaignDone()" title="' + (camp.done ? 'Mark as active' : 'Mark as done') + '" style="' + (camp.done ? 'color:#22c55e;border-color:#22c55e;' : '') + '">' + (camp.done ? '✓ Done' : 'Mark Done') + '</button>' +
-      '<button class="edit-btn" onclick="App.showEditCampaignModal()">Edit</button>' + (roleAtLeast('admin') ? '<button class="edit-btn del-camp-btn" onclick="App.deleteCampaign()">Delete</button>' : '') + '<div class="camp-actions-menu-wrap"><button class="edit-btn camp-actions-menu-btn" onclick="App.toggleCampActionsMenu(event)" title="More actions">\u22EE</button><div id="camp-actions-menu" class="camp-actions-menu" style="display:none;"><button class="camp-actions-menu-item" onclick="App.copyCampaignLink(\'' + camp.id + '\')">\u{1F517} Copy link</button><button class="camp-actions-menu-item" onclick="App.exportCampaignPdf(\'' + camp.id + '\')">\u{1F4C4} Export as PDF</button><button class="camp-actions-menu-item" onclick="App.exportCampaignSlack(\'' + camp.id + '\')">\u{1F4AC} Export for Slack</button></div></div></div>' +
+      '<button class="edit-btn" onclick="App.showEditCampaignModal()">Edit</button>' + (roleAtLeast('admin') ? '<button class="edit-btn del-camp-btn" onclick="App.deleteCampaign()">Delete</button>' : '') + '<div class="camp-actions-menu-wrap"><button class="edit-btn camp-actions-menu-btn" onclick="App.toggleCampActionsMenu(event)" title="More actions">\u22EE</button><div id="camp-actions-menu" class="camp-actions-menu" style="display:none;"><button class="camp-actions-menu-item" onclick="App.copyCampaignLink(\'' + camp.id + '\')">\u{1F517} Copy link</button><button class="camp-actions-menu-item" onclick="App.exportCampaignPdf(\'' + camp.id + '\')">\u{1F4C4} Export as PDF</button><button class="camp-actions-menu-item" onclick="App.exportCampaignSlack(\'' + camp.id + '\')">\u{1F4AC} Export for Slack</button><button class="camp-actions-menu-item" onclick="App.syncAssetCategoriesToCampaign(\'' + camp.id + '\')">\u{1F3F7}️ Sync video categories</button></div></div></div>' +
     (briefUrl
       ? '' // Brief is a URL \u2014 the pill above covers it, skip the text row to avoid duplication
       : '<div class="camp-brief">' + (camp.brief ? escapeHtml(camp.brief) : '<em style="color:var(--text3)">No brief set</em>') + '</div>') +
@@ -9572,11 +9576,12 @@ function renderCatReviewView() {
     var catsLabel = catOrder.join(' · ');
 
     var initials = head.slice(0, 2).toUpperCase();
-    var headHeader = '<div onclick="App.toggleCatReviewHead(\'' + escapeHtml(headKey) + '\')" style="display:flex; align-items:center; gap:12px; margin-bottom:12px; cursor:pointer; user-select:none;">' +
+    var headHeader = '<div id="cr-head-' + encodeURIComponent(head) + '" onclick="App.toggleCatReviewHead(\'' + escapeHtml(headKey) + '\')" style="display:flex; align-items:center; gap:12px; margin-bottom:12px; cursor:pointer; user-select:none; padding:4px 6px;">' +
         '<span style="font-size:11px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:12px;">' + headChevron + '</span>' +
         '<div style="width:36px; height:36px; border-radius:50%; background:var(--accent-dim); color:var(--accent2); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:13px;">' + escapeHtml(initials) + '</div>' +
         '<div style="flex:1;"><div style="font-weight:600; font-size:15px; color:var(--text1);">' + escapeHtml(head) + '</div>' +
         (catsLabel ? '<div style="font-size:12px; color:var(--text3);">' + escapeHtml(catsLabel) + '</div>' : '') + '</div>' +
+        '<button onclick="event.stopPropagation();App.sendCatHeadReviewToSlack(\'' + escapeHtml(headKey) + '\')" title="Send this whole review list to ' + escapeHtml(head) + '’s Slack thread" style="border:1px solid var(--border2); background:var(--accent-dim); color:var(--accent2); padding:4px 12px; font-size:12px; border-radius:20px; cursor:pointer; white-space:nowrap;">\u{1F4E4} Send to Slack</button>' +
         '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + headAssets.length + ' pending</span>' +
       '</div>';
 
@@ -9629,8 +9634,17 @@ function renderCatReviewCard(a, hideCatBadge) {
   if (readyDate) meta.push('For review since ' + escapeHtml(readyDate));
   meta.push(catReviewWaitLabel(since));
   if (country) meta.push(escapeHtml(country));
+  // Tracker deep link — jumps to this exact video on its campaign and flashes the row
+  // purple. Uses an in-app handler (no reload) so it works whether opened here or via a
+  // pasted #campaign=…&asset=… URL. Only shown when we can resolve the campaign.
+  var trackerLink = (camp && a.campaignId && a.id)
+    ? ' · <a href="#campaign=' + encodeURIComponent(a.campaignId) + '&asset=' + encodeURIComponent(a.id) + '"' +
+        ' onclick="event.preventDefault();App.openAssetInTracker(\'' + escapeHtml(String(a.campaignId).replace(/'/g, "\\'")) + '\',\'' + id + '\')"' +
+        ' style="color:var(--accent2); text-decoration:none;">Tracker ↗</a>'
+    : '';
   var metaLine = '<div style="font-size:12px; color:var(--text3); margin-top:2px;">' + meta.join(' · ') +
-    (videoUrl ? ' · <a href="' + escapeHtml(videoUrl) + '" target="_blank" style="color:var(--accent2); text-decoration:none;">Video ↗</a>' : '') + '</div>';
+    (videoUrl ? ' · <a href="' + escapeHtml(videoUrl) + '" target="_blank" style="color:var(--accent2); text-decoration:none;">Video ↗</a>' : '') +
+    trackerLink + '</div>';
   // Category badge on the card — shown when the card is not already under a category
   // group header (e.g. a flat list); suppressed inside a per-category group.
   var catBadge = (!hideCatBadge && a.category) ? '<span style="margin-left:8px; vertical-align:middle;">' + categoryBadgeHtml(a.category) + '</span>' : '';
@@ -11551,6 +11565,12 @@ function buildBatchMessage(recipient, items, opts) {
     var base = (typeof location !== 'undefined') ? (location.origin + location.pathname) : '';
     return base ? '<' + base + '#campaign=' + it.campaignId + '&asset=' + it.assetId + '|Tracker ↗>' : null;
   }
+  // Deep link straight to the Cat Heads Review tab (no specific video). On open, the
+  // signed-in manager's own section flashes purple — see the #catReview boot handler.
+  function catReviewTrackerLink() {
+    var base = (typeof location !== 'undefined') ? (location.origin + location.pathname) : '';
+    return base ? '<' + base + '#catReview|Tracker ↗>' : null;
+  }
 
   function linksFor(it) {
     var status = it.status || '';
@@ -11592,6 +11612,13 @@ function buildBatchMessage(recipient, items, opts) {
 
   var blocks = groupOrder.map(function(header) {
     var group = groupMap[header];
+    // Category-head review digest: skip the per-video list entirely. The manager just
+    // gets the running total header ("@Name you have N pending review — Cat: n, …") and
+    // a single Tracker link that drops them on the Cat Heads Review tab.
+    if ((group[0].status || group[0].change) === 'For Review (Category Head)') {
+      var crl = catReviewTrackerLink();
+      return header + (crl ? '\n' + crl : '');
+    }
     var itemBlocks = group.map(function(it, idx) {
       var name = it.name || '';
       var links = linksFor(it);
@@ -13299,6 +13326,52 @@ var App = {
     if (menu) menu.style.display = 'none';
   },
 
+  // Jump to a specific video on its campaign (from a Cat Heads Review "Tracker" link).
+  // Selects the campaign, expands its country, switches to the Campaigns tab, then
+  // scrolls the asset row into view and flashes it purple. In-app (no reload) so it
+  // works from anywhere the link is clicked.
+  openAssetInTracker: function(campaignId, assetId) {
+    var camp = findCampaignById(campaignId);
+    if (!camp) { if (typeof toast === 'function') toast('Campaign not found', 'error'); return; }
+    STATE.activeSubCampaignId = camp.id;
+    STATE.expandedCountries[camp.country] = true;
+    STATE.tab = 'campaigns';
+    if (typeof saveState === 'function') saveState();
+    render();
+    setTimeout(function() {
+      var row = document.querySelector('tr[data-asset-id="' + assetId + '"]');
+      if (row) {
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        row.classList.add('row-highlight-flash');
+        setTimeout(function() { row.classList.remove('row-highlight-flash'); }, 2500);
+      }
+    }, 400);
+  },
+
+  // Bulk-set every video in a campaign to that campaign's own category. Handy when a
+  // campaign's category changed after its videos were created, or videos were imported
+  // with a stale/default category — keeps Cat Heads Review routing (which keys off
+  // asset.category) correct.
+  syncAssetCategoriesToCampaign: function(campaignId) {
+    var menu = document.getElementById('camp-actions-menu');
+    if (menu) menu.style.display = 'none';
+    var camp = findCampaignById(campaignId);
+    if (!camp) return;
+    var cat = (camp.category || '').trim();
+    if (!cat) { if (typeof toast === 'function') toast('This campaign has no category set', 'error'); return; }
+    var changed = 0;
+    STATE.assets.forEach(function(a) {
+      if (a.campaignId === camp.id && a.category !== cat) { a.category = cat; changed++; }
+    });
+    if (changed) {
+      logAction('updated', 'Set ' + changed + ' video' + (changed === 1 ? '' : 's') + ' to campaign category "' + cat + '" (' + camp.name + ')');
+      if (typeof toast === 'function') toast('Set ' + changed + ' video' + (changed === 1 ? '' : 's') + ' to ' + cat, 'success');
+    } else {
+      if (typeof toast === 'function') toast('All videos already match "' + cat + '"', 'success');
+    }
+    render();
+  },
+
   // Open a print-friendly version of the campaign in a new window and trigger the browser's
   // print dialog. The user can save as PDF from there. No external library needed.
   exportCampaignPdf: function(campaignId) {
@@ -14335,6 +14408,64 @@ var App = {
   onEstDeliveryFilter: function(v) { STATE.estDeliveryFilter = v; render(); },
   // --- Cat Heads Review tab ---
   setCatReviewWindow: function(v) { STATE.catReviewWindow = v; render(); },
+
+  // Send a category head's whole review digest to Slack — the same "@Name you have N
+  // pending review — Cat: n" header + Tracker link that the auto-notification builds,
+  // computed live from every video currently awaiting this head (not window-filtered).
+  // Prefers the head's daily thread (when a bot token is set) so it lands as a thread
+  // reply; otherwise posts to the Category Head webhook (falls back to the global one).
+  sendCatHeadReviewToSlack: function(head) {
+    head = head || currentCatHead();
+    if (!head) { toast('Couldn’t resolve a category head to send for', 'error'); return; }
+    var items = catReviewPendingAssets()
+      .filter(function(a) { return getCategoryHead(a.category) === head; })
+      .map(function(a) {
+        var camp = findCampaignById(a.campaignId);
+        return {
+          name: a.name, status: 'For Review (Category Head)', category: a.category,
+          campaignId: a.campaignId, assetId: a.id, editor: a.editor,
+          country: camp && camp.country, finalVideo: a.finalVideo, editingBrief: a.editingBrief
+        };
+      });
+    if (!items.length) { toast('No videos pending review for ' + head, ''); return; }
+
+    var recipient = 'CHQ:' + head;
+    var msg = buildBatchMessage(recipient, items);
+    var url = resolveWebhookForEditor(recipient, items);
+    if (!webhookValid(url)) {
+      toast('No valid Slack webhook — set the Category Head webhook in Automations', 'error');
+      App.setTab('automations');
+      return;
+    }
+    // Route to a representative category's daily thread when one is live for today.
+    var chqCategory = items[0].category || '';
+    var thread = chqCategory ? resolveDailyThreadForCategory(chqCategory) : null;
+    var useThread = !!(thread && (STATE.slackBotToken || '').trim());
+
+    toast('Sending to Slack…', '');
+    var primary = useThread ? postToThreadPreferred(thread, url, msg) : postToSlack(url, msg);
+    primary.then(function(r) {
+      if (!r.ok) {
+        if (useThread) { toast('Thread post failed: "' + r.body + '"', 'error'); return; }
+        toast('Slack rejected the message: "' + r.body + '"', 'error');
+        return;
+      }
+      logAction('notified', 'CHQ ' + head + ' — sent review digest (' + items.length + ' video' + (items.length === 1 ? '' : 's') + ') ' + (useThread ? 'in daily thread' : 'to Slack'));
+      toast('✓ Sent to Slack' + (useThread ? ' (thread)' : ''), 'success');
+    }).catch(function() {
+      if (useThread) { toast('Thread post failed (network error)', 'error'); return; }
+      // Plain-webhook blind fallback (no-cors) — can't confirm delivery, but better than nothing.
+      fetch(url, {
+        method: 'POST', mode: 'no-cors',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'payload=' + encodeURIComponent(JSON.stringify({ text: msg, unfurl_links: false, unfurl_media: false }))
+      }).then(function() {
+        logAction('notified', 'CHQ ' + head + ' — blind-sent review digest (' + items.length + ')');
+        toast('Sent to Slack (unconfirmed)', '');
+      }).catch(function() { toast('Send failed', 'error'); });
+    });
+  },
+
   toggleCatReviewHead: function(head) {
     if (!STATE.catReviewHeadCollapsed) STATE.catReviewHeadCollapsed = {};
     STATE.catReviewHeadCollapsed[head] = !STATE.catReviewHeadCollapsed[head];
@@ -14973,6 +15104,24 @@ bootApp = function() {
     // and expands its country). Guard ensures this runs only once per session.
     if (!window.__deepLinkApplied) {
       window.__deepLinkApplied = true;
+      // #catReview → open the Cat Heads Review tab and flash the signed-in manager's own
+      // section purple (resolved from their login via currentCatHead()). This is where the
+      // category-head "you have N pending reviews" Slack digest links to.
+      if (/^#catReview\b/.test(location.hash || '')) {
+        STATE.tab = 'catReview';
+        if (typeof saveState === 'function') saveState();
+        render();
+        setTimeout(function() {
+          var mine = (typeof currentCatHead === 'function') ? currentCatHead() : '';
+          if (!mine) return;
+          var el = document.getElementById('cr-head-' + encodeURIComponent(mine));
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.classList.add('block-highlight-flash');
+            setTimeout(function() { el.classList.remove('block-highlight-flash'); }, 2500);
+          }
+        }, 400);
+      }
       var match = (location.hash || '').match(/^#campaign=([^&]+)(?:&asset=([^&]+))?/);
       if (match) {
         var targetId = match[1];
