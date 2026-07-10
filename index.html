@@ -2062,6 +2062,26 @@ var Fb = {
           return ai - bi;
         });
       }
+      // Migration: normalize category CASING on assets + campaigns to the canonical
+      // spelling in STATE.categories. History left categories stored inconsistently
+      // (e.g. "LUXURY" on an asset vs "Luxury" in the picker), which silently broke
+      // exact-match lookups like per-category Slack thread routing. Snap every
+      // case-insensitive match to the canonical name; leave genuinely-unknown
+      // categories untouched so we never clobber data. Idempotent — no-op once clean.
+      (function normalizeCategoryCasing() {
+        var canon = {};
+        (STATE.categories || []).forEach(function(c) { if (c && c.name) canon[String(c.name).toLowerCase()] = c.name; });
+        if (!Object.keys(canon).length) return;
+        var fixed = 0;
+        var fix = function(obj) {
+          if (!obj || !obj.category) return;
+          var want = canon[String(obj.category).toLowerCase()];
+          if (want && want !== obj.category) { obj.category = want; fixed++; }
+        };
+        (STATE.assets || []).forEach(fix);
+        (STATE.campaigns || []).forEach(fix);
+        if (fixed) setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
+      })();
       // Migration: seed Avy's category-head Slack ID if a stored snapshot's
       // categoryHeadSlackIds map predates Womenswear/Avy being added.
       if (STATE.categoryHeadSlackIds && !STATE.categoryHeadSlackIds.Avy) {
@@ -10750,8 +10770,18 @@ function resolveDailyThreadForEditor(editor) {
 }
 
 // Returns the daily-thread descriptor for a category IFF its date matches today.
+// Category matching is case-insensitive, mirroring getCategoryHead() — otherwise a
+// video stored as "WOMENSWEAR" resolves the right head (Avy) but misses the thread slot
+// set under "Womenswear", silently falling back to the shared Category Head channel.
 function resolveDailyThreadForCategory(category) {
-  var t = STATE.catHeadDailyThreads && STATE.catHeadDailyThreads[category];
+  var threads = STATE.catHeadDailyThreads || {};
+  var t = threads[category];
+  if (!t && category) {
+    var keyLower = String(category).toLowerCase();
+    for (var k in threads) {
+      if (Object.prototype.hasOwnProperty.call(threads, k) && k.toLowerCase() === keyLower) { t = threads[k]; break; }
+    }
+  }
   if (!t) return null;
   if (t.date !== todayUK()) return null;
   if (!t.channelId || !t.threadTs) return null;
