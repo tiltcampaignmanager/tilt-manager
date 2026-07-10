@@ -9470,10 +9470,15 @@ function renderCatReviewView() {
       toggle + '</div>';
 
   if (pending.length === 0) {
-    return '<div style="padding:28px 32px; max-width:920px;">' + header +
+    return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header +
       '<div style="padding:60px 20px; text-align:center; color:var(--text3); font-size:14px; background:var(--bg2); border:1px solid var(--border); border-radius:12px;">' +
-      'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.</div></div>';
+      'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.</div></div></div>';
   }
+
+  // Collapse state maps (persisted in STATE, mirrors reportingCollapsed). Heads and
+  // categories default to expanded; only keys explicitly toggled to true are collapsed.
+  var headCollapsed = STATE.catReviewHeadCollapsed || {};
+  var catCollapsed  = STATE.catReviewCatCollapsed  || {};
 
   var sections = heads.map(function(head) {
     var headAssets = pending.filter(function(a) { return getCategoryHead(a.category) === head; });
@@ -9482,24 +9487,38 @@ function renderCatReviewView() {
     var byCat = {}, catOrder = [];
     headAssets.forEach(function(a) { var c = a.category || '—'; if (!byCat[c]) { byCat[c] = []; catOrder.push(c); } byCat[c].push(a); });
 
+    var headKey = head.replace(/'/g, "\\'");
+    var headOpen = !headCollapsed[head];
+    var headChevron = headOpen ? '▼' : '▶';
+
     var initials = head.slice(0, 2).toUpperCase();
     var catsLabel = catOrder.join(' · ');
-    var headHeader = '<div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">' +
+    var headHeader = '<div onclick="App.toggleCatReviewHead(\'' + escapeHtml(headKey) + '\')" style="display:flex; align-items:center; gap:12px; margin-bottom:12px; cursor:pointer; user-select:none;">' +
+        '<span style="font-size:11px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:12px;">' + headChevron + '</span>' +
         '<div style="width:36px; height:36px; border-radius:50%; background:var(--accent-dim); color:var(--accent2); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:13px;">' + escapeHtml(initials) + '</div>' +
         '<div style="flex:1;"><div style="font-weight:600; font-size:15px; color:var(--text1);">' + escapeHtml(head) + '</div>' +
         (catsLabel ? '<div style="font-size:12px; color:var(--text3);">' + escapeHtml(catsLabel) + '</div>' : '') + '</div>' +
         '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + headAssets.length + ' pending</span>' +
       '</div>';
 
-    var catBlocks = catOrder.map(function(cat) {
-      var cards = byCat[cat].map(function(a) { return renderCatReviewCard(a); }).join('');
-      return '<div style="font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text3); margin:14px 0 8px;">' + categoryBadgeHtml(cat) + '</div>' + cards;
+    var catBlocks = !headOpen ? '' : catOrder.map(function(cat) {
+      var catKey = head + '||' + cat;
+      var catKeyJs = catKey.replace(/'/g, "\\'");
+      var catOpen = !catCollapsed[catKey];
+      var catChevron = catOpen ? '▼' : '▶';
+      var cards = catOpen ? byCat[cat].map(function(a) { return renderCatReviewCard(a); }).join('') : '';
+      var catHeader = '<div onclick="App.toggleCatReviewCat(\'' + escapeHtml(catKeyJs) + '\')" style="display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; margin:14px 0 8px;">' +
+          '<span style="font-size:9px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:12px;">' + catChevron + '</span>' +
+          '<span style="font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text3);">' + categoryBadgeHtml(cat) + '</span>' +
+          '<span style="font-size:10px; font-family:\'JetBrains Mono\',monospace; color:var(--text3); background:var(--bg4); padding:1px 7px; border-radius:4px;">' + byCat[cat].length + '</span>' +
+        '</div>';
+      return catHeader + cards;
     }).join('');
 
     return '<div style="margin-bottom:32px;">' + headHeader + catBlocks + '</div>';
   }).join('');
 
-  return '<div style="padding:28px 32px; max-width:920px;">' + header + sections + '</div>';
+  return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header + sections + '</div></div>';
 }
 
 // One video row on the Cat Heads Review tab: status, actions, and comment thread.
@@ -9541,7 +9560,17 @@ function renderCatReviewCard(a) {
       '</div>';
   }).join('');
 
-  var commentBox = '<div style="border-top:1px solid var(--border); margin-top:12px; padding-top:12px;">' +
+  // Comments are collapsed by default (optional) — a toggle reveals the thread and the
+  // input box, so the card stays compact until you actually want to discuss a video.
+  var commentsOpen = !!(STATE.catReviewCommentsOpen && STATE.catReviewCommentsOpen[a.id]);
+  var commentCount = comments.length;
+  var commentToggle = '<button onclick="App.toggleCatReviewComments(\'' + id + '\')" style="border:none; background:transparent; color:var(--text3); font-size:12px; padding:0; cursor:pointer; display:flex; align-items:center; gap:6px;">' +
+      '<span style="font-family:\'JetBrains Mono\',monospace; font-size:10px;">' + (commentsOpen ? '▼' : '▶') + '</span>' +
+      '<span>💬 Comment' + (commentCount === 1 ? '' : 's') + (commentCount ? ' (' + commentCount + ')' : '') + '</span>' +
+    '</button>';
+
+  var commentPanel = !commentsOpen ? '' :
+    '<div style="margin-top:12px;">' +
       (thread || '<div style="font-size:12px; color:var(--text3); margin-bottom:10px;">No comments yet.</div>') +
       '<div style="display:flex; gap:8px; align-items:center;">' +
         '<input id="cr-c-' + id + '" type="text" placeholder="Add a comment…" ' +
@@ -9550,9 +9579,11 @@ function renderCatReviewCard(a) {
         '<button onclick="App.addCatReviewComment(\'' + id + '\')" style="border:1px solid var(--border2); background:var(--bg4); color:var(--text1); padding:7px 14px; font-size:13px; border-radius:6px; cursor:pointer;">Comment</button>' +
       '</div></div>';
 
+  var commentBox = '<div style="border-top:1px solid var(--border); margin-top:12px; padding-top:12px;">' + commentToggle + commentPanel + '</div>';
+
   return '<div style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px;">' +
       '<div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">' +
-        '<div style="flex:1; min-width:180px;"><div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(a.name || 'Untitled') + '</div>' + metaLine + '</div>' +
+        '<div style="flex:1; min-width:180px; overflow-wrap:anywhere; word-break:break-word;"><div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(a.name || 'Untitled') + '</div>' + metaLine + '</div>' +
         '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">' + statusPill + approveBtn + reviseBtn + '</div>' +
       '</div>' + commentBox + '</div>';
 }
@@ -14165,6 +14196,21 @@ var App = {
   onEstDeliveryFilter: function(v) { STATE.estDeliveryFilter = v; render(); },
   // --- Cat Heads Review tab ---
   setCatReviewWindow: function(v) { STATE.catReviewWindow = v; render(); },
+  toggleCatReviewHead: function(head) {
+    if (!STATE.catReviewHeadCollapsed) STATE.catReviewHeadCollapsed = {};
+    STATE.catReviewHeadCollapsed[head] = !STATE.catReviewHeadCollapsed[head];
+    render();
+  },
+  toggleCatReviewCat: function(catKey) {
+    if (!STATE.catReviewCatCollapsed) STATE.catReviewCatCollapsed = {};
+    STATE.catReviewCatCollapsed[catKey] = !STATE.catReviewCatCollapsed[catKey];
+    render();
+  },
+  toggleCatReviewComments: function(id) {
+    if (!STATE.catReviewCommentsOpen) STATE.catReviewCommentsOpen = {};
+    STATE.catReviewCommentsOpen[id] = !STATE.catReviewCommentsOpen[id];
+    render();
+  },
   addCatReviewComment: function(id) {
     var el = document.getElementById('cr-c-' + String(id).replace(/'/g, "\\'"));
     var text = el ? el.value : '';
