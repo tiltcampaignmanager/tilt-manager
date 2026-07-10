@@ -9528,9 +9528,10 @@ function renderCatReviewView() {
       'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.</div></div></div>';
   }
 
-  // Head collapse state (persisted in STATE, mirrors reportingCollapsed). Heads default
-  // to expanded; only keys explicitly toggled to true are collapsed.
+  // Head + category collapse state (persisted in STATE, mirrors reportingCollapsed).
+  // Both default to expanded; only keys explicitly toggled to true are collapsed.
   var headCollapsed = STATE.catReviewHeadCollapsed || {};
+  var catCollapsed  = STATE.catReviewCatCollapsed || {};
 
   var sections = heads.map(function(head) {
     // headAssets is already sorted oldest-ready-first (pending is pre-sorted), so this
@@ -9543,10 +9544,16 @@ function renderCatReviewView() {
     var headOpen = !headCollapsed[head];
     var headChevron = headOpen ? '▼' : '▶';
 
-    // Distinct categories this head owns among the pending videos — shown as a sub-label.
-    var catsSeen = {}, catsLabel = [];
-    headAssets.forEach(function(a) { var c = a.category || '—'; if (!catsSeen[c]) { catsSeen[c] = true; catsLabel.push(c); } });
-    catsLabel = catsLabel.join(' · ');
+    // Group this head's pending videos by category, preserving the oldest-waiting-first
+    // order (categories appear in the order their longest-waiting video does, and cards
+    // stay chronological within each category).
+    var catOrder = [], byCat = {};
+    headAssets.forEach(function(a) {
+      var c = a.category || '—';
+      if (!byCat[c]) { byCat[c] = []; catOrder.push(c); }
+      byCat[c].push(a);
+    });
+    var catsLabel = catOrder.join(' · ');
 
     var initials = head.slice(0, 2).toUpperCase();
     var headHeader = '<div onclick="App.toggleCatReviewHead(\'' + escapeHtml(headKey) + '\')" style="display:flex; align-items:center; gap:12px; margin-bottom:12px; cursor:pointer; user-select:none;">' +
@@ -9557,17 +9564,34 @@ function renderCatReviewView() {
         '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + headAssets.length + ' pending</span>' +
       '</div>';
 
-    // Flat chronological list — one card per video, oldest-waiting first.
-    var cards = !headOpen ? '' : headAssets.map(function(a) { return renderCatReviewCard(a); }).join('');
+    // Per-category sub-sections, each collapsible via App.toggleCatReviewCat (keyed
+    // head||category). Cards within a category stay oldest-waiting-first.
+    var catBlocks = !headOpen ? '' : catOrder.map(function(cat) {
+      var catAssets = byCat[cat];
+      var catKey = head + '||' + cat;
+      var catKeyEsc = catKey.replace(/'/g, "\\'");
+      var catOpen = !catCollapsed[catKey];
+      var catChevron = catOpen ? '▼' : '▶';
+      var catHeader = '<div onclick="App.toggleCatReviewCat(\'' + escapeHtml(catKeyEsc) + '\')" style="display:flex; align-items:center; gap:10px; margin:0 0 10px 6px; cursor:pointer; user-select:none;">' +
+          '<span style="font-size:10px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:10px;">' + catChevron + '</span>' +
+          categoryBadgeHtml(cat) +
+          '<span style="font-size:12px; color:var(--text3);">' + catAssets.length + ' video' + (catAssets.length === 1 ? '' : 's') + '</span>' +
+        '</div>';
+      // Category rides on the group header, so suppress the per-card badge inside a group.
+      var catCards = !catOpen ? '' : '<div style="margin-left:6px;">' + catAssets.map(function(a) { return renderCatReviewCard(a, true); }).join('') + '</div>';
+      return '<div style="margin-bottom:18px;">' + catHeader + catCards + '</div>';
+    }).join('');
 
-    return '<div style="margin-bottom:32px;">' + headHeader + cards + '</div>';
+    return '<div style="margin-bottom:32px;">' + headHeader + catBlocks + '</div>';
   }).join('');
 
   return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header + sections + '</div></div>';
 }
 
 // One video row on the Cat Heads Review tab: status, actions, and comment thread.
-function renderCatReviewCard(a) {
+// hideCatBadge omits the inline category pill (used when the card sits under a
+// per-category group header that already shows the category).
+function renderCatReviewCard(a, hideCatBadge) {
   var id = String(a.id).replace(/'/g, "\\'");
   var camp = findCampaignById(a.campaignId);
   var country = camp && camp.country ? camp.country : '';
@@ -9589,9 +9613,9 @@ function renderCatReviewCard(a) {
   if (country) meta.push(escapeHtml(country));
   var metaLine = '<div style="font-size:12px; color:var(--text3); margin-top:2px;">' + meta.join(' · ') +
     (videoUrl ? ' · <a href="' + escapeHtml(videoUrl) + '" target="_blank" style="color:var(--accent2); text-decoration:none;">Video ↗</a>' : '') + '</div>';
-  // Category badge shown on the card (the per-category grouping was replaced by a flat
-  // chronological list, so the category rides on each card instead).
-  var catBadge = a.category ? '<span style="margin-left:8px; vertical-align:middle;">' + categoryBadgeHtml(a.category) + '</span>' : '';
+  // Category badge on the card — shown when the card is not already under a category
+  // group header (e.g. a flat list); suppressed inside a per-category group.
+  var catBadge = (!hideCatBadge && a.category) ? '<span style="margin-left:8px; vertical-align:middle;">' + categoryBadgeHtml(a.category) + '</span>' : '';
 
   var approveBtn = '<button onclick="App.approveCatReviewCard(\'' + id + '\')" style="border:1px solid var(--border2); background:var(--green-bg); color:var(--green-text); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">✓ Approve</button>';
   var reviseBtn  = (qc !== 'Needs Revisions')
