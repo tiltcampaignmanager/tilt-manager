@@ -11145,8 +11145,16 @@ function testWebhookPing() {
 function dualPostToSecondaryThreads(recipient, items, msg) {
   var isChq = typeof recipient === 'string' && recipient.indexOf('CHQ:') === 0;
   if (isChq) {
+    // Only mirror the head's *verdicts* (Approved / Needs Revisions) into the editor's
+    // thread — those concern the editor. A "pending review" digest (change ==='for-review')
+    // is the cat head's own queue; the editor who just moved the video into review does
+    // NOT need a copy of "You have N videos PENDING REVIEW" in their thread. Skip it.
+    var chqEditorItems = items.filter(function(it) {
+      return it.change === 'category-approved' || it.change === 'category-needs-revisions';
+    });
+    if (chqEditorItems.length === 0) return;
     var posted = {};
-    items.forEach(function(item) {
+    chqEditorItems.forEach(function(item) {
       if (!item.editor || posted[item.editor]) return;
       var edThread = resolveDailyThreadForEditor(item.editor);
       if (!edThread) return;
@@ -11606,8 +11614,10 @@ function buildBatchMessage(recipient, items, opts) {
     var chM     = it.category ? mentionCategoryHead(it.category) : '';
     // Category-head "For Review" pings are a per-manager digest: one running total
     // with a per-category breakdown, computed live. All items in a CHQ batch share
-    // one head, so they collapse under this single header.
-    if (status === 'For Review (Category Head)') {
+    // one head, so they collapse under this single header. (Note: this is the HEAD's
+    // digest label. The editor's own "FOR REVIEW from <@head>" confirmation uses the
+    // 'For Review (Category Head)' label handled in the switch below.)
+    if (status === 'For Review Digest (Category Head)') {
       var bd = catHeadPendingBreakdown(getCategoryHead(it.category));
       var parts = bd.byCat.map(function(x) { return x.cat + ': ' + x.n; }).join(', ');
       return chM + ' You have ' + bd.total + ' video' + (bd.total === 1 ? '' : 's') +
@@ -11644,7 +11654,7 @@ function buildBatchMessage(recipient, items, opts) {
       case 'Approved':
         recipientMention = editorM; senderMention = pmM; break;
       case 'For Review (Category Head)':
-        recipientMention = chM; senderMention = editorM; break;
+        recipientMention = editorM; senderMention = chM; break;
       case 'Needs Revisions (Category Head)':
         recipientMention = editorM; senderMention = chM; break;
       case 'Approved (Category Head)':
@@ -11682,13 +11692,11 @@ function buildBatchMessage(recipient, items, opts) {
       var v = videoLink(it), b2 = briefLink(it);
       if (v)  lines.push(v);
       if (b2) lines.push(b2);
-    } else if (status === 'For Review (Category Head)') {
-      var vChq = videoLink(it), bChq = briefLink(it), rChq = rawLink(it);
-      if (vChq) lines.push(vChq);
-      if (bChq) lines.push(bChq);
-      if (rChq) lines.push(rChq);
     } else {
-      // Needs Revisions / Approved / CHQ Needs Revisions / CHQ Approved — Video only.
+      // CH For Review / Needs Revisions / Approved / CHQ Needs Revisions / CHQ Approved
+      // — Video only (name + link + Tracker). The head's digest labels never reach
+      // linksFor (they skip the per-video list), so this covers the editor-facing CH
+      // notifications: "<@editor> — FOR REVIEW / NEED REVISIONS / APPROVED from <@head>".
       var v2 = videoLink(it);
       if (v2) lines.push(v2);
     }
@@ -11714,7 +11722,7 @@ function buildBatchMessage(recipient, items, opts) {
     // Category-head digests (pending review / sent for revisions / approved): skip the
     // per-video list entirely. The manager just gets the running-total header and a
     // single Tracker link that drops them on the Cat Heads Review tab.
-    var _chDigestLabels = ['For Review (Category Head)', 'Revisions Digest (Category Head)', 'Approved Digest (Category Head)'];
+    var _chDigestLabels = ['For Review Digest (Category Head)', 'Revisions Digest (Category Head)', 'Approved Digest (Category Head)'];
     if (_chDigestLabels.indexOf(group[0].status || group[0].change) >= 0) {
       var crl = catReviewTrackerLink();
       return header + (crl ? '\n' + crl : '');
@@ -13053,7 +13061,14 @@ var App = {
         // Batch is keyed per manager (CHQ:<head>) so a head who owns several
         // categories gets ONE digest message. Header reads
         // "<@CategoryHead> you have N videos pending review — Cat: n, ...".
-        queueNotification('CHQ:' + chqHead, 'for-review', a, '', { statusLabel: 'For Review (Category Head)' });
+        queueNotification('CHQ:' + chqHead, 'for-review', a, '', { statusLabel: 'For Review Digest (Category Head)' });
+        // Also ping the assigned editor with a per-video confirmation that their
+        // submission is now in the head's review queue. Header reads
+        // "<@editor> — FOR REVIEW from <@CategoryHead>" (routes to the editor's batch
+        // / daily thread, video name + link + Tracker).
+        if (a.editor) {
+          queueNotification(a.editor, 'category-for-review', a, '', { statusLabel: 'For Review (Category Head)' });
+        }
       }
     }
     // Approved → ping the assigned editor; header reads
@@ -14540,7 +14555,7 @@ var App = {
       .map(function(a) {
         var camp = findCampaignById(a.campaignId);
         return {
-          name: a.name, status: 'For Review (Category Head)', category: a.category,
+          name: a.name, status: 'For Review Digest (Category Head)', category: a.category,
           campaignId: a.campaignId, assetId: a.id, editor: a.editor,
           country: camp && camp.country, finalVideo: a.finalVideo, editingBrief: a.editingBrief
         };
