@@ -1984,25 +1984,34 @@ var Fb = {
         STATE[k] = data[k];
       });
 
-      // Restore any today-dated threads that the incoming snapshot tried to null out.
+      // Reconcile today-dated local threads against the incoming snapshot PER SLOT.
+      // Two cases the whole-map last-write-wins merge gets wrong:
+      //   (a) incoming nulled a slot you set today  → restore your value
+      //   (b) incoming carries a DIFFERENT value for a slot you set today → a teammate's
+      //       stale open tab re-uploaded an old link, silently clobbering yours. Keep
+      //       whichever was saved most recently (setAt); legacy entries lack setAt and
+      //       count as oldest, so a freshly-set local value always wins over them.
+      // Both cases trigger a correction upload so Firestore + all tabs converge on the winner.
       var _threadsRescued = false;
+      function reconcileSlot(local, incoming) {
+        if (!incoming) return { win: local, changed: true };            // (a) null-clobber
+        if (incoming.url === local.url) return { win: incoming, changed: false }; // agree
+        var ls = local.setAt || 0, is = incoming.setAt || 0;             // (b) differ → recency
+        return ls > is ? { win: local, changed: true } : { win: incoming, changed: false };
+      }
       Object.keys(_savedThreads).forEach(function(ed) {
         if (!STATE.dailyThreads) STATE.dailyThreads = {};
-        if (!STATE.dailyThreads[ed]) {
-          STATE.dailyThreads[ed] = _savedThreads[ed];
-          _threadsRescued = true;
-        }
+        var r = reconcileSlot(_savedThreads[ed], STATE.dailyThreads[ed]);
+        if (r.changed) { STATE.dailyThreads[ed] = r.win; _threadsRescued = true; }
       });
       Object.keys(_savedCatThreads).forEach(function(cat) {
         if (!STATE.catHeadDailyThreads) STATE.catHeadDailyThreads = {};
-        if (!STATE.catHeadDailyThreads[cat]) {
-          STATE.catHeadDailyThreads[cat] = _savedCatThreads[cat];
-          _threadsRescued = true;
-        }
+        var r = reconcileSlot(_savedCatThreads[cat], STATE.catHeadDailyThreads[cat]);
+        if (r.changed) { STATE.catHeadDailyThreads[cat] = r.win; _threadsRescued = true; }
       });
-      if (_savedIntlThread && !STATE.intlDailyThread) {
-        STATE.intlDailyThread = _savedIntlThread;
-        _threadsRescued = true;
+      if (_savedIntlThread) {
+        var ri = reconcileSlot(_savedIntlThread, STATE.intlDailyThread);
+        if (ri.changed) { STATE.intlDailyThread = ri.win; _threadsRescued = true; }
       }
       // Push a correction upload so Firestore reflects the rescued threads.
       if (_threadsRescued) {
@@ -7394,7 +7403,7 @@ function renderAutomationsView() {
           '<span class="webhook-dot ' + dot + '" title="' + escapeHtml(dotTitle) + '" style="margin-left:auto;"></span>' +
         '</div>' +
         '<div class="webhook-row">' +
-          '<input type="text" id="daily-thread-input-' + ed + '" value="' + escapeHtml(url) + '" placeholder="https://workspace.slack.com/archives/Cxxxxx/pxxxxxxxxxxxxxx" style="flex:1;">' +
+          '<input type="text" id="daily-thread-input-' + ed + '" value="' + escapeHtml(url) + '" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="https://workspace.slack.com/archives/Cxxxxx/pxxxxxxxxxxxxxx" style="flex:1;">' +
           '<button class="save-btn" onclick="App.saveDailyThread(\'' + ed + '\')">Set</button>' +
           (t ? '<button class="edit-btn" onclick="App.clearDailyThread(\'' + ed + '\')" style="margin-left:4px;">Clear</button>' : '') +
         '</div>' + histHtml +
@@ -7446,7 +7455,7 @@ function renderAutomationsView() {
         '<span class="webhook-dot ' + dot + '" title="' + escapeHtml(dotTitle) + '" style="margin-left:auto;"></span>' +
       '</div>' +
       '<div class="webhook-row">' +
-        '<input type="text" id="intl-thread-input" value="' + escapeHtml(url) + '" placeholder="https://workspace.slack.com/archives/Cxxxxx/pxxxxxxxxxxxxxx" style="flex:1;">' +
+        '<input type="text" id="intl-thread-input" value="' + escapeHtml(url) + '" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="https://workspace.slack.com/archives/Cxxxxx/pxxxxxxxxxxxxxx" style="flex:1;">' +
         '<button class="save-btn" onclick="App.saveIntlDailyThread()">Set</button>' +
         (t ? '<button class="edit-btn" onclick="App.clearIntlDailyThread()" style="margin-left:4px;">Clear</button>' : '') +
       '</div>' + histHtml +
@@ -7484,7 +7493,7 @@ function renderAutomationsView() {
           '<span class="webhook-dot ' + dot + '" title="' + escapeHtml(dotTitle) + '" style="margin-left:auto;"></span>' +
         '</div>' +
         '<div class="webhook-row">' +
-          '<input type="text" id="' + safeId + '" value="' + escapeHtml(url) + '" placeholder="https://workspace.slack.com/archives/Cxxxxx/pxxxxxxxxxxxxxx" style="flex:1;">' +
+          '<input type="text" id="' + safeId + '" value="' + escapeHtml(url) + '" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="https://workspace.slack.com/archives/Cxxxxx/pxxxxxxxxxxxxxx" style="flex:1;">' +
           '<button class="save-btn" onclick="App.saveCatHeadDailyThread(\'' + safeId + '\', \'' + escapeHtml(cat.replace(/'/g, "\\'")) + '\')">Set</button>' +
           (t ? '<button class="edit-btn" onclick="App.clearCatHeadDailyThread(\'' + escapeHtml(cat.replace(/'/g, "\\'")) + '\')" style="margin-left:4px;">Clear</button>' : '') +
         '</div>' + histHtml +
@@ -9477,6 +9486,48 @@ function catHeadPendingBreakdown(head) {
   var byCat = {}, order = [], total = 0;
   catReviewPendingAssets().forEach(function(a) {
     if (getCategoryHead(a.category) !== head) return;
+    var c = a.category || '—';
+    if (byCat[c] === undefined) { byCat[c] = 0; order.push(c); }
+    byCat[c]++; total++;
+  });
+  return { total: total, byCat: order.map(function(c) { return { cat: c, n: byCat[c] }; }) };
+}
+
+// In-scope CHQ assets (UK/US) for one head sitting in a given categoryHeadQc state.
+function catHeadAssetsInState(head, qcState) {
+  return STATE.assets.filter(function(a) {
+    if (a.categoryHeadQc !== qcState) return false;
+    if (getCategoryHead(a.category) !== head) return false;
+    var camp = findCampaignById(a.campaignId);
+    var country = camp && camp.country;
+    return !!(country && CHQ_COUNTRY_ALLOWLIST[country]);
+  });
+}
+
+// Live "sent for revisions" breakdown for one head, split by category then editor:
+// { total, byCat: [{cat, editors: [{editor, n}]}] }. Powers the revisions digest —
+// e.g. "Sneakers: 1 (Patty), 2 (Sharm)".
+function catHeadRevisionsBreakdown(head) {
+  var byCat = {}, order = [], total = 0;
+  catHeadAssetsInState(head, 'Needs Revisions').forEach(function(a) {
+    var c = a.category || '—';
+    if (!byCat[c]) { byCat[c] = { ed: {}, edOrder: [] }; order.push(c); }
+    var ed = a.editor || 'Unassigned';
+    if (byCat[c].ed[ed] === undefined) { byCat[c].ed[ed] = 0; byCat[c].edOrder.push(ed); }
+    byCat[c].ed[ed]++; total++;
+  });
+  return { total: total, byCat: order.map(function(c) {
+    return { cat: c, editors: byCat[c].edOrder.map(function(e) { return { editor: e, n: byCat[c].ed[e] }; }) };
+  }) };
+}
+
+// Live "approved today" breakdown for one head: { total, byCat: [{cat, n}] }. Scoped to
+// today's approvals (chDateApproved) so the running total doesn't grow without bound.
+function catHeadApprovedBreakdown(head) {
+  var today = todayLocalISO();
+  var byCat = {}, order = [], total = 0;
+  catHeadAssetsInState(head, 'Approved').forEach(function(a) {
+    if (a.chDateApproved !== today) return;
     var c = a.category || '—';
     if (byCat[c] === undefined) { byCat[c] = 0; order.push(c); }
     byCat[c]++; total++;
@@ -11559,8 +11610,26 @@ function buildBatchMessage(recipient, items, opts) {
     if (status === 'For Review (Category Head)') {
       var bd = catHeadPendingBreakdown(getCategoryHead(it.category));
       var parts = bd.byCat.map(function(x) { return x.cat + ': ' + x.n; }).join(', ');
-      return chM + ' you have ' + bd.total + ' video' + (bd.total === 1 ? '' : 's') +
-        ' pending review' + (parts ? ' — ' + parts : '');
+      return chM + ' You have ' + bd.total + ' video' + (bd.total === 1 ? '' : 's') +
+        ' PENDING REVIEW' + (parts ? ' — ' + parts : '');
+    }
+    // Category-head "sent for revisions" digest — per-category, per-editor counts:
+    // "<@head> You have 2 videos sent for REVISIONS — Sneakers: 1 (Patty), 2 (Sharm)".
+    if (status === 'Revisions Digest (Category Head)') {
+      var rb = catHeadRevisionsBreakdown(getCategoryHead(it.category));
+      var rparts = rb.byCat.map(function(x) {
+        return x.cat + ': ' + x.editors.map(function(e) { return e.n + ' (' + e.editor + ')'; }).join(', ');
+      }).join(' · ');
+      return chM + ' You have ' + rb.total + ' video' + (rb.total === 1 ? '' : 's') +
+        ' sent for REVISIONS' + (rparts ? ' — ' + rparts : '');
+    }
+    // Category-head "approved today" digest:
+    // "<@head> You have APPROVED 2 videos — Sneakers: 1".
+    if (status === 'Approved Digest (Category Head)') {
+      var ab = catHeadApprovedBreakdown(getCategoryHead(it.category));
+      var aparts = ab.byCat.map(function(x) { return x.cat + ': ' + x.n; }).join(', ');
+      return chM + ' You have APPROVED ' + ab.total + ' video' + (ab.total === 1 ? '' : 's') +
+        (aparts ? ' — ' + aparts : '');
     }
     var recipientMention = '';
     var senderMention = '';
@@ -11642,10 +11711,11 @@ function buildBatchMessage(recipient, items, opts) {
 
   var blocks = groupOrder.map(function(header) {
     var group = groupMap[header];
-    // Category-head review digest: skip the per-video list entirely. The manager just
-    // gets the running total header ("@Name you have N pending review — Cat: n, …") and
-    // a single Tracker link that drops them on the Cat Heads Review tab.
-    if ((group[0].status || group[0].change) === 'For Review (Category Head)') {
+    // Category-head digests (pending review / sent for revisions / approved): skip the
+    // per-video list entirely. The manager just gets the running-total header and a
+    // single Tracker link that drops them on the Cat Heads Review tab.
+    var _chDigestLabels = ['For Review (Category Head)', 'Revisions Digest (Category Head)', 'Approved Digest (Category Head)'];
+    if (_chDigestLabels.indexOf(group[0].status || group[0].change) >= 0) {
       var crl = catReviewTrackerLink();
       return header + (crl ? '\n' + crl : '');
     }
@@ -12988,7 +13058,8 @@ var App = {
     }
     // Approved → ping the assigned editor; header reads
     // "<@editor> — Approved from <@CategoryHead>". Routes to the editor's batch
-    // so it lands in their daily thread.
+    // so it lands in their daily thread. Also queue a per-head digest so the head
+    // gets a running "You have APPROVED N videos" tally in their own thread.
     if (newVal === 'Approved' && old !== 'Approved' && a.editor) {
       var campA = findCampaignById(a.campaignId);
       var countryA = campA && campA.country;
@@ -12996,13 +13067,28 @@ var App = {
         queueNotification(a.editor, 'category-approved', a, '', { statusLabel: 'Approved (Category Head)' });
       }
     }
+    if (newVal === 'Approved' && old !== 'Approved' && chqHead) {
+      var campAd = findCampaignById(a.campaignId);
+      var countryAd = campAd && campAd.country;
+      if (countryAd && CHQ_COUNTRY_ALLOWLIST[countryAd]) {
+        queueNotification('CHQ:' + chqHead, 'category-approved', a, '', { statusLabel: 'Approved Digest (Category Head)' });
+      }
+    }
     // Needs Revisions → ping the assigned editor; header reads
-    // "<@editor> — Needs Revisions from <@CategoryHead>".
+    // "<@editor> — Needs Revisions from <@CategoryHead>". Also queue a per-head digest
+    // ("You have N videos sent for REVISIONS — Cat: n (Editor), …").
     if (newVal === 'Needs Revisions' && old !== 'Needs Revisions' && a.editor) {
       var campN = findCampaignById(a.campaignId);
       var countryN = campN && campN.country;
       if (countryN && CHQ_COUNTRY_ALLOWLIST[countryN]) {
         queueNotification(a.editor, 'category-needs-revisions', a, '', { statusLabel: 'Needs Revisions (Category Head)', note: opts.note || '' });
+      }
+    }
+    if (newVal === 'Needs Revisions' && old !== 'Needs Revisions' && chqHead) {
+      var campNd = findCampaignById(a.campaignId);
+      var countryNd = campNd && campNd.country;
+      if (countryNd && CHQ_COUNTRY_ALLOWLIST[countryNd]) {
+        queueNotification('CHQ:' + chqHead, 'category-needs-revisions', a, '', { statusLabel: 'Revisions Digest (Category Head)' });
       }
     }
     render();
@@ -13854,7 +13940,8 @@ var App = {
       date: todayUK(),
       url: url,
       channelId: parsed.channelId,
-      threadTs: parsed.threadTs
+      threadTs: parsed.threadTs,
+      setAt: Date.now()
     };
     saveState();
     logAction('updated', 'Daily thread set for ' + editor + ' (channel ' + parsed.channelId + ')');
@@ -13889,7 +13976,7 @@ var App = {
     }
     var parsed = parseSlackThreadUrl(url);
     if (!parsed) { toast('Not a valid Slack thread URL', 'error'); return; }
-    STATE.catHeadDailyThreads[cat] = { date: todayUK(), url: url, channelId: parsed.channelId, threadTs: parsed.threadTs };
+    STATE.catHeadDailyThreads[cat] = { date: todayUK(), url: url, channelId: parsed.channelId, threadTs: parsed.threadTs, setAt: Date.now() };
     saveState();
     logAction('updated', 'Category head thread set for ' + cat + ' (channel ' + parsed.channelId + ')');
     toast('✓ Thread set for ' + cat, 'success');
@@ -13928,7 +14015,8 @@ var App = {
       date: todayUK(),
       url: url,
       channelId: parsed.channelId,
-      threadTs: parsed.threadTs
+      threadTs: parsed.threadTs,
+      setAt: Date.now()
     };
     saveState();
     logAction('updated', 'Intl daily thread set (channel ' + parsed.channelId + ')');
