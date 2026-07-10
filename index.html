@@ -9535,6 +9535,35 @@ function catHeadApprovedBreakdown(head) {
   return { total: total, byCat: order.map(function(c) { return { cat: c, n: byCat[c] }; }) };
 }
 
+// Per-EDITOR digest breakdowns (scoped to one editor + the head who acted). Power the
+// editor-facing approved / needs-revisions digests that post to the editor's OWN daily
+// thread — e.g. "<@Patty> You have 3 videos APPROVED by Anand — Sneakers: 3". Only counts
+// that editor's videos in categories owned by `head`, in-scope countries. Approved is
+// scoped to today (chDateApproved) like the head digest; revisions counts the current
+// Needs Revisions state (no date filter), matching catHeadRevisionsBreakdown.
+function editorChApprovedBreakdown(editor, head) {
+  var today = todayLocalISO();
+  var byCat = {}, order = [], total = 0;
+  catHeadAssetsInState(head, 'Approved').forEach(function(a) {
+    if ((a.editor || '') !== editor) return;
+    if (a.chDateApproved !== today) return;
+    var c = a.category || '—';
+    if (byCat[c] === undefined) { byCat[c] = 0; order.push(c); }
+    byCat[c]++; total++;
+  });
+  return { total: total, byCat: order.map(function(c) { return { cat: c, n: byCat[c] }; }) };
+}
+function editorChRevisionsBreakdown(editor, head) {
+  var byCat = {}, order = [], total = 0;
+  catHeadAssetsInState(head, 'Needs Revisions').forEach(function(a) {
+    if ((a.editor || '') !== editor) return;
+    var c = a.category || '—';
+    if (byCat[c] === undefined) { byCat[c] = 0; order.push(c); }
+    byCat[c]++; total++;
+  });
+  return { total: total, byCat: order.map(function(c) { return { cat: c, n: byCat[c] }; }) };
+}
+
 // The date a video has been waiting on category-head review since. This is the same
 // moment as the PM approval, so chReviewReadyAt and dateApproved hold the same date;
 // read chReviewReadyAt and fall back to dateApproved for legacy rows written before the
@@ -11145,23 +11174,13 @@ function testWebhookPing() {
 function dualPostToSecondaryThreads(recipient, items, msg) {
   var isChq = typeof recipient === 'string' && recipient.indexOf('CHQ:') === 0;
   if (isChq) {
-    // Only mirror the head's *verdicts* (Approved / Needs Revisions) into the editor's
-    // thread — those concern the editor. A "pending review" digest (change ==='for-review')
-    // is the cat head's own queue; the editor who just moved the video into review does
-    // NOT need a copy of "You have N videos PENDING REVIEW" in their thread. Skip it.
-    var chqEditorItems = items.filter(function(it) {
-      return it.change === 'category-approved' || it.change === 'category-needs-revisions';
-    });
-    if (chqEditorItems.length === 0) return;
-    var posted = {};
-    chqEditorItems.forEach(function(item) {
-      if (!item.editor || posted[item.editor]) return;
-      var edThread = resolveDailyThreadForEditor(item.editor);
-      if (!edThread) return;
-      posted[item.editor] = true;
-      var edUrl = resolveWebhookForEditor(item.editor, [item]);
-      if (webhookValid(edUrl)) postToThreadPreferred(edThread, edUrl, msg);
-    });
+    // Category-head digests (pending review / approved / needs revisions) are for the
+    // category head ONLY — they are never mirrored into editors' daily threads. The
+    // digest text ("<@head> You have APPROVED N videos …") is head-centric and would
+    // read as noise in an editor's thread. Editors get their own per-video "FOR REVIEW
+    // from <@head>" confirmation via their editor batch; approved / needs-revisions
+    // verdicts are not pushed to editors at all (by request).
+    return;
   } else if (EDITORS.indexOf(recipient) >= 0) {
     var chqItems = items.filter(function(it) {
       return it.change === 'category-approved' || it.change === 'category-needs-revisions';
@@ -11623,12 +11642,13 @@ function buildBatchMessage(recipient, items, opts) {
       return chM + ' You have ' + bd.total + ' video' + (bd.total === 1 ? '' : 's') +
         ' PENDING REVIEW' + (parts ? ' — ' + parts : '');
     }
-    // Category-head "sent for revisions" digest — per-category, per-editor counts:
-    // "<@head> You have 2 videos sent for REVISIONS — Sneakers: 1 (Patty), 2 (Sharm)".
+    // Category-head "sent for revisions" digest — per-category, per-editor counts, with
+    // each editor @-tagged (falls back to their plain name when no Slack ID is set):
+    // "<@head> You have 2 videos sent for REVISIONS — Sneakers: 1 (<@Patty>), 2 (<@Sharm>)".
     if (status === 'Revisions Digest (Category Head)') {
       var rb = catHeadRevisionsBreakdown(getCategoryHead(it.category));
       var rparts = rb.byCat.map(function(x) {
-        return x.cat + ': ' + x.editors.map(function(e) { return e.n + ' (' + e.editor + ')'; }).join(', ');
+        return x.cat + ': ' + x.editors.map(function(e) { return e.n + ' (' + mentionEditor(e.editor) + ')'; }).join(', ');
       }).join(' · ');
       return chM + ' You have ' + rb.total + ' video' + (rb.total === 1 ? '' : 's') +
         ' sent for REVISIONS' + (rparts ? ' — ' + rparts : '');
@@ -11640,6 +11660,25 @@ function buildBatchMessage(recipient, items, opts) {
       var aparts = ab.byCat.map(function(x) { return x.cat + ': ' + x.n; }).join(', ');
       return chM + ' You have APPROVED ' + ab.total + ' video' + (ab.total === 1 ? '' : 's') +
         (aparts ? ' — ' + aparts : '');
+    }
+    // Editor-facing "approved" digest — posts to the EDITOR's own daily thread, counts only
+    // that editor's videos and credits the acting head (plain name, not a mention):
+    // "<@Patty> You have 3 videos APPROVED by Anand — Sneakers: 3".
+    if (status === 'Approved Editor Digest (Category Head)') {
+      var chHeadA = getCategoryHead(it.category);
+      var eab = editorChApprovedBreakdown(it.editor, chHeadA);
+      var eaparts = eab.byCat.map(function(x) { return x.cat + ': ' + x.n; }).join(', ');
+      return editorM + ' You have ' + eab.total + ' video' + (eab.total === 1 ? '' : 's') +
+        ' APPROVED by ' + chHeadA + (eaparts ? ' — ' + eaparts : '');
+    }
+    // Editor-facing "needs revisions" digest — posts to the EDITOR's own daily thread:
+    // "<@Patty> You have 2 videos sent for REVISIONS by Anand — Sneakers: 2".
+    if (status === 'Revisions Editor Digest (Category Head)') {
+      var chHeadR = getCategoryHead(it.category);
+      var erb = editorChRevisionsBreakdown(it.editor, chHeadR);
+      var erparts = erb.byCat.map(function(x) { return x.cat + ': ' + x.n; }).join(', ');
+      return editorM + ' You have ' + erb.total + ' video' + (erb.total === 1 ? '' : 's') +
+        ' sent for REVISIONS by ' + chHeadR + (erparts ? ' — ' + erparts : '');
     }
     var recipientMention = '';
     var senderMention = '';
@@ -11722,7 +11761,7 @@ function buildBatchMessage(recipient, items, opts) {
     // Category-head digests (pending review / sent for revisions / approved): skip the
     // per-video list entirely. The manager just gets the running-total header and a
     // single Tracker link that drops them on the Cat Heads Review tab.
-    var _chDigestLabels = ['For Review Digest (Category Head)', 'Revisions Digest (Category Head)', 'Approved Digest (Category Head)'];
+    var _chDigestLabels = ['For Review Digest (Category Head)', 'Revisions Digest (Category Head)', 'Approved Digest (Category Head)', 'Approved Editor Digest (Category Head)', 'Revisions Editor Digest (Category Head)'];
     if (_chDigestLabels.indexOf(group[0].status || group[0].change) >= 0) {
       var crl = catReviewTrackerLink();
       return header + (crl ? '\n' + crl : '');
@@ -13071,39 +13110,32 @@ var App = {
         }
       }
     }
-    // Approved → ping the assigned editor; header reads
-    // "<@editor> — Approved from <@CategoryHead>". Routes to the editor's batch
-    // so it lands in their daily thread. Also queue a per-head digest so the head
-    // gets a running "You have APPROVED N videos" tally in their own thread.
-    if (newVal === 'Approved' && old !== 'Approved' && a.editor) {
-      var campA = findCampaignById(a.campaignId);
-      var countryA = campA && campA.country;
-      if (countryA && CHQ_COUNTRY_ALLOWLIST[countryA]) {
-        queueNotification(a.editor, 'category-approved', a, '', { statusLabel: 'Approved (Category Head)' });
-      }
-    }
+    // Approved → TWO digests on separate threads:
+    //  • Cat head thread (CHQ:<head>): per-head tally "<@head> You have APPROVED N videos — Cat: n".
+    //  • Editor's own thread (a.editor): per-editor tally "<@Patty> You have N videos APPROVED by <head> — Cat: n".
+    // Queued to distinct recipients so neither is mirrored onto the other's thread.
     if (newVal === 'Approved' && old !== 'Approved' && chqHead) {
       var campAd = findCampaignById(a.campaignId);
       var countryAd = campAd && campAd.country;
       if (countryAd && CHQ_COUNTRY_ALLOWLIST[countryAd]) {
         queueNotification('CHQ:' + chqHead, 'category-approved', a, '', { statusLabel: 'Approved Digest (Category Head)' });
+        if (a.editor) {
+          queueNotification(a.editor, 'ch-approved-editor-digest', a, '', { statusLabel: 'Approved Editor Digest (Category Head)' });
+        }
       }
     }
-    // Needs Revisions → ping the assigned editor; header reads
-    // "<@editor> — Needs Revisions from <@CategoryHead>". Also queue a per-head digest
-    // ("You have N videos sent for REVISIONS — Cat: n (Editor), …").
-    if (newVal === 'Needs Revisions' && old !== 'Needs Revisions' && a.editor) {
-      var campN = findCampaignById(a.campaignId);
-      var countryN = campN && campN.country;
-      if (countryN && CHQ_COUNTRY_ALLOWLIST[countryN]) {
-        queueNotification(a.editor, 'category-needs-revisions', a, '', { statusLabel: 'Needs Revisions (Category Head)', note: opts.note || '' });
-      }
-    }
+    // Needs Revisions → same dual-digest pattern. The cat head thread digest lists the
+    // editors involved, each @-tagged: "<@head> You have N sent for REVISIONS —
+    // Sneakers: 1 (<@Patty>), 2 (<@Sharm>)". The editor also gets a per-editor digest in
+    // their own thread ("<@Patty> You have N sent for REVISIONS by <head> — Cat: n").
     if (newVal === 'Needs Revisions' && old !== 'Needs Revisions' && chqHead) {
       var campNd = findCampaignById(a.campaignId);
       var countryNd = campNd && campNd.country;
       if (countryNd && CHQ_COUNTRY_ALLOWLIST[countryNd]) {
         queueNotification('CHQ:' + chqHead, 'category-needs-revisions', a, '', { statusLabel: 'Revisions Digest (Category Head)' });
+        if (a.editor) {
+          queueNotification(a.editor, 'ch-needs-revisions-editor-digest', a, '', { statusLabel: 'Revisions Editor Digest (Category Head)' });
+        }
       }
     }
     render();
