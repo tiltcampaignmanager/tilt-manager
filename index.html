@@ -233,6 +233,14 @@
   tbody tr:hover td { background: rgba(127,119,221,0.03); }
   @keyframes rowFlash { 0%,100% { background: transparent; } 20%,60% { background: rgba(127,119,221,0.18); } }
   tr.row-highlight-flash td { animation: rowFlash 2.5s ease; }
+  /* Cat Heads Review approve animation: the approved card swipes right + fades while its
+     height collapses to 0, so the cards below slide up to take its place. Only the
+     .cr-card-approving state transitions — a normal re-render never animates. */
+  .cr-card-approving {
+    transition: transform .45s cubic-bezier(.4,0,.2,1), opacity .4s ease,
+                height .45s ease, margin .45s ease, padding .45s ease, border-width .4s ease !important;
+    overflow: hidden; pointer-events: none;
+  }
   .pn { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text3); }
   .video-name-cell { max-width: 260px; display: flex; align-items: center; gap: 6px; }
   .video-name-cell > .editable-cell:first-child { flex: 1; min-width: 0; overflow: hidden; }
@@ -1180,6 +1188,8 @@
   .role-chip-admin  { background: var(--accent-dim); color: var(--accent2); border-color: rgba(126,99,250,0.35); }
   .role-chip-pm     { background: rgba(250,199,117,0.15); color: var(--amber-text); border-color: rgba(250,199,117,0.35); }
   .role-chip-editor { background: var(--bg2); color: var(--text3); border-color: var(--border); }
+  .role-chip-catHead     { background: rgba(127,119,221,0.14); color: var(--accent2); border-color: rgba(127,119,221,0.3); }
+  .role-chip-contentLead { background: rgba(111,168,220,0.15); color: #6FA8DC; border-color: rgba(111,168,220,0.35); }
 
   /* Team management rows in Config */
   .team-row { display: grid; grid-template-columns: 32px 1fr 200px 140px 28px; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
@@ -1590,8 +1600,9 @@ var HubSync = {
 
 // ===================== GOOGLE SHEETS SYNC =====================
 // Debounced POST to a Google Apps Script Web App deployment URL.
-// The GAS script receives campaigns + assets JSON and writes the
-// formatted sheet (section headers, colors, fonts) automatically.
+// The GAS script receives campaigns + assets + full-state JSON and (a) writes the
+// formatted sheet (section headers, colors, fonts) and (b) drops a timestamped JSON
+// snapshot into a Drive folder when BACKUP_FOLDER_ID is set in the script.
 var GSheets = {
   _timer: null,
   _lastSyncAt: null,
@@ -1613,6 +1624,10 @@ var GSheets = {
     var payload = {
       campaigns: STATE.campaigns,
       assets: STATE.assets,
+      // Full STATE snapshot — the Apps Script writes this verbatim to a timestamped
+      // JSON file in Drive (auto-backup). Same shape as the manual "Export backup".
+      // If the script has no BACKUP_FOLDER_ID set, it simply ignores this field.
+      state: STATE,
       syncedAt: new Date().toISOString()
     };
 
@@ -2442,7 +2457,7 @@ var Fb = {
     if (!Auth.user || Auth.user.role !== 'admin') {
       return Promise.reject(new Error('Only admins can change roles'));
     }
-    if (['editor', 'pm', 'admin'].indexOf(role) < 0) {
+    if (['editor', 'pm', 'catHead', 'contentLead', 'admin'].indexOf(role) < 0) {
       return Promise.reject(new Error('Invalid role: ' + role));
     }
     return fbDb.collection('users').doc(uid).update({ role: role });
@@ -2707,6 +2722,15 @@ var CATEGORY_HEADS = {
   'Event - Stone Island': 'Millie'
 };
 
+// Display ranking for the Cat Heads Review tab — the order manager sections stack
+// for PMs/admins viewing everyone. Heads not listed here fall to the end (first-seen
+// order preserved among them).
+var CH_HEAD_ORDER = ['Jacob', 'Anand', 'Hanyan', 'Millie', 'Avy'];
+function catHeadRank(head) {
+  var i = CH_HEAD_ORDER.indexOf(head);
+  return i < 0 ? CH_HEAD_ORDER.length : i;
+}
+
 // Returns the assigned head's name for a given category name, or '' if none.
 // Used for the Category Head QC column display. Case-insensitive — legacy
 // rows in the wild may have category stored as "LUXURY" (uppercase) while
@@ -2773,7 +2797,7 @@ var STATE = {
   // persist it; renderTopbar iterates this array. Default set via DEFAULT_TAB_ORDER
   // (declared below near renderTopbar). Kept in STATE so loadState migration can
   // top it up with any tab ids added in future versions.
-  tabOrder: ['campaigns', 'today', 'notifications', 'log', 'automations', 'config'],
+  tabOrder: ['campaigns', 'notifications', 'today', 'log', 'automations', 'config'],
   activeSubCampaignId: 1,
   expandedCountries: { UK: true, IT: false, ES: false, US: false, PL: false },
   // UI preference: when true, sidebar collapses to a compact strip showing only flags +
@@ -5086,18 +5110,27 @@ var TAB_DEFS = {
   content:          { label: 'Content' },
   config:           { label: 'Config' }
 };
-var DEFAULT_TAB_ORDER = ['campaigns', 'today', 'catReview', 'notifications', 'log', 'editingCalendar', 'automations', 'reporting', 'content', 'config'];
+var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'log', 'editingCalendar', 'automations', 'reporting', 'content', 'config'];
 
-// Role-based tab visibility. Editors see the day-to-day tabs; PMs add Notifications
-// and Scheduler so they can drive comms; Admins see everything including Automations
-// and Config (which holds webhooks, role management, and the destructive controls).
+// Role-based tab visibility. Editors and PMs share the same day-to-day set
+// (Campaigns → Reporting, plus Notifications). Cat Head and Content Lead can open
+// every tab (view access), while Admin additionally owns the destructive controls
+// gated by roleAtLeast('admin') inside Config/Automations.
 // Tab visibility is also enforced server-side in Phase D via Firestore rules on
 // the documents these tabs touch (config/app and the users collection).
+var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'automations', 'reporting', 'content', 'config'];
 var ROLE_TAB_VISIBILITY = {
-  editor: ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'content'],
-  pm:     ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'],
-  admin:  ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'automations', 'reporting', 'content', 'config']
+  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'],
+  pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'],
+  catHead:     ALL_TABS.slice(),
+  contentLead: ALL_TABS.slice(),
+  admin:       ALL_TABS.slice()
 };
+
+// Human-readable role labels (role keys are camelCase / short; these are what the
+// UI shows in chips, dropdowns, and titles).
+var ROLE_LABELS = { editor: 'Editor', pm: 'PM', catHead: 'Cat Head', contentLead: 'Content Lead', admin: 'Admin' };
+function roleLabelFor(role) { return ROLE_LABELS[role] || (role || '').toUpperCase(); }
 
 // Returns the list of tab IDs the given role is allowed to see. Unknown roles
 // (including null while a profile is still loading) get the editor set as a
@@ -5109,7 +5142,7 @@ function tabsForRole(role) {
 // True if the current signed-in user has the given role (or higher). Role hierarchy:
 // admin > pm > editor. Used to gate destructive actions client-side; Firestore rules
 // re-enforce server-side in Phase D.
-var ROLE_RANK = { editor: 1, pm: 2, admin: 3 };
+var ROLE_RANK = { editor: 1, pm: 2, catHead: 2, contentLead: 2, admin: 3 };
 function roleAtLeast(required) {
   var u = (typeof Auth !== 'undefined' && Auth.user) ? Auth.user : null;
   var have = (u && u.role) ? u.role : 'editor';
@@ -5135,6 +5168,16 @@ function renderTopbar() {
       order.splice(ec, 1);
       lg = order.indexOf('log');
       order.splice(lg + 1, 0, 'editingCalendar');
+      STATE.tabOrder = order.slice();
+    }
+  })();
+  // Migration: always place notifications immediately after campaigns (beside it).
+  (function() {
+    var nf = order.indexOf('notifications'), cp = order.indexOf('campaigns');
+    if (nf >= 0 && cp >= 0 && nf !== cp + 1) {
+      order.splice(nf, 1);
+      cp = order.indexOf('campaigns');
+      order.splice(cp + 1, 0, 'notifications');
       STATE.tabOrder = order.slice();
     }
   })();
@@ -5183,7 +5226,7 @@ function renderTopbar() {
     // Role badge: colour-coded chip so people know what they are at a glance.
     // Admin = accent purple, PM = amber, Editor = neutral. Hidden until the
     // profile snapshot has populated u.role (no flicker on first paint).
-    var roleLabel = (u.role || '').toUpperCase();
+    var roleLabel = u.role ? roleLabelFor(u.role) : '';
     var roleClass = u.role ? 'role-chip role-chip-' + u.role : '';
     var roleChip = u.role
       ? '<span class="' + roleClass + '" title="Your role">' + escapeHtml(roleLabel) + '</span>'
@@ -7138,9 +7181,9 @@ function renderNotificationsView() {
         '</div>';
       }).join('');
 
-  // Build QC Reports section first so we can place it at the TOP of the notifications
-  // panel. The same logic used to live inline mid-return; hoisting it lets us keep all
-  // section logic intact while changing only the visual order.
+  // Build QC Reports section here so we can place it at the BOTTOM of the notifications
+  // panel (after Sent Notifications). Hoisting it above the return keeps all section
+  // logic intact while letting us control the visual order.
   var qcReportsHtml = (function() {
       // Build one QC report card per sub-campaign that has at least one video with
       // a non-Draft QC state. Cards are derived live from asset.qc on every render \u2014
@@ -7203,7 +7246,6 @@ function renderNotificationsView() {
 
   return '<div class="content"><div class="notif-panel">' +
     fileBanner +
-    qcReportsHtml +
     '<div class="section-title">Pending Batches <button class="run-btn" style="margin-left:auto; padding:5px 12px; font-size:12px;" onclick="App.showExport()">\u{1F4E4} Export for editor</button></div>' +
     '<div class="auto-card">' +
       '<div class="auto-desc" style="margin:0 0 6px;">Notifications queue briefly and fire as a batch Slack message after <strong style="color:var(--text1);">10 seconds</strong> from the first update. Try editing a video in the Campaigns tab to see it queue here.</div>' +
@@ -7274,9 +7316,10 @@ function renderNotificationsView() {
           '<div class="batch-grid">' + tallyCards + '</div>' +
         '</div>';
     })() +
-    /* qcReportsHtml \u2014 inserted at the top of the panel, see hoist above the return */
     '<div class="section-title">Sent Notifications (last 20)</div>' +
     '<div class="auto-card"><div class="sent-log">' + sentHtml + '</div></div>' +
+    /* QC Reports \u2014 pinned to the bottom of the panel (see qcReportsHtml hoist above the return) */
+    qcReportsHtml +
   '</div></div>';
 }
 
@@ -7484,12 +7527,7 @@ function renderAutomationsView() {
     '</div>' +
 
     '<div class="auto-card">' +
-      '<div class="auto-header"><div class="auto-icon">02</div><div><div class="auto-title">Daily Scheduler \u2014 3 PM, Mon\u2013Fri</div><div class="auto-sub">picks per editor based on difficulty mix + country priority</div></div></div>' +
-      '<div class="auto-desc">For Zidni, Sharm, Patty: picks the next batch of videos fitting their ideal mix. Zidni absorbs overflow when others can\'t handle a difficulty. Elsa is excluded from this automation but still receives reactive notifications. Editor and ETA assignment is done inline in the <strong>Campaigns</strong> table or via the <strong>Board</strong> Kanban.</div>' +
-    '</div>' +
-
-    '<div class="auto-card">' +
-      '<div class="auto-header"><div class="auto-icon">03</div><div><div class="auto-title">Editor Notifications \u2014 hybrid batch</div><div class="auto-sub">trigger: video asset created, reassigned, or status changed</div></div></div>' +
+      '<div class="auto-header"><div class="auto-icon">02</div><div><div class="auto-title">Editor Notifications \u2014 hybrid batch</div><div class="auto-sub">trigger: video asset created, reassigned, or status changed</div></div></div>' +
       '<div class="auto-desc">' +
         'Fires when (a) a new video is assigned, (b) a video is reassigned, or (c) a video\'s status changes. ' +
         'Messages are lightly batched: any updates in the same <strong style="color:var(--text1);">10-second window</strong> ship together to avoid spam. ' +
@@ -7499,7 +7537,7 @@ function renderAutomationsView() {
     '</div>' +
 
     '<div class="auto-card">' +
-      '<div class="auto-header"><div class="auto-icon">04</div><div><div class="auto-title">Slack Webhook \u2014 Global Fallback</div><div class="auto-sub">used when a country webhook isn\u2019t set</div></div></div>' +
+      '<div class="auto-header"><div class="auto-icon">03</div><div><div class="auto-title">Slack Webhook \u2014 Global Fallback</div><div class="auto-sub">used when a country webhook isn\u2019t set</div></div></div>' +
       '<div class="auto-desc">Stores a catch-all <strong style="color:var(--text1);">Incoming Webhook URL</strong> (https://hooks.slack.com/services/...). This is used as a fallback for editor batches whose items span multiple countries, or when a country-specific webhook isn\u2019t set below. <em>Save</em> stores the URL to Firestore; <em>Send test ping</em> actually POSTs a short message so you can verify Slack accepts it.</div>' +
       '<div class="webhook-row"><input type="text" id="webhook-input" value="' + escapeHtml(STATE.webhookUrl) + '" placeholder="https://hooks.slack.com/services/..."><button class="save-btn" onclick="App.saveWebhook()">Save</button><button class="edit-btn" onclick="App.testWebhook()" style="margin-left:4px;">\u{1F4E1} Send test ping</button></div>' +
     '</div>' +
@@ -7517,7 +7555,7 @@ function renderAutomationsView() {
         ? 'Valid webhook saved for Category Head QC'
         : (chwEmpty ? 'No webhook \u2014 falls back to the global webhook above' : 'Saved value isn\u2019t a valid webhook URL');
       return '<div class="auto-card">' +
-        '<div class="auto-header"><div class="auto-icon">05</div><div><div class="auto-title">Slack Webhook \u2014 Category Head QC</div><div class="auto-sub">all category-head review batches route here (Sneakers, Bags, Apparel, etc.)</div></div></div>' +
+        '<div class="auto-header"><div class="auto-icon">04</div><div><div class="auto-title">Slack Webhook \u2014 Category Head QC</div><div class="auto-sub">all category-head review batches route here (Sneakers, Bags, Apparel, etc.)</div></div></div>' +
         '<div class="auto-desc">A single webhook for all <strong style="color:var(--text1);">Category Head QC</strong> batches. The category head still gets @-mentioned in the message header (so Anand, Hanyan etc. get pinged personally), but the batch lands in this channel instead of your global one. Leave empty to fall back to the global webhook above. Save and Test work the same way.</div>' +
         '<div class="webhook-row">' +
           '<span class="webhook-status-dot ' + chwDotClass + '" title="' + chwDotTitle + '"></span>' +
@@ -7529,7 +7567,7 @@ function renderAutomationsView() {
     })() +
 
     '<div class="auto-card">' +
-      '<div class="auto-header"><div class="auto-icon">06</div><div><div class="auto-title">Slack Webhooks \u2014 Per Country</div><div class="auto-sub">PM review pings route here by country; editor batches use these when the batch is single-country</div></div></div>' +
+      '<div class="auto-header"><div class="auto-icon">05</div><div><div class="auto-title">Slack Webhooks \u2014 Per Country</div><div class="auto-sub">PM review pings route here by country; editor batches use these when the batch is single-country</div></div></div>' +
       '<div class="auto-desc">One webhook per country. When a video flips to <strong style="color:var(--text1);">For Review</strong>, the PM review ping goes to that country\u2019s webhook. Editor batches (single-country) also use these. Empty rows fall through to the global fallback above. Save and Test are per-row.</div>' +
       '<div style="margin-top:10px;">' +
         STATE.countries.map(function(c) {
@@ -7560,7 +7598,7 @@ function renderAutomationsView() {
     '</div>' +
 
     '<div class="auto-card">' +
-      '<div class="auto-header"><div class="auto-icon">07</div><div><div class="auto-title">Slack Webhooks \u2014 QC Reports</div><div class="auto-sub">Manual QC reports route here when you hit Send on a campaign\u2019s QC card</div></div></div>' +
+      '<div class="auto-header"><div class="auto-icon">06</div><div><div class="auto-title">Slack Webhooks \u2014 QC Reports</div><div class="auto-sub">Manual QC reports route here when you hit Send on a campaign\u2019s QC card</div></div></div>' +
       '<div class="auto-desc">One webhook per country, separate from the PM review route above. QC reports are never batched \u2014 you send them manually from the Notifications tab when a campaign is ready for review. Empty rows fall through to the global fallback. Save and Test are per-row.</div>' +
       '<div style="margin-top:10px;">' +
         STATE.countries.map(function(c) {
@@ -9362,17 +9400,26 @@ function allCategoryHeads() {
   return out;
 }
 
-// The signed-in user's category-head identity, matched by first name against the head
-// list (heads are stored as first names). Returns '' when the user isn't a head — e.g.
-// a PM or admin, who then see every manager's queue.
+// The signed-in user's category-head identity, matched primarily by their EMAIL
+// (heads are stored as first names, and Tilt emails are firstname@tilt.app — so the
+// local-part before the @ maps straight to a head). Falls back to the display name's
+// first token for odd email handles. Returns '' when the user isn't a head — e.g. a
+// PM or admin, who then see every manager's queue.
 function currentCatHead() {
   var u = (typeof Auth !== 'undefined' && Auth.user) ? Auth.user : null;
   if (!u) return '';
-  var first = String(u.displayName || u.email || '').toLowerCase().split(/[\s@.]/)[0];
-  if (!first) return '';
   var heads = allCategoryHeads();
-  for (var i = 0; i < heads.length; i++) { if (heads[i].toLowerCase() === first) return heads[i]; }
-  return '';
+  var matchToken = function(token) {
+    if (!token) return '';
+    for (var i = 0; i < heads.length; i++) { if (heads[i].toLowerCase() === token) return heads[i]; }
+    return '';
+  };
+  // Primary: the email's local-part (before @, before any dot/plus/underscore/dash).
+  var local = String(u.email || '').toLowerCase().split('@')[0].split(/[.+_-]/)[0];
+  var byEmail = matchToken(local);
+  if (byEmail) return byEmail;
+  // Fallback: first token of the display name.
+  return matchToken(String(u.displayName || '').toLowerCase().split(/\s+/)[0]);
 }
 
 // Every asset currently awaiting category-head review, in the countries in scope.
@@ -9447,13 +9494,14 @@ function renderCatReviewView() {
   });
 
   // Which heads get a section: the viewer if they're a head, otherwise all heads that
-  // have in-window pending items (PM/admin overview).
+  // have in-window pending items (PM/admin overview), stacked in the CH_HEAD_ORDER ranking.
   var heads;
   if (mine) {
     heads = [mine];
   } else {
     var seen = {}; heads = [];
     pending.forEach(function(a) { var h = getCategoryHead(a.category); if (h && !seen[h]) { seen[h] = true; heads.push(h); } });
+    heads.sort(function(a, b) { return catHeadRank(a) - catHeadRank(b); });
   }
 
   var winBtn = function(key, label) {
@@ -9464,9 +9512,14 @@ function renderCatReviewView() {
   var toggle = '<div style="display:inline-flex; border:1px solid var(--border2); border-radius:8px; overflow:hidden;">' +
     winBtn('daily', 'Daily') + winBtn('weekly', 'Weekly') + winBtn('monthly', 'Monthly') + '</div>';
 
+  // Personalized sub-line: a signed-in cat head sees their own name + how many videos
+  // they have to review (scoped by email via currentCatHead); PMs/admins see the total.
+  var subLine = mine
+    ? escapeHtml(mine) + ' — you have ' + pending.length + ' video' + (pending.length === 1 ? '' : 's') + ' to review'
+    : 'Videos ready for category-manager sign-off';
   var header = '<div style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:20px;">' +
       '<div><div style="font-size:20px; font-weight:600; color:var(--text1);">Cat Heads Review</div>' +
-      '<div style="font-size:13px; color:var(--text3); margin-top:2px;">Videos ready for category-manager sign-off' + (mine ? ' — your queue' : '') + '</div></div>' +
+      '<div style="font-size:13px; color:var(--text3); margin-top:2px;">' + subLine + '</div></div>' +
       toggle + '</div>';
 
   if (pending.length === 0) {
@@ -9475,24 +9528,27 @@ function renderCatReviewView() {
       'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.</div></div></div>';
   }
 
-  // Collapse state maps (persisted in STATE, mirrors reportingCollapsed). Heads and
-  // categories default to expanded; only keys explicitly toggled to true are collapsed.
+  // Head collapse state (persisted in STATE, mirrors reportingCollapsed). Heads default
+  // to expanded; only keys explicitly toggled to true are collapsed.
   var headCollapsed = STATE.catReviewHeadCollapsed || {};
-  var catCollapsed  = STATE.catReviewCatCollapsed  || {};
 
   var sections = heads.map(function(head) {
+    // headAssets is already sorted oldest-ready-first (pending is pre-sorted), so this
+    // is the chronological review order — the videos that have been waiting longest sit
+    // at the top of each cat head's list.
     var headAssets = pending.filter(function(a) { return getCategoryHead(a.category) === head; });
     if (headAssets.length === 0 && !mine) return '';
-    // Group this head's assets by category (preserving sorted order).
-    var byCat = {}, catOrder = [];
-    headAssets.forEach(function(a) { var c = a.category || '—'; if (!byCat[c]) { byCat[c] = []; catOrder.push(c); } byCat[c].push(a); });
 
     var headKey = head.replace(/'/g, "\\'");
     var headOpen = !headCollapsed[head];
     var headChevron = headOpen ? '▼' : '▶';
 
+    // Distinct categories this head owns among the pending videos — shown as a sub-label.
+    var catsSeen = {}, catsLabel = [];
+    headAssets.forEach(function(a) { var c = a.category || '—'; if (!catsSeen[c]) { catsSeen[c] = true; catsLabel.push(c); } });
+    catsLabel = catsLabel.join(' · ');
+
     var initials = head.slice(0, 2).toUpperCase();
-    var catsLabel = catOrder.join(' · ');
     var headHeader = '<div onclick="App.toggleCatReviewHead(\'' + escapeHtml(headKey) + '\')" style="display:flex; align-items:center; gap:12px; margin-bottom:12px; cursor:pointer; user-select:none;">' +
         '<span style="font-size:11px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:12px;">' + headChevron + '</span>' +
         '<div style="width:36px; height:36px; border-radius:50%; background:var(--accent-dim); color:var(--accent2); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:13px;">' + escapeHtml(initials) + '</div>' +
@@ -9501,21 +9557,10 @@ function renderCatReviewView() {
         '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + headAssets.length + ' pending</span>' +
       '</div>';
 
-    var catBlocks = !headOpen ? '' : catOrder.map(function(cat) {
-      var catKey = head + '||' + cat;
-      var catKeyJs = catKey.replace(/'/g, "\\'");
-      var catOpen = !catCollapsed[catKey];
-      var catChevron = catOpen ? '▼' : '▶';
-      var cards = catOpen ? byCat[cat].map(function(a) { return renderCatReviewCard(a); }).join('') : '';
-      var catHeader = '<div onclick="App.toggleCatReviewCat(\'' + escapeHtml(catKeyJs) + '\')" style="display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; margin:14px 0 8px;">' +
-          '<span style="font-size:9px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:12px;">' + catChevron + '</span>' +
-          '<span style="font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text3);">' + categoryBadgeHtml(cat) + '</span>' +
-          '<span style="font-size:10px; font-family:\'JetBrains Mono\',monospace; color:var(--text3); background:var(--bg4); padding:1px 7px; border-radius:4px;">' + byCat[cat].length + '</span>' +
-        '</div>';
-      return catHeader + cards;
-    }).join('');
+    // Flat chronological list — one card per video, oldest-waiting first.
+    var cards = !headOpen ? '' : headAssets.map(function(a) { return renderCatReviewCard(a); }).join('');
 
-    return '<div style="margin-bottom:32px;">' + headHeader + catBlocks + '</div>';
+    return '<div style="margin-bottom:32px;">' + headHeader + cards + '</div>';
   }).join('');
 
   return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header + sections + '</div></div>';
@@ -9537,12 +9582,18 @@ function renderCatReviewCard(a) {
 
   var meta = [];
   if (a.editor) meta.push('Editor: ' + escapeHtml(a.editor));
+  // The date the video went For Review, plus the relative "ready N days ago" wait label.
+  var readyDate = a.chReviewReadyAt ? formatDate(a.chReviewReadyAt) : '';
+  if (readyDate) meta.push('For review since ' + escapeHtml(readyDate));
   meta.push(catReviewWaitLabel(a.chReviewReadyAt));
   if (country) meta.push(escapeHtml(country));
   var metaLine = '<div style="font-size:12px; color:var(--text3); margin-top:2px;">' + meta.join(' · ') +
     (videoUrl ? ' · <a href="' + escapeHtml(videoUrl) + '" target="_blank" style="color:var(--accent2); text-decoration:none;">Video ↗</a>' : '') + '</div>';
+  // Category badge shown on the card (the per-category grouping was replaced by a flat
+  // chronological list, so the category rides on each card instead).
+  var catBadge = a.category ? '<span style="margin-left:8px; vertical-align:middle;">' + categoryBadgeHtml(a.category) + '</span>' : '';
 
-  var approveBtn = '<button onclick="App.setAssetCategoryHeadQc(\'' + id + '\',\'Approved\')" style="border:1px solid var(--border2); background:var(--green-bg); color:var(--green-text); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">✓ Approve</button>';
+  var approveBtn = '<button onclick="App.approveCatReviewCard(\'' + id + '\')" style="border:1px solid var(--border2); background:var(--green-bg); color:var(--green-text); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">✓ Approve</button>';
   var reviseBtn  = (qc !== 'Needs Revisions')
     ? '<button onclick="App.catReviewNeedsRevisions(\'' + id + '\')" style="border:1px solid var(--border2); background:transparent; color:var(--text2); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">↺ Needs revisions</button>'
     : '';
@@ -9581,9 +9632,9 @@ function renderCatReviewCard(a) {
 
   var commentBox = '<div style="border-top:1px solid var(--border); margin-top:12px; padding-top:12px;">' + commentToggle + commentPanel + '</div>';
 
-  return '<div style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px;">' +
+  return '<div id="cr-card-' + id + '" class="cr-card" style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px;">' +
       '<div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">' +
-        '<div style="flex:1; min-width:180px; overflow-wrap:anywhere; word-break:break-word;"><div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(a.name || 'Untitled') + '</div>' + metaLine + '</div>' +
+        '<div style="flex:1; min-width:180px; overflow-wrap:anywhere; word-break:break-word;"><div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(a.name || 'Untitled') + catBadge + '</div>' + metaLine + '</div>' +
         '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">' + statusPill + approveBtn + reviseBtn + '</div>' +
       '</div>' + commentBox + '</div>';
 }
@@ -10063,9 +10114,11 @@ function renderConfigView() {
           '<select class="team-role-select" ' +
             (disabled ? 'disabled title="' + escapeHtml(disabledReason) + '"' : '') + ' ' +
             'onchange="App.setUserRole(\'' + escapeHtml(usr.uid) + '\', this.value, \'' + escapeHtml(displayName) + '\')">' +
-            '<option value="editor"' + (role === 'editor' ? ' selected' : '') + '>Editor</option>' +
-            '<option value="pm"'     + (role === 'pm'     ? ' selected' : '') + '>PM</option>' +
-            '<option value="admin"'  + (role === 'admin'  ? ' selected' : '') + '>Admin</option>' +
+            '<option value="editor"'      + (role === 'editor'      ? ' selected' : '') + '>Editor</option>' +
+            '<option value="pm"'          + (role === 'pm'          ? ' selected' : '') + '>PM</option>' +
+            '<option value="catHead"'     + (role === 'catHead'     ? ' selected' : '') + '>Cat Head</option>' +
+            '<option value="contentLead"' + (role === 'contentLead' ? ' selected' : '') + '>Content Lead</option>' +
+            '<option value="admin"'       + (role === 'admin'       ? ' selected' : '') + '>Admin</option>' +
           '</select>';
         return '<div class="team-row">' +
           '<div class="team-avatar">' + avatar + '</div>' +
@@ -10076,7 +10129,7 @@ function renderConfigView() {
             '<div class="team-email">' + escapeHtml(usr.email || '') + '</div>' +
           '</div>' +
           '<div>' + roleSelect + '</div>' +
-          '<div><span class="role-chip role-chip-' + role + '">' + role.toUpperCase() + '</span></div>' +
+          '<div><span class="role-chip role-chip-' + role + '">' + escapeHtml(roleLabelFor(role)) + '</span></div>' +
           '<div></div>' +
         '</div>';
       }).join('');
@@ -10084,7 +10137,7 @@ function renderConfigView() {
     teamSection =
       '<div class="section-title">Team \u00B7 ' + users.length + (users.length === 1 ? ' member' : ' members') + '</div>' +
       '<div class="auto-card">' +
-        '<div class="auto-desc" style="margin-bottom:14px;">Everyone who\'s signed in at least once with their @tilt.app account. Change roles below \u2014 the dropdown saves immediately and the affected person sees their tabs update on their next render (no refresh needed). <strong>Editor</strong> = Campaigns + Board + Daily Log only. <strong>PM</strong> = Editor tabs plus Notifications. <strong>Admin</strong> = everything, including this Team panel and Automations. The founding admin cannot be demoted.</div>' +
+        '<div class="auto-desc" style="margin-bottom:14px;">Everyone who\'s signed in at least once with their @tilt.app account. Change roles below \u2014 the dropdown saves immediately and the affected person sees their tabs update on their next render (no refresh needed). <strong>Editor</strong> and <strong>PM</strong> = the day-to-day tabs (Campaigns, Board, Cat Heads Review, Calendar, Daily Log, Notifications, Reporting, Content). <strong>Cat Head</strong> and <strong>Content Lead</strong> = every tab, including Automations and Config (view access; destructive controls stay admin-only). <strong>Admin</strong> = everything plus this Team panel and the destructive controls. The founding admin cannot be demoted.</div>' +
         teamRows +
       '</div>';
   }
@@ -10198,14 +10251,14 @@ function renderConfigView() {
       '<div class="config-row" style="border-bottom:none"><div class="config-label">Campaign</div><div class="config-value">Link to Campaigns</div></div>' +
     '</div>' +
 
-    '<div class="section-title" style="margin-top:24px;">Google Sheets Backup</div>' +
+    '<div class="section-title" style="margin-top:24px;">Google Sheets Backup &amp; Drive Auto-Backup</div>' +
     '<div class="auto-card">' +
       '<div class="auto-header">' +
         '<div class="auto-icon" style="font-size:18px;">📊</div>' +
-        '<div><div class="auto-title">Auto-sync to Google Sheets</div>' +
-        '<div class="auto-sub">writes all campaigns &amp; assets to your sheet after every save</div></div>' +
+        '<div><div class="auto-title">Auto-sync to Google Sheets + Drive backup</div>' +
+        '<div class="auto-sub">writes all campaigns &amp; assets to your sheet, and a JSON snapshot to Drive, after every save</div></div>' +
       '</div>' +
-      '<div class="auto-desc" style="margin-bottom:14px;">Paste your <strong>Google Apps Script Web App URL</strong> below. After each Firestore save the tracker POSTs a snapshot — the script writes one sheet tab per campaign, formatted with section headers, fonts, and colors matching your Tilt Ads Sheet layout.</div>' +
+      '<div class="auto-desc" style="margin-bottom:14px;">Paste your <strong>Google Apps Script Web App URL</strong> below. After each Firestore save the tracker POSTs a full snapshot — the script writes one sheet tab per campaign (formatted to match your Tilt Ads Sheet layout) <strong>and</strong>, if you set a <strong>Drive folder ID</strong> in the script, drops a timestamped <code>tilt-tracker-backup-….json</code> file into that folder <strong>once per hour</strong> (keeping the 50 most recent). The Drive backup is the same full snapshot as the manual <em>Export backup</em>, so it can be restored via <em>Restore from backup</em>.</div>' +
       '<div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">' +
         '<input id="gsheets-url-input" type="text" class="form-input" style="flex:1; font-family:\'JetBrains Mono\',monospace; font-size:12px;" ' +
           'placeholder="https://script.google.com/macros/s/AKfy.../exec" ' +
@@ -10222,15 +10275,23 @@ function renderConfigView() {
           '1. Open your Tilt Ads Google Sheet.<br>' +
           '2. Click <strong>Extensions → Apps Script</strong>.<br>' +
           '3. Delete any existing code, paste the script below, click <strong>Save</strong>.<br>' +
-          '4. Click <strong>Deploy → New deployment</strong>. Type: <em>Web app</em>. Execute as: <em>Me</em>. Who has access: <em>Anyone</em>. Click <strong>Deploy</strong> and authorise.<br>' +
-          '5. Copy the <em>Web app URL</em> and paste it into the field above.' +
+          '4. <strong>(Optional — Drive backup)</strong> Create a folder in Google Drive to hold backups, open it, and copy the ID from the URL (<code>drive.google.com/drive/folders/<em>THIS_PART</em></code>). Paste it between the quotes on the <code>var BACKUP_FOLDER_ID = \'\';</code> line near the top of the script. Leave blank to keep Drive backups off.<br>' +
+          '5. Click <strong>Deploy → New deployment</strong>. Type: <em>Web app</em>. Execute as: <em>Me</em>. Who has access: <em>Anyone</em>. Click <strong>Deploy</strong> and authorise (the first run will ask for Drive + Sheets permission).<br>' +
+          '6. Copy the <em>Web app URL</em> and paste it into the field above.' +
         '</div>' +
         '<div style="position:relative;">' +
           '<button class="edit-btn" style="position:absolute;top:8px;right:8px;z-index:1;font-size:11px;" ' +
             'onclick="(function(){var el=document.getElementById(\'gsheets-script-code\');navigator.clipboard&&navigator.clipboard.writeText(el.innerText).then(function(){App._toast(\'Script copied\',\'success\');}).catch(function(){});})()">Copy</button>' +
           '<pre id="gsheets-script-code" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:10.5px;font-family:\'JetBrains Mono\',monospace;color:var(--text2);overflow-x:auto;white-space:pre;line-height:1.5;max-height:320px;overflow-y:auto;">' + escapeHtml(
+'// ── Google Drive auto-backup ──────────────────────────────────────────\n' +
+'// Paste the ID of a Drive folder between the quotes to turn on JSON backups.\n' +
+'// (Open the folder in Drive; the ID is the last part of the URL:\n' +
+'//  drive.google.com/drive/folders/THIS_IS_THE_ID). Leave blank to disable.\n' +
+'var BACKUP_FOLDER_ID = \'\';\n' +
+'var BACKUP_KEEP = 50;            // keep the most recent N backups; older ones are trashed\n' +
+'var BACKUP_INTERVAL_MS = 3600000; // write at most one backup per hour (60 * 60 * 1000)\n\n' +
 'function doGet(e) {\n' +
-'  return ContentService.createTextOutput(\'Tilt Tracker — Google Sheets Sync (POST only)\')\n' +
+'  return ContentService.createTextOutput(\'Tilt Tracker — Google Sheets Sync + Drive backup (POST only)\')\n' +
 '    .setMimeType(ContentService.MimeType.TEXT);\n' +
 '}\n\n' +
 'function doPost(e) {\n' +
@@ -10248,11 +10309,44 @@ function renderConfigView() {
 '      var sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);\n' +
 '      writeSheet(sheet, campAssets);\n' +
 '    });\n' +
+'    backupToDrive(data); // write a timestamped JSON snapshot to Drive (no-op if folder unset)\n' +
 '    return ContentService.createTextOutput(JSON.stringify({ok:true}))\n' +
 '      .setMimeType(ContentService.MimeType.JSON);\n' +
 '  } catch(err) {\n' +
 '    return ContentService.createTextOutput(JSON.stringify({ok:false,error:err.message}))\n' +
 '      .setMimeType(ContentService.MimeType.JSON);\n' +
+'  }\n' +
+'}\n\n' +
+'// Writes the full tracker snapshot to a JSON file in the configured Drive folder,\n' +
+'// at most once per BACKUP_INTERVAL_MS (hourly), then trims the folder to the most\n' +
+'// recent BACKUP_KEEP files. Wrapped so a Drive failure never breaks the sheet sync.\n' +
+'function backupToDrive(data) {\n' +
+'  if (!BACKUP_FOLDER_ID) return;\n' +
+'  try {\n' +
+'    // Throttle to one backup per hour, tracked server-side so it holds across every\n' +
+'    // teammate\'s browser (they all POST here). Set the marker BEFORE writing so a burst\n' +
+'    // of concurrent saves can\'t each slip through.\n' +
+'    var props = PropertiesService.getScriptProperties();\n' +
+'    var last = Number(props.getProperty(\'lastBackupMs\') || 0);\n' +
+'    var now = Date.now();\n' +
+'    if (now - last < BACKUP_INTERVAL_MS) return;\n' +
+'    props.setProperty(\'lastBackupMs\', String(now));\n' +
+'    var folder = DriveApp.getFolderById(BACKUP_FOLDER_ID);\n' +
+'    var snapshot = data.state || { campaigns: data.campaigns || [], assets: data.assets || [] };\n' +
+'    var stamp = Utilities.formatDate(new Date(), \'Etc/UTC\', "yyyy-MM-dd\'T\'HH-mm-ss");\n' +
+'    folder.createFile(\'tilt-tracker-backup-\' + stamp + \'.json\',\n' +
+'      JSON.stringify(snapshot), MimeType.PLAIN_TEXT);\n' +
+'    // Retention: trash everything past the newest BACKUP_KEEP by name (names sort chronologically).\n' +
+'    var files = [];\n' +
+'    var iter = folder.getFiles();\n' +
+'    while (iter.hasNext()) {\n' +
+'      var f = iter.next();\n' +
+'      if (f.getName().indexOf(\'tilt-tracker-backup-\') === 0) files.push(f);\n' +
+'    }\n' +
+'    files.sort(function(a, b) { return a.getName() < b.getName() ? 1 : -1; }); // newest first\n' +
+'    for (var i = BACKUP_KEEP; i < files.length; i++) files[i].setTrashed(true);\n' +
+'  } catch(err) {\n' +
+'    // Swallow — the sheet sync already succeeded; a Drive hiccup should not fail the request.\n' +
 '  }\n' +
 '}\n\n' +
 'function writeSheet(sheet, assets) {\n' +
@@ -11772,8 +11866,8 @@ var App = {
       if (!ok) { render(); return; }
     }
     Fb.setUserRole(uid, role).then(function() {
-      logAction('updated', 'Changed ' + displayName + '\u2019s role to ' + role);
-      toast(displayName + ' is now ' + role, 'success');
+      logAction('updated', 'Changed ' + displayName + '\u2019s role to ' + roleLabelFor(role));
+      toast(displayName + ' is now ' + roleLabelFor(role), 'success');
       // The users-collection listener will re-fire and re-render automatically.
     }).catch(function(err) {
       toast('Could not change role: ' + (err.message || err), 'error');
@@ -14216,6 +14310,37 @@ var App = {
     var text = el ? el.value : '';
     if (!pushAssetComment(id, text)) { if (el) el.focus(); return; }
     render();
+  },
+  // Approve from the Cat Heads Review tab, with a swipe-right-and-collapse animation so
+  // the card visibly leaves the queue and the videos below slide up to replace it. The
+  // actual state change (which re-renders and drops the card) is deferred until the
+  // animation finishes. Falls back to an immediate approve if the DOM node isn't found.
+  approveCatReviewCard: function(id) {
+    var safe = String(id).replace(/'/g, "\\'");
+    var el = document.getElementById('cr-card-' + safe);
+    if (!el || el.getAttribute('data-approving') === '1') {
+      if (!el) App.setAssetCategoryHeadQc(id, 'Approved');
+      return;
+    }
+    el.setAttribute('data-approving', '1');
+    // Pin the current height so it can animate down to 0 (this is what pulls the
+    // following cards upward). Force a reflow before switching on the transition.
+    el.style.height = el.offsetHeight + 'px';
+    void el.offsetHeight;
+    el.classList.add('cr-card-approving');
+    el.style.height = '0px';
+    el.style.marginBottom = '0px';
+    el.style.paddingTop = '0px';
+    el.style.paddingBottom = '0px';
+    el.style.borderWidth = '0px';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(120%)';
+    var committed = false;
+    var commit = function() { if (committed) return; committed = true; App.setAssetCategoryHeadQc(id, 'Approved'); };
+    el.addEventListener('transitionend', function(ev) {
+      if (ev.propertyName === 'height' || ev.propertyName === 'transform') commit();
+    });
+    setTimeout(commit, 650); // fallback if transitionend never fires
   },
   catReviewNeedsRevisions: function(id) {
     var reason = window.prompt('Why does this need revisions? This is saved as a comment and sent to the editor.');
