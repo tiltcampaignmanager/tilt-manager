@@ -1886,6 +1886,7 @@ var Fb = {
         statusFilter: true,
         editorFilter: true,
         qcFilter: true,
+        catReviewWindow: true,
         search: true,
         logEditor: true,
         logWeekOffset: true,
@@ -2736,6 +2737,9 @@ function getCategoryHead(category) {
 // Footage QC values (which track raw-files / pricing readiness) — these track
 // the head's review verdict on the produced video.
 var CATEGORY_HEAD_QC_VALUES = ['Draft', 'For Review', 'Needs Revisions', 'Approved', 'Cancelled'];
+// Countries currently in scope for category-head review (tab visibility + Slack pings).
+// Other countries are out of scope until those teams are onboarded — widen here to expand.
+var CHQ_COUNTRY_ALLOWLIST = { UK: 1, US: 1 };
 var EDITOR_ALLOWED_DIFF = {
   Zidni:  ['Low','Moderate','High','Max'],
   Sharm:  ['Low','Moderate','High'],
@@ -2790,6 +2794,9 @@ var STATE = {
   qcFilter: 'all',
   dateApprovedFilter: '',
   estDeliveryFilter: '',
+  // Cat Heads Review tab: time-window bucket for the review queue — 'daily' (ready
+  // today), 'weekly' (this week), or 'monthly' (this month).
+  catReviewWindow: 'daily',
   // Google Sheets backup sync — Apps Script Web App URL. When set, tracker POSTs
   // a JSON snapshot of campaigns + assets after each Firestore save (debounced).
   sheetsWebhookUrl: '',
@@ -3282,6 +3289,15 @@ function mkAsset(id, pn, campaignId, name, editor, difficulty, estDelivery, vers
     // ISO date stamped when categoryHeadQc transitions to 'Approved'. Cleared when
     // categoryHeadQc moves away from 'Approved'.
     chDateApproved: '',
+    // ISO date (YYYY-MM-DD) stamped the first time categoryHeadQc goes to 'For Review'.
+    // Drives chronological ordering + the Daily/Weekly/Monthly time-window buckets on
+    // the Cat Heads Review tab. Not reset on re-review so the "waiting since" clock holds.
+    chReviewReadyAt: '',
+    // Threaded review comments: [{ id, author, authorEmail, ts, text }]. ts is an ISO
+    // string. Managers and editors both post; the reason behind a 'Needs Revisions'
+    // verdict lands here (and rides the Slack ping to the editor). Kept on the asset so
+    // it syncs to Firestore with the rest of the record.
+    comments: [],
     // ISO date (YYYY-MM-DD) of when this asset was most recently set to 'Assigned' status.
     // Powers the "To Do Today" column on the Today board. Updated whenever:
     //   - an editor is first assigned (status goes from Draft to Assigned)
@@ -3926,6 +3942,9 @@ function queueNotification(recipient, changeType, asset, detail, opts) {
     category: asset.category || '',
     change: changeType,
     detail: detail || '',
+    // Optional free-text note shown under the item in the Slack message (e.g. the
+    // reason a category head asked for revisions). Empty for most notifications.
+    note: (opts.note) || '',
     queuedAt: Date.now()
   });
   if (batch.firstQueuedAt === null) batch.firstQueuedAt = Date.now();
@@ -5058,6 +5077,7 @@ function totalPending() {
 var TAB_DEFS = {
   campaigns:        { label: 'Campaigns' },
   today:            { label: 'Board' },
+  catReview:        { label: 'Cat Heads Review', badge: true },
   editingCalendar:  { label: 'Editing Calendar' },
   log:              { label: 'Daily Log' },
   notifications:    { label: 'Notifications', badge: true },
@@ -5066,7 +5086,7 @@ var TAB_DEFS = {
   content:          { label: 'Content' },
   config:           { label: 'Config' }
 };
-var DEFAULT_TAB_ORDER = ['campaigns', 'today', 'notifications', 'log', 'editingCalendar', 'automations', 'reporting', 'content', 'config'];
+var DEFAULT_TAB_ORDER = ['campaigns', 'today', 'catReview', 'notifications', 'log', 'editingCalendar', 'automations', 'reporting', 'content', 'config'];
 
 // Role-based tab visibility. Editors see the day-to-day tabs; PMs add Notifications
 // and Scheduler so they can drive comms; Admins see everything including Automations
@@ -5074,9 +5094,9 @@ var DEFAULT_TAB_ORDER = ['campaigns', 'today', 'notifications', 'log', 'editingC
 // Tab visibility is also enforced server-side in Phase D via Firestore rules on
 // the documents these tabs touch (config/app and the users collection).
 var ROLE_TAB_VISIBILITY = {
-  editor: ['campaigns', 'today', 'editingCalendar', 'log', 'content'],
-  pm:     ['campaigns', 'today', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'],
-  admin:  ['campaigns', 'today', 'editingCalendar', 'log', 'notifications', 'automations', 'reporting', 'content', 'config']
+  editor: ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'content'],
+  pm:     ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'],
+  admin:  ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'automations', 'reporting', 'content', 'config']
 };
 
 // Returns the list of tab IDs the given role is allowed to see. Unknown roles
@@ -5137,7 +5157,13 @@ function renderTopbar() {
   // guarded by pdragCheckClick so a dragging-then-releasing doesn't also switch tabs.
   var tabsHtml = order.map(function(tabId) {
     var def = TAB_DEFS[tabId];
-    var badge = (def.badge && tabId === 'notifications') ? pendingBadge : '';
+    var badge = '';
+    if (def.badge && tabId === 'notifications') {
+      badge = pendingBadge;
+    } else if (def.badge && tabId === 'catReview') {
+      var cr = catReviewPendingCount();
+      badge = cr > 0 ? '<span class="tab-badge">' + cr + '</span>' : '';
+    }
     return '<div class="tab-btn ' + (STATE.tab === tabId ? 'active' : '') +
       '" role="button" tabindex="0" data-tab-id="' + tabId + '"' +
       ' onmousedown="pdragStart(event, \'tab\', \'' + tabId + '\')"' +
@@ -6824,17 +6850,18 @@ function renderNotificationsView() {
     var isChq = recipient.indexOf('CHQ:') === 0;
     var isCha = recipient.indexOf('CHA:') === 0;
     var countryCode = isPm ? recipient.slice(3) : (isCha ? recipient.slice(4) : null);
-    var chqCategory = isChq ? recipient.slice(4) : null;
-    var head = isChq ? getCategoryHead(chqCategory) : '';
-    // CHQ titles render as TWO lines: category on top (wraps cleanly for long
-    // names like "Bags and Accessories"), head as a smaller muted subtitle
-    // below. PM and editor titles stay as a single plain string.
+    // CHQ batches are now keyed per manager (CHQ:<head>), so the suffix is the head
+    // name. The subtitle lists the categories that head owns.
+    var head = isChq ? recipient.slice(4) : '';
+    var headCats = isChq ? (STATE.categories || []).filter(function(cat) { return getCategoryHead(cat.name) === head; }).map(function(cat) { return cat.name; }) : [];
+    // CHQ titles render as TWO lines: head on top, their categories as a smaller
+    // muted subtitle below. PM and editor titles stay as a single plain string.
     var displayName;
     if (isPm) {
       displayName = escapeHtml(countryCode + ' \u2014 PM review queue');
     } else if (isChq) {
-      displayName = '<div class="batch-card-title-main">' + escapeHtml(chqCategory) + '</div>'
-        + (head ? '<div class="batch-card-title-sub">' + escapeHtml(head) + '</div>' : '');
+      displayName = '<div class="batch-card-title-main">' + escapeHtml(head) + '</div>'
+        + (headCats.length ? '<div class="batch-card-title-sub">' + escapeHtml(headCats.join(' \u00b7 ')) + '</div>' : '');
     } else if (isCha) {
       displayName = escapeHtml(countryCode + ' \u2014 Category Head Approved');
     } else {
@@ -6853,15 +6880,11 @@ function renderNotificationsView() {
         '<div class="country-flag flag-' + countryCode + '" style="width:20px; height:14px; font-size:8px;">' + countryCode + '</div>' +
         '</div>';
     } else if (isChq) {
-      // CHQ avatar: magnifier glyph + a category-colored chip showing the
-      // category name. The title also shows the category but redundancy is OK
-      // here — the chip is a quick visual scan, the title is descriptive.
-      var c = categoryColor(chqCategory);
-      var bgL = c.bgLight || c.bg;
-      var fgL = c.fgLight || c.fg;
-      avatarHtml = '<div class="pm-avatar" title="Category Head QC for ' + escapeHtml(chqCategory) + (head ? ' (' + head + ')' : '') + '">' +
+      // CHQ avatar: magnifier glyph over the head's initials — the queue is keyed
+      // per manager now, so the chip shows who's reviewing rather than a category.
+      avatarHtml = '<div class="pm-avatar" title="Category Head QC for ' + escapeHtml(head) + '">' +
         '<div class="country-flag flag-PM" style="width:28px; height:20px; font-size:14px;">\u{1F50D}</div>' +
-        '<div class="cat-pill" style="--cat-bg:' + c.bg + '; --cat-fg:' + c.fg + '; --cat-bg-light:' + bgL + '; --cat-fg-light:' + fgL + '; height:auto; max-width:90px; font-size:7.5px; padding:1px 4px; line-height:1.15; display:inline-flex; align-items:center; justify-content:center; text-align:center; white-space:normal; word-break:break-word;">' + escapeHtml(chqCategory) + '</div>' +
+        '<div class="country-flag flag-PM" style="width:20px; height:14px; font-size:8px;">' + escapeHtml(head.slice(0, 2).toUpperCase()) + '</div>' +
         '</div>';
     } else {
       avatarHtml = '<div class="editor-avatar av-' + recipient + '">' + editorInitials(recipient) + '</div>';
@@ -7042,17 +7065,11 @@ function renderNotificationsView() {
 
   var editorCards = EDITORS.filter(function(e) { return e !== 'Seller'; }).map(renderBatchCard).join('');
   var pmCards = STATE.countries.map(function(c) { return renderBatchCard('PM:' + c.code); }).join('');
-  // Category Head QC cards — one per category that has a head. The queue keys off
-  // the asset's category, batched independent of country (UK + US items share one
-  // queue). Country mix is shown via [UK] / [US] tags on each item line.
-  var chqCategories = (function() {
-    var seen = {}, out = [];
-    Object.keys(CATEGORY_HEADS).forEach(function(cat) {
-      if (!seen[cat]) { seen[cat] = true; out.push(cat); }
-    });
-    return out;
-  })();
-  var chqCards = chqCategories.map(function(cat) { return renderBatchCard('CHQ:' + cat); }).join('');
+  // Category Head QC cards — one per manager. The queue keys off the video's category
+  // head (CHQ:<head>), so a head who owns several categories gets one card / one digest
+  // message. Batched independent of country; country mix shows as [UK] / [US] per item.
+  var chqHeads = allCategoryHeads();
+  var chqCards = chqHeads.map(function(head) { return renderBatchCard('CHQ:' + head); }).join('');
   // Category Head Approved cards — one per country in the allowlist (UK, US).
   // Pings the country PM when a category head signs off on a video. Separate
   // queue from PM Review so the two signals don't get visually mixed up.
@@ -7082,7 +7099,7 @@ function renderNotificationsView() {
         var isChqEntry = typeof n.editor === 'string' && n.editor.indexOf('CHQ:') === 0;
         var isChaEntry = typeof n.editor === 'string' && n.editor.indexOf('CHA:') === 0;
         var entryCountry = isPmEntry ? n.editor.slice(3) : (isChaEntry ? n.editor.slice(4) : null);
-        var entryCategory = isChqEntry ? n.editor.slice(4) : null;
+        var entryHead = isChqEntry ? n.editor.slice(4) : null;
         var avatarHtml;
         if (isPmEntry) {
           avatarHtml = '<div class="pm-avatar" title="PM review queue for ' + entryCountry + '">' +
@@ -7095,18 +7112,15 @@ function renderNotificationsView() {
             '<div class="country-flag flag-' + entryCountry + '" style="width:20px; height:14px; font-size:8px;">' + entryCountry + '</div>' +
             '</div>';
         } else if (isChqEntry) {
-          var ec = categoryColor(entryCategory);
-          var ecBgL = ec.bgLight || ec.bg;
-          var ecFgL = ec.fgLight || ec.fg;
-          avatarHtml = '<div class="pm-avatar" title="Category Head QC for ' + escapeHtml(entryCategory) + '">' +
+          avatarHtml = '<div class="pm-avatar" title="Category Head QC for ' + escapeHtml(entryHead) + '">' +
             '<div class="country-flag flag-PM" style="width:28px; height:20px; font-size:14px;">\u{1F50D}</div>' +
-            '<div class="cat-pill" style="--cat-bg:' + ec.bg + '; --cat-fg:' + ec.fg + '; --cat-bg-light:' + ecBgL + '; --cat-fg-light:' + ecFgL + '; height:auto; max-width:90px; font-size:7.5px; padding:1px 4px; line-height:1.15; display:inline-flex; align-items:center; justify-content:center; text-align:center; white-space:normal; word-break:break-word;">' + escapeHtml(entryCategory) + '</div>' +
+            '<div class="country-flag flag-PM" style="width:20px; height:14px; font-size:8px;">' + escapeHtml((entryHead || '').slice(0, 2).toUpperCase()) + '</div>' +
             '</div>';
         } else {
           avatarHtml = '<div class="editor-avatar av-' + n.editor + '">' + editorInitials(n.editor) + '</div>';
         }
         var displayName = isPmEntry ? ('PM review \u2014 ' + entryCountry)
-                        : isChqEntry ? ('Category Head QC \u2014 ' + entryCategory)
+                        : isChqEntry ? ('Category Head QC \u2014 ' + entryHead)
                         : isChaEntry ? ('Category Head Approved \u2014 ' + entryCountry)
                         : n.editor;
         return '<div class="sent-entry">' +
@@ -9337,6 +9351,243 @@ function renderReportingView() {
   return '<div class="report-panel">' + controls + paceHtml + editorTallyHtml + mainContent + '</div>';
 }
 
+// ===================== CAT HEADS REVIEW =====================
+// Distinct category-head names (from CATEGORY_HEADS + any runtime overrides), in a
+// stable first-seen order. Used to build the review sections and the badge scope.
+function allCategoryHeads() {
+  var seen = {}, out = [];
+  var add = function(h) { if (h && !seen[h]) { seen[h] = true; out.push(h); } };
+  (STATE.categories || []).forEach(function(cat) { add(getCategoryHead(cat.name)); });
+  Object.keys(CATEGORY_HEADS).forEach(function(cat) { add(getCategoryHead(cat)); });
+  return out;
+}
+
+// The signed-in user's category-head identity, matched by first name against the head
+// list (heads are stored as first names). Returns '' when the user isn't a head — e.g.
+// a PM or admin, who then see every manager's queue.
+function currentCatHead() {
+  var u = (typeof Auth !== 'undefined' && Auth.user) ? Auth.user : null;
+  if (!u) return '';
+  var first = String(u.displayName || u.email || '').toLowerCase().split(/[\s@.]/)[0];
+  if (!first) return '';
+  var heads = allCategoryHeads();
+  for (var i = 0; i < heads.length; i++) { if (heads[i].toLowerCase() === first) return heads[i]; }
+  return '';
+}
+
+// Every asset currently awaiting category-head review, in the countries in scope.
+function catReviewPendingAssets() {
+  return STATE.assets.filter(function(a) {
+    if (a.categoryHeadQc !== 'For Review') return false;
+    var camp = findCampaignById(a.campaignId);
+    var country = camp && camp.country;
+    return !!(country && CHQ_COUNTRY_ALLOWLIST[country]);
+  });
+}
+
+// Count for the tab badge — scoped to the viewer's own categories if they're a head,
+// otherwise the full pending count (for PMs / admins overseeing everyone).
+function catReviewPendingCount() {
+  var mine = currentCatHead();
+  var list = catReviewPendingAssets();
+  if (mine) list = list.filter(function(a) { return getCategoryHead(a.category) === mine; });
+  return list.length;
+}
+
+// Live pending breakdown for one head: { total, byCat: [{cat, n}] } across all their
+// categories (in-scope countries). Powers the Slack digest header.
+function catHeadPendingBreakdown(head) {
+  var byCat = {}, order = [], total = 0;
+  catReviewPendingAssets().forEach(function(a) {
+    if (getCategoryHead(a.category) !== head) return;
+    var c = a.category || '—';
+    if (byCat[c] === undefined) { byCat[c] = 0; order.push(c); }
+    byCat[c]++; total++;
+  });
+  return { total: total, byCat: order.map(function(c) { return { cat: c, n: byCat[c] }; }) };
+}
+
+// "ready today" / "ready 3 days ago" from a YYYY-MM-DD stamp (day granularity).
+function catReviewWaitLabel(iso) {
+  if (!iso) return 'ready for review';
+  var p = iso.split('-'); if (p.length !== 3) return 'ready for review';
+  var d = new Date(+p[0], (+p[1]) - 1, +p[2]);
+  var days = Math.round((bizNow() - d) / 86400000);
+  if (days <= 0) return 'ready today';
+  if (days === 1) return 'ready yesterday';
+  return 'ready ' + days + ' days ago';
+}
+
+function renderCatReviewView() {
+  var win = STATE.catReviewWindow || 'daily';
+  var today = todayLocalISO();
+  var weekR = getThisWeekRange();
+  // Time-window predicate on chReviewReadyAt. Undated pending items (legacy rows set
+  // For Review before this feature shipped) always show so they can't get stranded.
+  // Monthly is the full backlog catch-all (anything still pending), so nothing older
+  // than the calendar month is hidden from the manager.
+  function inWindow(iso) {
+    if (!iso) return true;
+    if (win === 'daily')  return iso === today;
+    if (win === 'weekly') return iso >= weekR.start && iso <= weekR.end;
+    return true; // monthly = all pending
+  }
+
+  var mine = currentCatHead();
+  var pending = catReviewPendingAssets().filter(function(a) {
+    if (!inWindow(a.chReviewReadyAt)) return false;
+    // A category head only ever sees their own queue; PMs/admins see everyone.
+    if (mine && getCategoryHead(a.category) !== mine) return false;
+    return true;
+  });
+  // Longest-waiting first; undated treated as oldest.
+  pending.sort(function(a, b) {
+    var ax = a.chReviewReadyAt || '0000-00-00', bx = b.chReviewReadyAt || '0000-00-00';
+    return ax < bx ? -1 : (ax > bx ? 1 : 0);
+  });
+
+  // Which heads get a section: the viewer if they're a head, otherwise all heads that
+  // have in-window pending items (PM/admin overview).
+  var heads;
+  if (mine) {
+    heads = [mine];
+  } else {
+    var seen = {}; heads = [];
+    pending.forEach(function(a) { var h = getCategoryHead(a.category); if (h && !seen[h]) { seen[h] = true; heads.push(h); } });
+  }
+
+  var winBtn = function(key, label) {
+    var active = win === key;
+    return '<button onclick="App.setCatReviewWindow(\'' + key + '\')" style="border:none; padding:6px 16px; font-size:13px; cursor:pointer; ' +
+      (active ? 'background:var(--accent); color:#fff;' : 'background:transparent; color:var(--text2);') + '">' + label + '</button>';
+  };
+  var toggle = '<div style="display:inline-flex; border:1px solid var(--border2); border-radius:8px; overflow:hidden;">' +
+    winBtn('daily', 'Daily') + winBtn('weekly', 'Weekly') + winBtn('monthly', 'Monthly') + '</div>';
+
+  var header = '<div style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:20px;">' +
+      '<div><div style="font-size:20px; font-weight:600; color:var(--text1);">Cat Heads Review</div>' +
+      '<div style="font-size:13px; color:var(--text3); margin-top:2px;">Videos ready for category-manager sign-off' + (mine ? ' — your queue' : '') + '</div></div>' +
+      toggle + '</div>';
+
+  if (pending.length === 0) {
+    return '<div style="padding:28px 32px; max-width:920px;">' + header +
+      '<div style="padding:60px 20px; text-align:center; color:var(--text3); font-size:14px; background:var(--bg2); border:1px solid var(--border); border-radius:12px;">' +
+      'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.</div></div>';
+  }
+
+  var sections = heads.map(function(head) {
+    var headAssets = pending.filter(function(a) { return getCategoryHead(a.category) === head; });
+    if (headAssets.length === 0 && !mine) return '';
+    // Group this head's assets by category (preserving sorted order).
+    var byCat = {}, catOrder = [];
+    headAssets.forEach(function(a) { var c = a.category || '—'; if (!byCat[c]) { byCat[c] = []; catOrder.push(c); } byCat[c].push(a); });
+
+    var initials = head.slice(0, 2).toUpperCase();
+    var catsLabel = catOrder.join(' · ');
+    var headHeader = '<div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">' +
+        '<div style="width:36px; height:36px; border-radius:50%; background:var(--accent-dim); color:var(--accent2); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:13px;">' + escapeHtml(initials) + '</div>' +
+        '<div style="flex:1;"><div style="font-weight:600; font-size:15px; color:var(--text1);">' + escapeHtml(head) + '</div>' +
+        (catsLabel ? '<div style="font-size:12px; color:var(--text3);">' + escapeHtml(catsLabel) + '</div>' : '') + '</div>' +
+        '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + headAssets.length + ' pending</span>' +
+      '</div>';
+
+    var catBlocks = catOrder.map(function(cat) {
+      var cards = byCat[cat].map(function(a) { return renderCatReviewCard(a); }).join('');
+      return '<div style="font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text3); margin:14px 0 8px;">' + categoryBadgeHtml(cat) + '</div>' + cards;
+    }).join('');
+
+    return '<div style="margin-bottom:32px;">' + headHeader + catBlocks + '</div>';
+  }).join('');
+
+  return '<div style="padding:28px 32px; max-width:920px;">' + header + sections + '</div>';
+}
+
+// One video row on the Cat Heads Review tab: status, actions, and comment thread.
+function renderCatReviewCard(a) {
+  var id = String(a.id).replace(/'/g, "\\'");
+  var camp = findCampaignById(a.campaignId);
+  var country = camp && camp.country ? camp.country : '';
+  var videoUrl = extractSingleUrl(a.finalVideo);
+  var qc = a.categoryHeadQc || 'For Review';
+  var statusColors = {
+    'For Review':      'background:var(--accent-dim); color:var(--accent2);',
+    'Needs Revisions': 'background:var(--amber-bg); color:var(--amber-text);',
+    'Approved':        'background:var(--green-bg); color:var(--green-text);'
+  };
+  var statusPill = '<span style="' + (statusColors[qc] || statusColors['For Review']) + ' font-size:12px; padding:4px 10px; border-radius:20px; white-space:nowrap;">' + escapeHtml(qc) + '</span>';
+
+  var meta = [];
+  if (a.editor) meta.push('Editor: ' + escapeHtml(a.editor));
+  meta.push(catReviewWaitLabel(a.chReviewReadyAt));
+  if (country) meta.push(escapeHtml(country));
+  var metaLine = '<div style="font-size:12px; color:var(--text3); margin-top:2px;">' + meta.join(' · ') +
+    (videoUrl ? ' · <a href="' + escapeHtml(videoUrl) + '" target="_blank" style="color:var(--accent2); text-decoration:none;">Video ↗</a>' : '') + '</div>';
+
+  var approveBtn = '<button onclick="App.setAssetCategoryHeadQc(\'' + id + '\',\'Approved\')" style="border:1px solid var(--border2); background:var(--green-bg); color:var(--green-text); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">✓ Approve</button>';
+  var reviseBtn  = (qc !== 'Needs Revisions')
+    ? '<button onclick="App.catReviewNeedsRevisions(\'' + id + '\')" style="border:1px solid var(--border2); background:transparent; color:var(--text2); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">↺ Needs revisions</button>'
+    : '';
+
+  // Comment thread.
+  var comments = Array.isArray(a.comments) ? a.comments : [];
+  var thread = comments.map(function(c) {
+    var who = escapeHtml(c.author || 'Someone');
+    var when = c.ts ? escapeHtml(formatCommentTs(c.ts)) : '';
+    var ci = (c.author || '?').slice(0, 2).toUpperCase();
+    return '<div style="display:flex; gap:10px; margin-bottom:10px;">' +
+        '<div style="width:26px; height:26px; flex:none; border-radius:50%; background:var(--bg4); color:var(--text2); display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600;">' + escapeHtml(ci) + '</div>' +
+        '<div style="flex:1;"><div style="font-size:12px; color:var(--text2);"><b style="color:var(--text1);">' + who + '</b>' + (when ? ' · ' + when : '') + '</div>' +
+        '<div style="font-size:13px; color:var(--text2); line-height:1.5; margin-top:1px; white-space:pre-wrap;">' + escapeHtml(c.text || '') + '</div></div>' +
+      '</div>';
+  }).join('');
+
+  var commentBox = '<div style="border-top:1px solid var(--border); margin-top:12px; padding-top:12px;">' +
+      (thread || '<div style="font-size:12px; color:var(--text3); margin-bottom:10px;">No comments yet.</div>') +
+      '<div style="display:flex; gap:8px; align-items:center;">' +
+        '<input id="cr-c-' + id + '" type="text" placeholder="Add a comment…" ' +
+          'onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addCatReviewComment(\'' + id + '\')}" ' +
+          'style="flex:1; background:var(--bg); border:1px solid var(--border2); color:var(--text1); border-radius:6px; padding:7px 10px; font-size:13px;">' +
+        '<button onclick="App.addCatReviewComment(\'' + id + '\')" style="border:1px solid var(--border2); background:var(--bg4); color:var(--text1); padding:7px 14px; font-size:13px; border-radius:6px; cursor:pointer;">Comment</button>' +
+      '</div></div>';
+
+  return '<div style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px;">' +
+      '<div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">' +
+        '<div style="flex:1; min-width:180px;"><div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(a.name || 'Untitled') + '</div>' + metaLine + '</div>' +
+        '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">' + statusPill + approveBtn + reviseBtn + '</div>' +
+      '</div>' + commentBox + '</div>';
+}
+
+// Append a comment to an asset's thread. Returns true if added. Does NOT re-render —
+// the caller decides when to render (so a status change + comment render once). Author
+// is the signed-in Google user.
+function pushAssetComment(id, text) {
+  var a = findAssetById(id);
+  if (!a) return false;
+  var clean = String(text || '').trim();
+  if (!clean) return false;
+  if (!Array.isArray(a.comments)) a.comments = [];
+  var u = (typeof Auth !== 'undefined' && Auth.user) ? Auth.user : null;
+  a.comments.push({
+    id: newLocalId('c'),
+    author: u ? (u.displayName || u.email) : 'Unknown',
+    authorEmail: u ? u.email : '',
+    ts: new Date().toISOString(),
+    text: clean
+  });
+  logAction('commented', 'Asset "' + a.name + '": ' + clean);
+  return true;
+}
+
+// Compact timestamp for a comment ISO string (e.g. "10 Jul, 14:05"). Falls back to the
+// raw string if it can't be parsed.
+function formatCommentTs(iso) {
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var hh = d.getHours(), mm = d.getMinutes();
+  return d.getDate() + ' ' + MON[d.getMonth()] + ', ' + (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
+}
+
 function renderContentView() {
   var MONTH_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   function isoDate(d) { var mm=d.getMonth()+1,dd=d.getDate(); return d.getFullYear()+'-'+(mm<10?'0':'')+mm+'-'+(dd<10?'0':'')+dd; }
@@ -10687,13 +10938,17 @@ function sendPendingBatch(editor, opts) {
   function clearInFlight() { clearBatchInFlight(editor); }
 
   var isPmBatch = editor.indexOf('PM:') === 0;
+  // CHQ batches are per-manager and always route to the single categoryHeadWebhook, so
+  // splitting by country would send the same manager two messages to the same channel —
+  // defeating the one-digest-per-manager design. Never split CHQ batches.
+  var isChqBatch = editor.indexOf('CHQ:') === 0;
   var windowItems = batch.items.slice(0, BATCH_SIZE_LIMIT);
   var extraItems = batch.items.slice(BATCH_SIZE_LIMIT);
   var countries = batchCountriesOf(windowItems);
   var userWantsNoSplit = !!STATE.noSplit[editor];
   // Don't split if the intl thread covers all items — they should go to one thread.
   var intlThreadActive = !!(EDITORS.indexOf(editor) >= 0 && resolveDailyThreadForIntl(windowItems));
-  var shouldSplit = !isPmBatch && countries.length > 1 && !userWantsNoSplit && !intlThreadActive;
+  var shouldSplit = !isPmBatch && !isChqBatch && countries.length > 1 && !userWantsNoSplit && !intlThreadActive;
 
   if (shouldSplit) {
     return sendPendingBatchSplit(editor, windowItems, extraItems, opts);
@@ -10711,8 +10966,10 @@ function sendPendingBatch(editor, opts) {
     var intlThread = resolveDailyThreadForIntl(windowItems);
     if (intlThread) thread = intlThread;
   } else if (typeof editor === 'string' && editor.indexOf('CHQ:') === 0) {
-    var chqCategory = editor.slice(4);
-    thread = resolveDailyThreadForCategory(chqCategory);
+    // CHQ batches are keyed per head now; the per-category daily thread (if any) is
+    // resolved from a representative item's category.
+    var chqCategory = (windowItems[0] && windowItems[0].category) || '';
+    thread = chqCategory ? resolveDailyThreadForCategory(chqCategory) : null;
   }
   var token = (STATE.slackBotToken || '').trim();
   var useThread = !!(thread && token);
@@ -11085,6 +11342,15 @@ function buildBatchMessage(recipient, items, opts) {
     var editorM = mentionEditor(it.editor);
     var pmM     = it.country ? mentionPm(it.country) : '';
     var chM     = it.category ? mentionCategoryHead(it.category) : '';
+    // Category-head "For Review" pings are a per-manager digest: one running total
+    // with a per-category breakdown, computed live. All items in a CHQ batch share
+    // one head, so they collapse under this single header.
+    if (status === 'For Review (Category Head)') {
+      var bd = catHeadPendingBreakdown(getCategoryHead(it.category));
+      var parts = bd.byCat.map(function(x) { return x.cat + ': ' + x.n; }).join(', ');
+      return chM + ' you have ' + bd.total + ' video' + (bd.total === 1 ? '' : 's') +
+        ' pending review' + (parts ? ' — ' + parts : '');
+    }
     var recipientMention = '';
     var senderMention = '';
     switch (status) {
@@ -11163,6 +11429,9 @@ function buildBatchMessage(recipient, items, opts) {
       var name = it.name || '';
       var links = linksFor(it);
       var body = (idx + 1) + '. ' + name;
+      if (it.note) {
+        body += '\n    _' + it.note + '_';
+      }
       if (links.length) {
         body += '\n' + links.map(function(L) { return '    ' + L; }).join('\n');
       }
@@ -11245,6 +11514,7 @@ function render() {
 
   var body;
   if (STATE.tab === 'today') body = renderTodayView();
+  else if (STATE.tab === 'catReview') body = renderCatReviewView();
   else if (STATE.tab === 'campaigns') body = renderSidebar() + renderCampaignsView();
   else if (STATE.tab === 'editingCalendar') body = renderEditingCalendarView();
   else if (STATE.tab === 'log') body = renderDailyLogView();
@@ -11699,6 +11969,15 @@ var App = {
     }
     logAction('updated', 'Asset "' + a.name + '" status: ' + oldStatus + ' \u2192 ' + newStatus);
     emitAssetChangeNotifications(a, { oldEditor: a.editor, oldStatus: oldStatus });
+    // Editor submitting for review auto-enters the category-head queue, so the video
+    // shows up on the Cat Heads Review tab (and pings the head). Only when it isn't
+    // already in a review state \u2014 an approved/needs-revisions video re-submitted keeps
+    // its existing categoryHeadQc rather than resetting. Delegate to the CHQ setter so
+    // the stamp + Slack digest + render all run through the one code path.
+    if (newStatus === 'For Review' && (!a.categoryHeadQc || a.categoryHeadQc === 'Draft')) {
+      App.setAssetCategoryHeadQc(id, 'For Review');
+      return;
+    }
     render();
   },
   deleteAsset: deleteAsset,
@@ -12442,7 +12721,8 @@ var App = {
   // Revisions / Approved). The responsible head is auto-derived from category
   // at render time, so changing this field does NOT change who's assigned \u2014
   // it only updates the head's review verdict on the produced video.
-  setAssetCategoryHeadQc: function(id, newVal) {
+  setAssetCategoryHeadQc: function(id, newVal, opts) {
+    opts = opts || {};
     var a = null;
     a = findAssetById(id);
     if (!a) return;
@@ -12455,21 +12735,28 @@ var App = {
     } else {
       a.chDateApproved = '';
     }
+    // Stamp the "waiting since" clock the first time it enters review. Not reset on
+    // re-review (Needs Revisions → back to For Review) so the tab shows true age.
+    if (newVal === 'For Review' && !a.chReviewReadyAt) {
+      a.chReviewReadyAt = todayLocalISO();
+    }
     var head = getCategoryHead(a.category) || 'no head';
     logAction('updated', 'Asset "' + a.name + '" category-head QC (' + head + '): ' + old + ' \u2192 ' + newVal);
     // Notification trigger: when transitioning INTO 'For Review', queue the
     // video into the per-category CHQ batch so the head gets pinged in Slack.
     // Other transitions (Draft, Needs Revisions, Approved) don't fire \u2014 those
     // are review verdicts the head sets, not a request for their attention.
-    // Country filter: only UK and US videos for now (other countries are out
-    // of scope for category-head review until those teams are onboarded).
-    var CHQ_COUNTRY_ALLOWLIST = { UK: 1, US: 1 };
-    if (newVal === 'For Review' && old !== 'For Review' && a.category) {
+    // Country filter: only UK and US videos for now (CHQ_COUNTRY_ALLOWLIST, other
+    // countries are out of scope for category-head review until onboarded).
+    var chqHead = getCategoryHead(a.category);
+    if (newVal === 'For Review' && old !== 'For Review' && a.category && chqHead) {
       var camp = findCampaignById(a.campaignId);
       var country = camp && camp.country;
       if (country && CHQ_COUNTRY_ALLOWLIST[country]) {
-        // Header reads "<@CategoryHead> — For Review from <@editor>".
-        queueNotification('CHQ:' + a.category, 'for-review', a, '', { statusLabel: 'For Review (Category Head)' });
+        // Batch is keyed per manager (CHQ:<head>) so a head who owns several
+        // categories gets ONE digest message. Header reads
+        // "<@CategoryHead> you have N videos pending review — Cat: n, ...".
+        queueNotification('CHQ:' + chqHead, 'for-review', a, '', { statusLabel: 'For Review (Category Head)' });
       }
     }
     // Approved → ping the assigned editor; header reads
@@ -12488,7 +12775,7 @@ var App = {
       var campN = findCampaignById(a.campaignId);
       var countryN = campN && campN.country;
       if (countryN && CHQ_COUNTRY_ALLOWLIST[countryN]) {
-        queueNotification(a.editor, 'category-needs-revisions', a, '', { statusLabel: 'Needs Revisions (Category Head)' });
+        queueNotification(a.editor, 'category-needs-revisions', a, '', { statusLabel: 'Needs Revisions (Category Head)', note: opts.note || '' });
       }
     }
     render();
@@ -13876,6 +14163,22 @@ var App = {
   onQcFilter: function(v) { STATE.qcFilter = v; render(); },
   onDateApprovedFilter: function(v) { STATE.dateApprovedFilter = v; render(); },
   onEstDeliveryFilter: function(v) { STATE.estDeliveryFilter = v; render(); },
+  // --- Cat Heads Review tab ---
+  setCatReviewWindow: function(v) { STATE.catReviewWindow = v; render(); },
+  addCatReviewComment: function(id) {
+    var el = document.getElementById('cr-c-' + String(id).replace(/'/g, "\\'"));
+    var text = el ? el.value : '';
+    if (!pushAssetComment(id, text)) { if (el) el.focus(); return; }
+    render();
+  },
+  catReviewNeedsRevisions: function(id) {
+    var reason = window.prompt('Why does this need revisions? This is saved as a comment and sent to the editor.');
+    if (reason === null) return; // user cancelled
+    if (!reason.trim()) { toast('Add a reason so the editor knows what to change', 'error'); return; }
+    pushAssetComment(id, reason.trim());
+    // Pass the reason as a note so it rides the Slack ping to the editor. setter re-renders.
+    App.setAssetCategoryHeadQc(id, 'Needs Revisions', { note: reason.trim() });
+  },
   setSchedulerDate: function(v) { STATE.schedulerDate = v; render(); },
   toggleWeekends: function(v) { STATE.schedulerIncludeWeekends = v; render(); },
   clearSchedule: clearSchedule,
