@@ -7910,6 +7910,12 @@ function importCampaignsAndAssets(campaignsData, assetsData) {
         asset.editingBrief = row.editingBrief || asset.editingBrief;
         asset.finalVideo = row.finalVideo || '';
         if (row.dateApproved) asset.dateApproved = row.dateApproved;
+        // Ready-for-CH-review date == PM approval date (same moment in the flow), so
+        // mirror dateApproved into chReviewReadyAt for imported For-Review rows (the CHQ
+        // setter that normally stamps it is bypassed on import).
+        if (asset.categoryHeadQc === 'For Review' && !asset.chReviewReadyAt) {
+          asset.chReviewReadyAt = asset.dateApproved || toISODate(row.chReviewReadyAt) || '';
+        }
         if (row.adStatus) asset.adStatus = row.adStatus;
 
         STATE.assets.push(asset);
@@ -9454,6 +9460,14 @@ function catHeadPendingBreakdown(head) {
   return { total: total, byCat: order.map(function(c) { return { cat: c, n: byCat[c] }; }) };
 }
 
+// The date a video has been waiting on category-head review since. This is the same
+// moment as the PM approval, so chReviewReadyAt and dateApproved hold the same date;
+// read chReviewReadyAt and fall back to dateApproved for legacy rows written before the
+// two were kept in sync. Returns '' if neither is set.
+function catReviewSinceISO(a) {
+  return (a && (a.chReviewReadyAt || a.dateApproved)) || '';
+}
+
 // "ready today" / "ready 3 days ago" from a YYYY-MM-DD stamp (day granularity).
 function catReviewWaitLabel(iso) {
   if (!iso) return 'ready for review';
@@ -9482,6 +9496,8 @@ function renderCatReviewView() {
 
   var mine = currentCatHead();
   var pending = catReviewPendingAssets().filter(function(a) {
+    // Bucket on the explicit stamp only — undated rows fall through the `!iso` catch-all
+    // in inWindow() and always show, so a missing stamp can't strand a video out of view.
     if (!inWindow(a.chReviewReadyAt)) return false;
     // A category head only ever sees their own queue; PMs/admins see everyone.
     if (mine && getCategoryHead(a.category) !== mine) return false;
@@ -9489,7 +9505,7 @@ function renderCatReviewView() {
   });
   // Longest-waiting first; undated treated as oldest.
   pending.sort(function(a, b) {
-    var ax = a.chReviewReadyAt || '0000-00-00', bx = b.chReviewReadyAt || '0000-00-00';
+    var ax = catReviewSinceISO(a) || '0000-00-00', bx = catReviewSinceISO(b) || '0000-00-00';
     return ax < bx ? -1 : (ax > bx ? 1 : 0);
   });
 
@@ -9606,10 +9622,12 @@ function renderCatReviewCard(a, hideCatBadge) {
 
   var meta = [];
   if (a.editor) meta.push('Editor: ' + escapeHtml(a.editor));
-  // The date the video went For Review, plus the relative "ready N days ago" wait label.
-  var readyDate = a.chReviewReadyAt ? formatDate(a.chReviewReadyAt) : '';
+  // The date the video went For Review (falls back to the PM approval date), plus the
+  // relative "ready N days ago" wait label.
+  var since = catReviewSinceISO(a);
+  var readyDate = since ? formatDate(since) : '';
   if (readyDate) meta.push('For review since ' + escapeHtml(readyDate));
-  meta.push(catReviewWaitLabel(a.chReviewReadyAt));
+  meta.push(catReviewWaitLabel(since));
   if (country) meta.push(escapeHtml(country));
   var metaLine = '<div style="font-size:12px; color:var(--text3); margin-top:2px;">' + meta.join(' · ') +
     (videoUrl ? ' · <a href="' + escapeHtml(videoUrl) + '" target="_blank" style="color:var(--accent2); text-decoration:none;">Video ↗</a>' : '') + '</div>';
@@ -12109,6 +12127,9 @@ var App = {
     // daily / weekly / monthly tally math.
     if (newStatus === 'Approved' && oldStatus !== 'Approved') {
       a.dateApproved = todayLocalISO();
+      // A video is ready for category-head review the moment it's PM-approved, so the
+      // "waiting since" clock and dateApproved are the same date — keep them in sync.
+      a.chReviewReadyAt = a.dateApproved;
     }
     // Card leaving the To Do column \u2014 clear drag-lock so it doesn't follow the card to
     // other status columns. Also clear when card transitions INTO Assigned from elsewhere
