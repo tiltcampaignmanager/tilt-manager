@@ -11613,9 +11613,11 @@ function buildBatchMessage(recipient, items, opts) {
       case 'In Progress':
         recipientMention = editorM; break;
       case 'For Review':
-        // Editor submitted for review \u2014 posts to the editor's own thread and points
-        // at the category head who now has to review it: "<@editor> \u2014 FOR REVIEW sent to <@head>".
-        recipientMention = editorM; senderMention = chM || pmM; senderVerb = 'sent to'; break;
+        // Editor submitted for review \u2014 this is the PM-review stage. Posts to the editor's
+        // own thread and points at the PM it's going to: "<@editor> \u2014 FOR REVIEW sent to <@PM>".
+        // The category head is NOT referenced or pinged here at all \u2014 they only come in
+        // later at the Category Head QC stage.
+        recipientMention = editorM; senderMention = pmM; senderVerb = 'sent to'; break;
       case 'Needs Revisions':
         recipientMention = editorM; senderMention = pmM; break;
       case 'Approved':
