@@ -1835,6 +1835,7 @@ var Fb = {
       categories: STATE.categories,
       campaigns: STATE.campaigns,
       pendingBatches: STATE.pendingBatches,
+      recentNotifKeys: Array.isArray(STATE.recentNotifKeys) ? STATE.recentNotifKeys.slice(0, 300) : [],
       sentNotifications: STATE.sentNotifications.slice(0, 5),
       activityLog: STATE.activityLog.slice(0, 50),
       nextAssetId: STATE.nextAssetId,
@@ -1980,9 +1981,33 @@ var Fb = {
         // until the subcollection listener re-fires. Never let the main-doc apply touch
         // assets; the subcollection is the only source of truth.
         if (k === 'assets' || k === 'assetCount') return;
+        // recentNotifKeys is the dedupe ledger. It must be UNIONed, never overwritten —
+        // a stale writer's copy could be missing a key we just recorded, and clobbering it
+        // would let an already-sent notification be resurrected & re-sent. Merged below.
+        if (k === 'recentNotifKeys') return;
 
         STATE[k] = data[k];
       });
+
+      // Merge the dedupe ledger: union local + incoming keyed by `key`, keep the newest ts.
+      // Then drop any pending-batch item that duplicates a sent notification (resurrection
+      // guard) so a stale tab's re-uploaded pendingBatches can't trigger a duplicate send.
+      (function mergeNotifLedger() {
+        var incoming = Array.isArray(data.recentNotifKeys) ? data.recentNotifKeys : [];
+        var local = Array.isArray(STATE.recentNotifKeys) ? STATE.recentNotifKeys : [];
+        var byKey = {};
+        local.concat(incoming).forEach(function(e) {
+          if (!e || !e.key) return;
+          if (!byKey[e.key] || (e.ts || 0) > (byKey[e.key].ts || 0)) byKey[e.key] = { key: e.key, ts: e.ts || 0 };
+        });
+        var nowL = Date.now();
+        STATE.recentNotifKeys = Object.keys(byKey)
+          .map(function(k2) { return byKey[k2]; })
+          .filter(function(e) { return (nowL - (e.ts || 0)) < RECENT_NOTIF_WINDOW_MS; })
+          .sort(function(a, b) { return (b.ts || 0) - (a.ts || 0); })
+          .slice(0, 300);
+        pruneResurrectedPendingBatches(nowL);
+      })();
 
       // Reconcile today-dated local threads against the incoming snapshot PER SLOT.
       // Two cases the whole-map last-write-wins merge gets wrong:
@@ -2971,6 +2996,9 @@ var STATE = {
   },
   // Sent notifications history (for viewing in the Notifications tab)
   sentNotifications: [],
+  // Dedupe ledger: recently-sent notifications ({ key: 'assetId|change|recipient', ts }).
+  // Synced across tabs; prevents duplicate/resurrected sends. See NOTIFICATION DEDUPE LEDGER.
+  recentNotifKeys: [],
 
   activityLog: [
     { time: '00:00', tag: 'created', msg: 'Seeded 20 video assets with difficulty ratings' },
@@ -3966,6 +3994,67 @@ function getFilteredAssets() {
 // ===================== NOTIFICATION BATCHING =====================
 // Queue a notification. `recipient` is a batch key (editor name like 'Zidni' or 'PM:UK').
 // `detail` is the already-formatted detail string to show under the item (e.g. raw+brief or Frame.io link).
+// ============================ NOTIFICATION DEDUPE LEDGER ============================
+// pendingBatches is a SYNCED field. A stale open tab that re-uploads its full STATE can
+// RESURRECT a notification another tab already sent; the 5s ticker then sends it again
+// (the "old status change re-spammed" bug). We keep a small, synced ledger of recently
+// sent notifications keyed by asset + change + recipient, consulted when queueing (skip
+// duplicates) and after merging remote snapshots (drop resurrected pending items).
+// Entries expire after RECENT_NOTIF_WINDOW_MS so a genuine later re-review still notifies.
+var RECENT_NOTIF_WINDOW_MS = 10 * 60 * 1000; // 10 min
+
+function notifKey(assetId, changeType, recipient) {
+  return String(assetId) + '|' + String(changeType) + '|' + String(recipient);
+}
+function purgeRecentNotifKeys(now) {
+  if (!Array.isArray(STATE.recentNotifKeys)) { STATE.recentNotifKeys = []; return false; }
+  var before = STATE.recentNotifKeys.length;
+  STATE.recentNotifKeys = STATE.recentNotifKeys.filter(function(e) {
+    return e && typeof e.ts === 'number' && (now - e.ts) < RECENT_NOTIF_WINDOW_MS;
+  });
+  return STATE.recentNotifKeys.length !== before;
+}
+function wasRecentlyNotified(key, now) {
+  if (!Array.isArray(STATE.recentNotifKeys)) return false;
+  for (var i = 0; i < STATE.recentNotifKeys.length; i++) {
+    var e = STATE.recentNotifKeys[i];
+    if (e && e.key === key && (now - (e.ts || 0)) < RECENT_NOTIF_WINDOW_MS) return true;
+  }
+  return false;
+}
+// Record every item in a just-sent batch so it can't be re-queued or resurrected.
+function recordSentNotifications(recipient, items) {
+  if (!Array.isArray(STATE.recentNotifKeys)) STATE.recentNotifKeys = [];
+  var now = Date.now();
+  (items || []).forEach(function(it) {
+    if (!it) return;
+    var key = notifKey(it.assetId, it.change, recipient);
+    STATE.recentNotifKeys = STATE.recentNotifKeys.filter(function(e) { return e && e.key !== key; });
+    STATE.recentNotifKeys.unshift({ key: key, ts: now });
+  });
+  if (STATE.recentNotifKeys.length > 300) STATE.recentNotifKeys.length = 300;
+}
+// Drop pending-batch items that duplicate a notification already sent within the window.
+// Runs after a remote snapshot merge so a stale tab can't resurrect a sent item. Returns
+// true if anything was pruned.
+function pruneResurrectedPendingBatches(now) {
+  if (!STATE.pendingBatches) return false;
+  var changed = false;
+  Object.keys(STATE.pendingBatches).forEach(function(recipient) {
+    var batch = STATE.pendingBatches[recipient];
+    if (!batch || !Array.isArray(batch.items) || !batch.items.length) return;
+    var kept = batch.items.filter(function(it) {
+      return it && !wasRecentlyNotified(notifKey(it.assetId, it.change, recipient), now);
+    });
+    if (kept.length !== batch.items.length) {
+      batch.items = kept;
+      if (!kept.length) batch.firstQueuedAt = null;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 function queueNotification(recipient, changeType, asset, detail, opts) {
   opts = opts || {};
   if (asset && asset.editor === 'Seller') return;
@@ -3979,7 +4068,16 @@ function queueNotification(recipient, changeType, asset, detail, opts) {
   // the workflow status (e.g. "Assigned"). Falls back to asset.status for the
   // existing PM/editor batches that snapshot workflow status.
   var snapshotStatus = opts.statusLabel || asset.status;
-  batch.items.push({
+  var nowQ = Date.now();
+  var dedupeKey = notifKey(asset.id, changeType, recipient);
+  // Guard 1: suppress if this exact notification (asset + change + recipient) was already
+  // sent within the recent window. Kills the "old status change re-spammed" duplicate that
+  // a stale tab's resurrected pendingBatches would otherwise re-queue and re-send.
+  if (wasRecentlyNotified(dedupeKey, nowQ)) {
+    logAction('skipped-notify', '"' + asset.name + '" — ' + changeType + ' → ' + recipient + ' (already sent recently, deduped)');
+    return;
+  }
+  var item = {
     id: STATE.nextBatchItemId++,
     assetId: asset.id,
     campaignId: asset.campaignId,
@@ -4003,8 +4101,24 @@ function queueNotification(recipient, changeType, asset, detail, opts) {
     // Optional free-text note shown under the item in the Slack message (e.g. the
     // reason a category head asked for revisions). Empty for most notifications.
     note: (opts.note) || '',
-    queuedAt: Date.now()
-  });
+    queuedAt: nowQ
+  };
+  // Guard 2: collapse duplicates already pending in this batch. If the same asset+change
+  // is already waiting to be sent to this recipient, replace it in place (keeping its
+  // original id/queue position) with the fresh snapshot instead of appending a second copy
+  // — that's what produced the "same video twice in one message" bug.
+  var dupIdx = -1;
+  for (var _di = 0; _di < batch.items.length; _di++) {
+    var _bi = batch.items[_di];
+    if (_bi && String(_bi.assetId) === String(asset.id) && _bi.change === changeType) { dupIdx = _di; break; }
+  }
+  if (dupIdx >= 0) {
+    item.id = batch.items[dupIdx].id;               // preserve id so cross-tab merges stay stable
+    item.queuedAt = batch.items[dupIdx].queuedAt;    // don't restart this item's wait clock
+    batch.items[dupIdx] = item;
+  } else {
+    batch.items.push(item);
+  }
   if (batch.firstQueuedAt === null) batch.firstQueuedAt = Date.now();
 
   // Build a human-readable recipient label that matches what the Notifications tab
@@ -4109,6 +4223,7 @@ function fireBatch(recipient, reason) {
     body: msg
   });
   if (STATE.sentNotifications.length > 20) STATE.sentNotifications.pop();
+  recordSentNotifications(recipient, items); // ledger: block re-queue / resurrection
 
   logAction('notified', recipient + ' \u2014 sent ' + items.length + ' update(s) to Slack (' + reason + ')');
 
@@ -4380,6 +4495,9 @@ setInterval(function() {
     return nowTs - n.sentAt < DAY_MS;
   });
   if (STATE.sentNotifications.length !== beforeLen) anyChange = true;
+  // (2b) Expire dedupe-ledger entries past the window so a genuine later re-review of the
+  // same asset can notify again.
+  if (purgeRecentNotifKeys(nowTs)) anyChange = true;
   // (3) Daily tally at local midnight
   checkDailyTallyCrossover();
   // (4) Sweep stale daily threads (date != today) to dailyThreadHistory.
@@ -9722,7 +9840,8 @@ function renderCatReviewCard(a, hideCatBadge) {
   var statusColors = {
     'For Review':      'background:var(--accent-dim); color:var(--accent2);',
     'Needs Revisions': 'background:var(--amber-bg); color:var(--amber-text);',
-    'Approved':        'background:var(--green-bg); color:var(--green-text);'
+    'Approved':        'background:var(--green-bg); color:var(--green-text);',
+    'Cancelled':       'background:var(--red-bg); color:var(--red-text);'
   };
   var statusPill = '<span style="' + (statusColors[qc] || statusColors['For Review']) + ' font-size:12px; padding:4px 10px; border-radius:20px; white-space:nowrap;">' + escapeHtml(qc) + '</span>';
 
@@ -9754,6 +9873,9 @@ function renderCatReviewCard(a, hideCatBadge) {
   var reviseBtn  = (qc !== 'Needs Revisions')
     ? '<button onclick="App.catReviewNeedsRevisions(\'' + id + '\')" style="border:1px solid var(--border2); background:transparent; color:var(--text2); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">↺ Needs revisions</button>'
     : '';
+  var cancelBtn  = (qc !== 'Cancelled')
+    ? '<button onclick="App.catReviewCancel(\'' + id + '\')" style="border:1px solid var(--border2); background:transparent; color:var(--red-text); padding:5px 12px; font-size:13px; border-radius:6px; cursor:pointer; white-space:nowrap;">✕ Cancel</button>'
+    : '';
 
   // Comment thread.
   var comments = Array.isArray(a.comments) ? a.comments : [];
@@ -9777,8 +9899,10 @@ function renderCatReviewCard(a, hideCatBadge) {
       '<span>💬 Comment' + (commentCount === 1 ? '' : 's') + (commentCount ? ' (' + commentCount + ')' : '') + '</span>' +
     '</button>';
 
+  var commentHint = '<div style="font-size:11.5px; color:var(--text3); font-style:italic; margin-bottom:10px;">For a more streamlined workflow, please leave your comments inside frame.io</div>';
   var commentPanel = !commentsOpen ? '' :
     '<div style="margin-top:12px;">' +
+      commentHint +
       (thread || '<div style="font-size:12px; color:var(--text3); margin-bottom:10px;">No comments yet.</div>') +
       '<div style="display:flex; gap:8px; align-items:center;">' +
         '<input id="cr-c-' + id + '" type="text" placeholder="Add a comment…" ' +
@@ -9792,7 +9916,7 @@ function renderCatReviewCard(a, hideCatBadge) {
   return '<div id="cr-card-' + id + '" class="cr-card" style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px;">' +
       '<div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">' +
         '<div style="flex:1; min-width:180px; overflow-wrap:anywhere; word-break:break-word;"><div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(a.name || 'Untitled') + catBadge + '</div>' + metaLine + '</div>' +
-        '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">' + statusPill + approveBtn + reviseBtn + '</div>' +
+        '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">' + statusPill + approveBtn + reviseBtn + cancelBtn + '</div>' +
       '</div>' + commentBox + '</div>';
 }
 
@@ -11201,6 +11325,7 @@ function sendPendingBatch(editor, opts) {
       time: timeStamp(), sentAt: Date.now(), editor: editor, items: windowItems, reason: reason, body: msg
     });
     if (STATE.sentNotifications.length > 20) STATE.sentNotifications.pop();
+    recordSentNotifications(editor, windowItems); // ledger: block re-queue / resurrection
     batch.items = extraItems;
     batch.firstQueuedAt = extraItems.length > 0 ? Date.now() : null;
   }
@@ -11392,6 +11517,7 @@ function sendPendingBatchSplit(editor, windowItems, extraItems, opts) {
       // Update pending: keep failed items + any overflow beyond the size window
       batch.items = failedItems.concat(extraItems);
       batch.firstQueuedAt = batch.items.length > 0 ? Date.now() : null;
+      recordSentNotifications(editor, succeededItems); // ledger: block re-queue / resurrection
 
       // Push sent-log entries (newest first, as usual)
       sentLogEntries.forEach(function(entry) {
@@ -14630,12 +14756,18 @@ var App = {
     setTimeout(commit, 650); // fallback if transitionend never fires
   },
   catReviewNeedsRevisions: function(id) {
-    var reason = window.prompt('Why does this need revisions? This is saved as a comment and sent to the editor.');
+    var reason = window.prompt('Why does this need revisions? (optional) This is saved as a comment and sent to the editor. Leave blank to skip — you can leave detailed notes in frame.io.');
     if (reason === null) return; // user cancelled
-    if (!reason.trim()) { toast('Add a reason so the editor knows what to change', 'error'); return; }
-    pushAssetComment(id, reason.trim());
-    // Pass the reason as a note so it rides the Slack ping to the editor. setter re-renders.
-    App.setAssetCategoryHeadQc(id, 'Needs Revisions', { note: reason.trim() });
+    var clean = reason.trim();
+    // Comment is optional: only save it and attach it to the Slack ping when provided.
+    if (clean) pushAssetComment(id, clean);
+    App.setAssetCategoryHeadQc(id, 'Needs Revisions', { note: clean });
+  },
+  catReviewCancel: function(id) {
+    var a = findAssetById(id);
+    if (!a) return;
+    if (!window.confirm('Cancel this video? It will be marked Cancelled and removed from the review queue.')) return;
+    App.setAssetCategoryHeadQc(id, 'Cancelled');
   },
   setSchedulerDate: function(v) { STATE.schedulerDate = v; render(); },
   toggleWeekends: function(v) { STATE.schedulerIncludeWeekends = v; render(); },
