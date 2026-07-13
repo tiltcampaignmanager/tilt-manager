@@ -1602,11 +1602,13 @@ var HubSync = {
     });
 })();
 
-// ===================== GOOGLE SHEETS SYNC =====================
-// Debounced POST to a Google Apps Script Web App deployment URL.
-// The GAS script receives campaigns + assets + full-state JSON and (a) writes the
-// formatted sheet (section headers, colors, fonts) and (b) drops a timestamped JSON
-// snapshot into a Drive folder when BACKUP_FOLDER_ID is set in the script.
+// ===================== GOOGLE DRIVE BACKUP =====================
+// Debounced POST to a Google Apps Script Web App deployment URL. The GAS script drops a
+// timestamped full-state JSON snapshot into a Drive folder (when BACKUP_FOLDER_ID is set),
+// throttled to once per hour and trimmed to the newest N. (The old formatted per-campaign
+// Google Sheets sync was removed — this now only backs up JSON to Drive.)
+// NOTE: the object/state key names keep the historical "Sheets"/"sheetsWebhookUrl" spelling
+// so already-configured deployment URLs and synced Firestore values keep working unchanged.
 var GSheets = {
   _timer: null,
   _lastSyncAt: null,
@@ -1626,8 +1628,6 @@ var GSheets = {
     GSheets._updateStatus('syncing');
 
     var payload = {
-      campaigns: STATE.campaigns,
-      assets: STATE.assets,
       // Full STATE snapshot — the Apps Script writes this verbatim to a timestamped
       // JSON file in Drive (auto-backup). Same shape as the manual "Export backup".
       // If the script has no BACKUP_FOLDER_ID set, it simply ignores this field.
@@ -1644,12 +1644,12 @@ var GSheets = {
       GSheets._syncing = false;
       GSheets._lastSyncAt = new Date();
       GSheets._updateStatus('ok');
-      if (typeof toast === 'function') toast('Synced to Google Sheets ✔', 'success');
+      if (typeof toast === 'function') toast('Backup sent to Drive ✔', 'success');
     }).catch(function(err) {
       GSheets._syncing = false;
       GSheets._updateStatus('error');
-      console.warn('[GSheets] sync failed:', err);
-      if (typeof toast === 'function') toast('Google Sheets sync failed — check the URL in Config', 'error');
+      console.warn('[Drive backup] send failed:', err);
+      if (typeof toast === 'function') toast('Drive backup failed — check the URL in Config', 'error');
     });
   },
 
@@ -1658,17 +1658,17 @@ var GSheets = {
     var el = document.getElementById('gsheets-status');
     if (!el) return;
     if (state === 'syncing') {
-      el.innerHTML = '<span style="color:var(--text3)">&#9696; Syncing…</span>';
+      el.innerHTML = '<span style="color:var(--text3)">&#9696; Backing up…</span>';
     } else if (state === 'ok') {
       var t = GSheets._lastSyncAt;
       var label = t ? t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'just now';
-      el.innerHTML = '<span style="color:var(--green-text)">✔ Last synced ' + label + '</span>';
+      el.innerHTML = '<span style="color:var(--green-text)">✔ Backup sent ' + label + ' (Drive writes hourly)</span>';
     } else if (state === 'error') {
-      el.innerHTML = '<span style="color:var(--red-text)">⚠ Sync failed — check URL</span>';
+      el.innerHTML = '<span style="color:var(--red-text)">⚠ Backup failed — check URL</span>';
     } else {
       el.innerHTML = GSheets._lastSyncAt
-        ? '<span style="color:var(--text3)">Last synced ' + GSheets._lastSyncAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '</span>'
-        : '<span style="color:var(--text3)">Not synced yet</span>';
+        ? '<span style="color:var(--text3)">Backup sent ' + GSheets._lastSyncAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '</span>'
+        : '<span style="color:var(--text3)">Not backed up yet</span>';
     }
   }
 };
@@ -2854,8 +2854,9 @@ var STATE = {
   // Cat Heads Review tab: time-window bucket for the review queue — 'daily' (ready
   // today), 'weekly' (this week), or 'monthly' (this month).
   catReviewWindow: 'daily',
-  // Google Sheets backup sync — Apps Script Web App URL. When set, tracker POSTs
-  // a JSON snapshot of campaigns + assets after each Firestore save (debounced).
+  // Google Drive backup — Apps Script Web App URL. When set, tracker POSTs a full-state
+  // JSON snapshot after each Firestore save (debounced); the script drops it into a Drive
+  // folder hourly. (Key name kept as sheetsWebhookUrl for backward compatibility.)
   sheetsWebhookUrl: '',
   webhookUrl: 'https://hooks.slack.com/services/T000/B000/XXXX',
   countryWebhooks: { UK: '', IT: '', ES: '', US: '', PL: '' },
@@ -10370,6 +10371,11 @@ function renderConfigView() {
           'style="flex:1;" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addCategoryFromConfig();}">' +
         '<button class="save-btn" style="padding:8px 14px;" onclick="App.addCategoryFromConfig()">\u2795 Add category</button>' +
       '</div>' +
+      '<div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--border);">' +
+        '<div style="font-size:12px; font-weight:600; color:var(--text2); margin-bottom:4px; letter-spacing:0.04em; text-transform:uppercase;">Bulk sync video categories</div>' +
+        '<div style="font-size:11.5px; color:var(--text3); margin-bottom:10px;">One click sets every video across all campaigns to match the category of its own campaign. Handy after a campaign\u2019s category changes or videos were imported with a stale category \u2014 keeps Cat Heads Review routing correct.</div>' +
+        '<button class="save-btn" style="padding:8px 14px;" onclick="App.syncAllAssetCategoriesToCampaigns()">\u{1F3F7}\ufe0f Sync all videos to their campaign category</button>' +
+      '</div>' +
     '</div>' +
 
     '<div class="section-title">Schema Overview</div>' +
@@ -10407,64 +10413,51 @@ function renderConfigView() {
       '<div class="config-row" style="border-bottom:none"><div class="config-label">Campaign</div><div class="config-value">Link to Campaigns</div></div>' +
     '</div>' +
 
-    '<div class="section-title" style="margin-top:24px;">Google Sheets Backup &amp; Drive Auto-Backup</div>' +
+    '<div class="section-title" style="margin-top:24px;">Drive Backup (JSON snapshots)</div>' +
     '<div class="auto-card">' +
       '<div class="auto-header">' +
-        '<div class="auto-icon" style="font-size:18px;">📊</div>' +
-        '<div><div class="auto-title">Auto-sync to Google Sheets + Drive backup</div>' +
-        '<div class="auto-sub">writes all campaigns &amp; assets to your sheet, and a JSON snapshot to Drive, after every save</div></div>' +
+        '<div class="auto-icon" style="font-size:18px;">💾</div>' +
+        '<div><div class="auto-title">Auto-backup a JSON snapshot to Google Drive</div>' +
+        '<div class="auto-sub">drops a full-state snapshot into your Drive folder, at most once per hour</div></div>' +
       '</div>' +
-      '<div class="auto-desc" style="margin-bottom:14px;">Paste your <strong>Google Apps Script Web App URL</strong> below. After each Firestore save the tracker POSTs a full snapshot — the script writes one sheet tab per campaign (formatted to match your Tilt Ads Sheet layout) <strong>and</strong>, if you set a <strong>Drive folder ID</strong> in the script, drops a timestamped <code>tilt-tracker-backup-….json</code> file into that folder <strong>once per hour</strong> (keeping the 50 most recent). The Drive backup is the same full snapshot as the manual <em>Export backup</em>, so it can be restored via <em>Restore from backup</em>.</div>' +
+      '<div class="auto-desc" style="margin-bottom:14px;">Paste your <strong>Google Apps Script Web App URL</strong> below. After each Firestore save the tracker POSTs a full snapshot; if you set a <strong>Drive folder ID</strong> in the script, it drops a timestamped <code>tilt-tracker-backup-….json</code> file into that folder <strong>once per hour</strong> (keeping the 50 most recent). It is the same full snapshot as the manual <em>Export backup</em>, so it can be restored via <em>Restore from backup</em>. <em>(The old formatted Google Sheets sync has been removed — this backs up JSON only.)</em></div>' +
       '<div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">' +
         '<input id="gsheets-url-input" type="text" class="form-input" style="flex:1; font-family:\'JetBrains Mono\',monospace; font-size:12px;" ' +
           'placeholder="https://script.google.com/macros/s/AKfy.../exec" ' +
           'value="' + escapeHtml(STATE.sheetsWebhookUrl || '') + '" ' +
           'onblur="App.saveSheetsWebhookUrl(this.value)">' +
-        '<button class="run-btn" style="white-space:nowrap;" onclick="App.syncSheetsNow()">&#9654; Sync now</button>' +
+        '<button class="run-btn" style="white-space:nowrap;" onclick="App.syncSheetsNow()">&#9654; Back up now</button>' +
       '</div>' +
       '<div id="gsheets-status" style="font-size:11px; font-family:\'JetBrains Mono\',monospace; min-height:16px; margin-bottom:14px;">' +
-        (STATE.sheetsWebhookUrl ? '<span style="color:var(--text3)">Not synced yet this session</span>' : '<span style="color:var(--text3)">No URL set</span>') +
+        (STATE.sheetsWebhookUrl ? '<span style="color:var(--text3)">Not backed up yet this session</span>' : '<span style="color:var(--text3)">No URL set</span>') +
       '</div>' +
       '<details style="margin-top:4px;">' +
         '<summary style="font-size:12px; font-weight:600; color:var(--accent2); cursor:pointer; user-select:none; margin-bottom:10px;">&#9656; Show Apps Script setup instructions</summary>' +
         '<div style="font-size:12px; color:var(--text2); line-height:1.7; margin-bottom:10px;">' +
-          '1. Open your Tilt Ads Google Sheet.<br>' +
-          '2. Click <strong>Extensions → Apps Script</strong>.<br>' +
-          '3. Delete any existing code, paste the script below, click <strong>Save</strong>.<br>' +
-          '4. <strong>(Optional — Drive backup)</strong> Create a folder in Google Drive to hold backups, open it, and copy the ID from the URL (<code>drive.google.com/drive/folders/<em>THIS_PART</em></code>). Paste it between the quotes on the <code>var BACKUP_FOLDER_ID = \'\';</code> line near the top of the script. Leave blank to keep Drive backups off.<br>' +
-          '5. Click <strong>Deploy → New deployment</strong>. Type: <em>Web app</em>. Execute as: <em>Me</em>. Who has access: <em>Anyone</em>. Click <strong>Deploy</strong> and authorise (the first run will ask for Drive + Sheets permission).<br>' +
-          '6. Copy the <em>Web app URL</em> and paste it into the field above.' +
+          '1. Create (or open) any Google Apps Script project at <code>script.google.com</code> — it no longer needs to live inside a spreadsheet.<br>' +
+          '2. Delete any existing code, paste the script below, click <strong>Save</strong>.<br>' +
+          '3. Create a folder in Google Drive to hold backups, open it, and copy the ID from the URL (<code>drive.google.com/drive/folders/<em>THIS_PART</em></code>). Paste it between the quotes on the <code>var BACKUP_FOLDER_ID = \'\';</code> line near the top of the script. <strong>Required</strong> — leaving it blank turns backups off.<br>' +
+          '4. Click <strong>Deploy → New deployment</strong>. Type: <em>Web app</em>. Execute as: <em>Me</em>. Who has access: <em>Anyone</em>. Click <strong>Deploy</strong> and authorise (the first run asks for Drive permission).<br>' +
+          '5. Copy the <em>Web app URL</em> and paste it into the field above. <em>(If you already had the old sync deployed, just re-paste this script and redeploy a New version — the URL stays the same.)</em>' +
         '</div>' +
         '<div style="position:relative;">' +
           '<button class="edit-btn" style="position:absolute;top:8px;right:8px;z-index:1;font-size:11px;" ' +
             'onclick="(function(){var el=document.getElementById(\'gsheets-script-code\');navigator.clipboard&&navigator.clipboard.writeText(el.innerText).then(function(){App._toast(\'Script copied\',\'success\');}).catch(function(){});})()">Copy</button>' +
           '<pre id="gsheets-script-code" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:10.5px;font-family:\'JetBrains Mono\',monospace;color:var(--text2);overflow-x:auto;white-space:pre;line-height:1.5;max-height:320px;overflow-y:auto;">' + escapeHtml(
-'// ── Google Drive auto-backup ──────────────────────────────────────────\n' +
-'// Paste the ID of a Drive folder between the quotes to turn on JSON backups.\n' +
+'// ── Tilt Tracker — Google Drive JSON backup ───────────────────────────\n' +
+'// Paste the ID of a Drive folder between the quotes to turn on backups.\n' +
 '// (Open the folder in Drive; the ID is the last part of the URL:\n' +
 '//  drive.google.com/drive/folders/THIS_IS_THE_ID). Leave blank to disable.\n' +
 'var BACKUP_FOLDER_ID = \'\';\n' +
 'var BACKUP_KEEP = 50;            // keep the most recent N backups; older ones are trashed\n' +
 'var BACKUP_INTERVAL_MS = 3600000; // write at most one backup per hour (60 * 60 * 1000)\n\n' +
 'function doGet(e) {\n' +
-'  return ContentService.createTextOutput(\'Tilt Tracker — Google Sheets Sync + Drive backup (POST only)\')\n' +
+'  return ContentService.createTextOutput(\'Tilt Tracker — Google Drive backup (POST only)\')\n' +
 '    .setMimeType(ContentService.MimeType.TEXT);\n' +
 '}\n\n' +
 'function doPost(e) {\n' +
 '  try {\n' +
 '    var data = JSON.parse(e.postData.contents);\n' +
-'    var ss = SpreadsheetApp.getActiveSpreadsheet();\n' +
-'    var campaigns = data.campaigns || [];\n' +
-'    var assets = data.assets || [];\n' +
-'    campaigns.forEach(function(camp) {\n' +
-'      var my = (camp.monthYear || \'\').trim();\n' +
-'      var cat = (camp.category || \'\').trim();\n' +
-'      var name = (my ? my + \' Videos - \' : \'\') + (cat ? \'[\' + cat + \'] \' : \'\') + camp.name;\n' +
-'      var sheetName = name.substring(0, 100);\n' +
-'      var campAssets = assets.filter(function(a) { return a.campaignId === camp.id; });\n' +
-'      var sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);\n' +
-'      writeSheet(sheet, campAssets);\n' +
-'    });\n' +
 '    backupToDrive(data); // write a timestamped JSON snapshot to Drive (no-op if folder unset)\n' +
 '    return ContentService.createTextOutput(JSON.stringify({ok:true}))\n' +
 '      .setMimeType(ContentService.MimeType.JSON);\n' +
@@ -10475,20 +10468,21 @@ function renderConfigView() {
 '}\n\n' +
 '// Writes the full tracker snapshot to a JSON file in the configured Drive folder,\n' +
 '// at most once per BACKUP_INTERVAL_MS (hourly), then trims the folder to the most\n' +
-'// recent BACKUP_KEEP files. Wrapped so a Drive failure never breaks the sheet sync.\n' +
+'// recent BACKUP_KEEP files.\n' +
 'function backupToDrive(data) {\n' +
 '  if (!BACKUP_FOLDER_ID) return;\n' +
+'  // Throttle to one backup per hour, tracked server-side so it holds across every\n' +
+'  // teammate\'s browser (they all POST here). Claim the slot BEFORE writing so a burst\n' +
+'  // of concurrent saves can\'t each slip through; release it again if the write fails\n' +
+'  // so the next save can retry (rather than being blocked for an hour).\n' +
+'  var props = PropertiesService.getScriptProperties();\n' +
+'  var last = Number(props.getProperty(\'lastBackupMs\') || 0);\n' +
+'  var now = Date.now();\n' +
+'  if (now - last < BACKUP_INTERVAL_MS) return;\n' +
+'  props.setProperty(\'lastBackupMs\', String(now));\n' +
 '  try {\n' +
-'    // Throttle to one backup per hour, tracked server-side so it holds across every\n' +
-'    // teammate\'s browser (they all POST here). Set the marker BEFORE writing so a burst\n' +
-'    // of concurrent saves can\'t each slip through.\n' +
-'    var props = PropertiesService.getScriptProperties();\n' +
-'    var last = Number(props.getProperty(\'lastBackupMs\') || 0);\n' +
-'    var now = Date.now();\n' +
-'    if (now - last < BACKUP_INTERVAL_MS) return;\n' +
-'    props.setProperty(\'lastBackupMs\', String(now));\n' +
 '    var folder = DriveApp.getFolderById(BACKUP_FOLDER_ID);\n' +
-'    var snapshot = data.state || { campaigns: data.campaigns || [], assets: data.assets || [] };\n' +
+'    var snapshot = data.state || data;\n' +
 '    var stamp = Utilities.formatDate(new Date(), \'Etc/UTC\', "yyyy-MM-dd\'T\'HH-mm-ss");\n' +
 '    folder.createFile(\'tilt-tracker-backup-\' + stamp + \'.json\',\n' +
 '      JSON.stringify(snapshot), MimeType.PLAIN_TEXT);\n' +
@@ -10502,81 +10496,9 @@ function renderConfigView() {
 '    files.sort(function(a, b) { return a.getName() < b.getName() ? 1 : -1; }); // newest first\n' +
 '    for (var i = BACKUP_KEEP; i < files.length; i++) files[i].setTrashed(true);\n' +
 '  } catch(err) {\n' +
-'    // Swallow — the sheet sync already succeeded; a Drive hiccup should not fail the request.\n' +
+'    props.setProperty(\'lastBackupMs\', String(last)); // write failed — release the hourly slot\n' +
+'    throw err; // surface the error in the Apps Script Executions log\n' +
 '  }\n' +
-'}\n\n' +
-'function writeSheet(sheet, assets) {\n' +
-'  sheet.clearContents();\n' +
-'  sheet.clearFormats();\n' +
-'  sheet.clearMerges();\n' +
-'  var needed = assets.length + 3;\n' +
-'  if (sheet.getMaxRows() < needed) sheet.insertRowsAfter(sheet.getMaxRows(), needed - sheet.getMaxRows());\n' +
-'  if (sheet.getMaxColumns() < 9) sheet.insertColumnsAfter(sheet.getMaxColumns(), 9 - sheet.getMaxColumns());\n\n' +
-'  // Row 1 — black bar\n' +
-'  var r1 = sheet.getRange(1,1,1,9);\n' +
-'  r1.merge(); r1.setBackground(\'#000000\'); r1.setValue(\'\');\n' +
-'  sheet.setRowHeight(1, 8);\n\n' +
-'  // Row 2 — section headers\n' +
-'  sheet.setRowHeight(2, 120);\n' +
-'  var sections = [\n' +
-'    {label:\'Overview\',      col:1, span:2, bg:\'#FFF2CC\'},\n' +
-'    {label:\'Editing Space\', col:3, span:3, bg:\'#FFE599\'},\n' +
-'    {label:\'Quality Check\', col:6, span:3, bg:\'#F9CB9C\'},\n' +
-'    {label:\'Ad Space\',      col:9, span:1, bg:\'#CFE2F3\'}\n' +
-'  ];\n' +
-'  sections.forEach(function(s) {\n' +
-'    var r = sheet.getRange(2, s.col, 1, s.span);\n' +
-'    if (s.span > 1) r.merge();\n' +
-'    r.setValue(s.label);\n' +
-'    r.setBackground(s.bg);\n' +
-'    r.setFontFamily(\'Arial\');\n' +
-'    r.setFontSize(45);\n' +
-'    r.setFontWeight(\'bold\');\n' +
-'    r.setHorizontalAlignment(\'center\');\n' +
-'    r.setVerticalAlignment(\'middle\');\n' +
-'    r.setWrap(true);\n' +
-'  });\n\n' +
-'  // Row 3 — sub-headers\n' +
-'  sheet.setRowHeight(3, 30);\n' +
-'  var headers = [\'PN #\',\'Video Name\',\'Raw Video File\',\'Editing Brief\',\'Editor\',\'Video\',\'Date Approved\',\'Status\',\'Ad Status\'];\n' +
-'  var hBgs   = [\'#FFF2CC\',\'#FFF2CC\',\'#FFE599\',\'#FFE599\',\'#FFE599\',\'#F9CB9C\',\'#F9CB9C\',\'#F9CB9C\',\'#CFE2F3\'];\n' +
-'  headers.forEach(function(h, i) {\n' +
-'    var c = sheet.getRange(3, i+1);\n' +
-'    c.setValue(h);\n' +
-'    c.setFontFamily(\'Montserrat\');\n' +
-'    c.setFontSize(10);\n' +
-'    c.setFontWeight(\'bold\');\n' +
-'    c.setHorizontalAlignment(\'center\');\n' +
-'    c.setVerticalAlignment(\'middle\');\n' +
-'    c.setBackground(hBgs[i]);\n' +
-'  });\n\n' +
-'  // Data rows\n' +
-'  var editorColors = {Zidni:\'#F6B26B\',Sharm:\'#F6B26B\',Patty:\'#93C47D\',Elsa:\'#6FA8DC\'};\n' +
-'  assets.forEach(function(a, idx) {\n' +
-'    var row = 4 + idx;\n' +
-'    sheet.setRowHeight(row, 21);\n' +
-'    function cell(c) {\n' +
-'      var r = sheet.getRange(row, c);\n' +
-'      r.setFontFamily(\'Arial\'); r.setFontSize(10); r.setFontWeight(\'normal\');\n' +
-'      return r;\n' +
-'    }\n' +
-'    cell(1).setValue(idx + 1);\n' +
-'    cell(2).setValue(a.name || \'\');\n' +
-'    if (a.rawVideo)      cell(3).setFormula(\'=HYPERLINK("\' + a.rawVideo + \'","View")\');\n' +
-'    else                 cell(3).setValue(\'\');\n' +
-'    if (a.editingBrief)  cell(4).setFormula(\'=HYPERLINK("\' + a.editingBrief + \'","View")\');\n' +
-'    else                 cell(4).setValue(\'\');\n' +
-'    var ec = cell(5); ec.setValue(a.editor || \'\');\n' +
-'    if (editorColors[a.editor]) ec.setBackground(editorColors[a.editor]);\n' +
-'    if (a.finalVideo)    cell(6).setFormula(\'=HYPERLINK("\' + a.finalVideo + \'","View")\');\n' +
-'    else                 cell(6).setValue(\'\');\n' +
-'    cell(7).setValue(a.dateApproved || \'\');\n' +
-'    cell(8).setValue(a.status || \'\');\n' +
-'    cell(9).setValue(a.adStatus || \'\');\n' +
-'  });\n\n' +
-'  // Column widths\n' +
-'  var widths = [55,220,200,200,110,140,120,120,120];\n' +
-'  widths.forEach(function(w,i){ sheet.setColumnWidth(i+1, w); });\n' +
 '}'
           ) + '</pre>' +
         '</div>' +
@@ -11682,12 +11604,18 @@ function buildBatchMessage(recipient, items, opts) {
     }
     var recipientMention = '';
     var senderMention = '';
+    // Connector between the status and the sender/target mention. 'from' for
+    // inbound actions (someone acted on the editor's video), 'sent to' for the
+    // editor's own submission going out to the reviewer.
+    var senderVerb = 'from';
     switch (status) {
       case 'Assigned':
       case 'In Progress':
         recipientMention = editorM; break;
       case 'For Review':
-        recipientMention = pmM || editorM; senderMention = editorM; break;
+        // Editor submitted for review \u2014 posts to the editor's own thread and points
+        // at the category head who now has to review it: "<@editor> \u2014 FOR REVIEW sent to <@head>".
+        recipientMention = editorM; senderMention = chM || pmM; senderVerb = 'sent to'; break;
       case 'Needs Revisions':
         recipientMention = editorM; senderMention = pmM; break;
       case 'Approved':
@@ -11703,7 +11631,7 @@ function buildBatchMessage(recipient, items, opts) {
     }
     var displayStatus = status.replace(' (Category Head)', '').replace('Needs Revisions', 'NEED REVISIONS').toUpperCase();
     var headerText = recipientMention + ' \u2014 ' + displayStatus;
-    if (senderMention) headerText += ' from ' + senderMention;
+    if (senderMention) headerText += ' ' + senderVerb + ' ' + senderMention;
     return headerText;
   }
 
@@ -12313,15 +12241,10 @@ var App = {
     }
     logAction('updated', 'Asset "' + a.name + '" status: ' + oldStatus + ' \u2192 ' + newStatus);
     emitAssetChangeNotifications(a, { oldEditor: a.editor, oldStatus: oldStatus });
-    // Editor submitting for review auto-enters the category-head queue, so the video
-    // shows up on the Cat Heads Review tab (and pings the head). Only when it isn't
-    // already in a review state \u2014 an approved/needs-revisions video re-submitted keeps
-    // its existing categoryHeadQc rather than resetting. Delegate to the CHQ setter so
-    // the stamp + Slack digest + render all run through the one code path.
-    if (newStatus === 'For Review' && (!a.categoryHeadQc || a.categoryHeadQc === 'Draft')) {
-      App.setAssetCategoryHeadQc(id, 'For Review');
-      return;
-    }
+    // NOTE: the editor status (asset.status) and the Category Head QC status
+    // (asset.categoryHeadQc) are intentionally independent tracks. Changing the editor
+    // status must NOT touch categoryHeadQc \u2014 the Cat Head owns that column and moves it
+    // manually from the Cat Heads Review tab.
     render();
   },
   deleteAsset: deleteAsset,
@@ -13531,6 +13454,27 @@ var App = {
       if (typeof toast === 'function') toast('Set ' + changed + ' video' + (changed === 1 ? '' : 's') + ' to ' + cat, 'success');
     } else {
       if (typeof toast === 'function') toast('All videos already match "' + cat + '"', 'success');
+    }
+    render();
+  },
+
+  // Global one-click version of syncAssetCategoriesToCampaign: walks every campaign and
+  // sets each of its videos to that campaign's own category. Campaigns with no category
+  // set are skipped (nothing to sync to). Used by the Config → Categories bulk button.
+  syncAllAssetCategoriesToCampaigns: function() {
+    var catById = {};
+    STATE.campaigns.forEach(function(c) { catById[c.id] = (c.category || '').trim(); });
+    var changed = 0, touchedCamps = {};
+    STATE.assets.forEach(function(a) {
+      var cat = catById[a.campaignId];
+      if (cat && a.category !== cat) { a.category = cat; changed++; touchedCamps[a.campaignId] = true; }
+    });
+    if (changed) {
+      var campCount = Object.keys(touchedCamps).length;
+      logAction('updated', 'Bulk-synced ' + changed + ' video' + (changed === 1 ? '' : 's') + ' to their campaign category across ' + campCount + ' campaign' + (campCount === 1 ? '' : 's'));
+      if (typeof toast === 'function') toast('Synced ' + changed + ' video' + (changed === 1 ? '' : 's') + ' to their campaign category', 'success');
+    } else {
+      if (typeof toast === 'function') toast('All videos already match their campaign category', 'success');
     }
     render();
   },
@@ -14850,7 +14794,7 @@ var App = {
     if (STATE.sheetsWebhookUrl === trimmed) return;
     STATE.sheetsWebhookUrl = trimmed;
     saveState();
-    logAction('updated', 'Google Sheets webhook URL ' + (trimmed ? 'set' : 'cleared'));
+    logAction('updated', 'Drive backup webhook URL ' + (trimmed ? 'set' : 'cleared'));
     render();
   },
 
@@ -15382,10 +15326,143 @@ window.addEventListener('online', function() {
   if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload();
 });
 
+// ===================== HOST BRIDGE (postMessage) =====================
+// Two-way integration layer for when the tracker is embedded as an <iframe>
+// inside another web app (the "host"). Lets the host drive the tracker
+// (navigate to a tab, open a campaign) and lets the tracker notify the host of
+// what happened (ready, navigation, data changes). It is a complete NO-OP when
+// the app is not framed, so the standalone deployment is entirely unaffected.
+//
+// SECURITY: messages are only accepted FROM — and only sent TO — origins listed
+// in TRACKER_HOST_ORIGINS. This is the single most important line to get right.
+// Fill it in with your friend's app origin(s), e.g. 'https://app.example.com'
+// (scheme + host + optional port, NO trailing slash, NO path). An empty list
+// disables the bridge entirely (the safe default), so the tracker will ignore
+// every inbound message until you add the host's origin here.
+var TRACKER_HOST_ORIGINS = [
+  // 'https://app.tilt.app',
+];
+
+var Bridge = (function () {
+  var CHANNEL = 'tilt-tracker/v1';                       // namespaced so we ignore Firebase Auth's own postMessages
+  var framed  = window.parent && window.parent !== window;
+  var enabled = framed && TRACKER_HOST_ORIGINS.length > 0;
+
+  function allowed(origin) { return TRACKER_HOST_ORIGINS.indexOf(origin) !== -1; }
+
+  // Fire an event up to every configured host origin.
+  function emit(type, payload) {
+    if (!enabled) return;
+    var msg = { channel: CHANNEL, type: type, payload: payload || {} };
+    TRACKER_HOST_ORIGINS.forEach(function (origin) {
+      try { window.parent.postMessage(msg, origin); } catch (e) {}
+    });
+  }
+
+  // Reply to one specific inbound request, echoing its requestId so the host can
+  // correlate the response with the command it sent.
+  function reply(origin, requestId, type, payload) {
+    var msg = { channel: CHANNEL, type: type, payload: payload || {}, requestId: requestId || null };
+    try { window.parent.postMessage(msg, origin); } catch (e) {}
+  }
+
+  // Lightweight, JSON-serialisable summary of tracker state for the host. This
+  // is intentionally NOT the full STATE — just headline counts + current view.
+  function summary() {
+    var assets = STATE.assets || [];
+    var byStatus = {};
+    assets.forEach(function (a) { byStatus[a.status] = (byStatus[a.status] || 0) + 1; });
+    return {
+      campaigns:        (STATE.campaigns || []).length,
+      assets:           assets.length,
+      byStatus:         byStatus,
+      tab:              STATE.tab || null,
+      activeCampaignId: STATE.activeSubCampaignId || null,
+      user:             Auth.user ? { email: Auth.user.email, role: Auth.user.role } : null
+    };
+  }
+
+  function flashAsset(assetId) {
+    setTimeout(function () {
+      var row = document.querySelector('tr[data-asset-id="' + assetId + '"]');
+      if (row) {
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        row.classList.add('row-highlight-flash');
+        setTimeout(function () { row.classList.remove('row-highlight-flash'); }, 2500);
+      }
+    }, 400);
+  }
+
+  function onMessage(e) {
+    // Two independent gates: the origin must be allow-listed AND the message
+    // must carry our channel tag. Anything else (incl. Firebase's auth iframe
+    // traffic and unrelated host chatter) is silently ignored.
+    if (!enabled || !allowed(e.origin)) return;
+    var d = e.data;
+    if (!d || d.channel !== CHANNEL) return;
+    var p = d.payload || {};
+    switch (d.type) {
+      case 'handshake':                                   // host says hello → we send current state
+      case 'ping':
+        reply(e.origin, d.requestId, 'ready', summary());
+        break;
+      case 'navigate':                                    // { tab: 'board' | 'campaigns' | ... }
+        if (p.tab) App.setTab(p.tab);
+        reply(e.origin, d.requestId, 'ack', { tab: STATE.tab });
+        break;
+      case 'openCampaign':                                // { campaignId, assetId? }
+        if (p.campaignId != null) {
+          App.goToCampaign(String(p.campaignId));
+          if (p.assetId != null) flashAsset(String(p.assetId));
+        }
+        reply(e.origin, d.requestId, 'ack', { activeCampaignId: STATE.activeSubCampaignId || null });
+        break;
+      case 'getSnapshot':                                 // host pulls a fresh summary on demand
+        reply(e.origin, d.requestId, 'snapshot', summary());
+        break;
+      default:
+        reply(e.origin, d.requestId, 'error', { message: 'Unknown command: ' + d.type });
+    }
+  }
+
+  // Wrap navigation + save so the host is notified WITHOUT editing any call
+  // site. We call through to the original first, then emit.
+  function instrument() {
+    var _setTab = App.setTab;
+    App.setTab = function (t) { _setTab.call(App, t); emit('navigated', { tab: t }); };
+
+    var _select = App.selectCampaign;
+    App.selectCampaign = function (id) { _select.call(App, id); emit('campaignSelected', { campaignId: String(id) }); };
+
+    var _goto = App.goToCampaign;
+    App.goToCampaign = function (id) { _goto.call(App, id); emit('campaignSelected', { campaignId: String(id) }); };
+
+    if (typeof saveState === 'function') {
+      var _save = saveState, debounce = null;
+      window.saveState = saveState = function () {
+        _save.apply(this, arguments);
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(function () { emit('stateChanged', summary()); }, 800);
+      };
+    }
+  }
+
+  function init() {
+    if (!framed) return;                 // standalone tab: bridge stays dormant
+    window.addEventListener('message', onMessage);
+    if (!enabled) return;                // framed but no host origin configured yet
+    instrument();
+    emit('ready', summary());            // announce ourselves the moment the bridge is live
+  }
+
+  return { init: init, emit: emit };
+})();
+
 // Kick off the auth listener. If a session is already cached in IndexedDB
 // (Firebase persists sign-in by default), bootApp() runs immediately. Otherwise
 // the sign-in overlay shows until the user authenticates.
 Auth.init();
+Bridge.init();
 </script>
 </body>
 </html>
