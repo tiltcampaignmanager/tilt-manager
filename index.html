@@ -9872,9 +9872,12 @@ function renderCatReviewView() {
         '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + sentBack.length + ' sent back</span>' +
       '</div>';
     // Organize the same way as the live queue: by cat head (CH_HEAD_ORDER ranking), then
-    // by category within each head, cards oldest-sent-first (sentBack is pre-sorted). The
-    // whole section already collapses via the header above, so these head/category headers
-    // are lightweight labels rather than independently collapsible blocks.
+    // by category within each head, cards oldest-sent-first (sentBack is pre-sorted). Head
+    // and category sub-headers are independently collapsible, using dedicated state maps
+    // (catReviewSentBackHeadCollapsed / catReviewSentBackCatCollapsed) kept separate from
+    // the pending queue's so collapsing a head here doesn't also collapse it up there.
+    var sbHeadCollapsed = STATE.catReviewSentBackHeadCollapsed || {};
+    var sbCatCollapsed  = STATE.catReviewSentBackCatCollapsed || {};
     var sbBody = '';
     if (!sbCollapsed) {
       var sbHeadOrder = [], sbByHead = {};
@@ -9887,7 +9890,11 @@ function renderCatReviewView() {
       sbBody = sbHeadOrder.map(function(head) {
         var hAssets = sbByHead[head];
         var hInitials = head.slice(0, 2).toUpperCase();
-        var hHeader = '<div style="display:flex; align-items:center; gap:10px; margin:0 0 12px 6px;">' +
+        var hKeyEsc = head.replace(/'/g, "\\'");
+        var hOpen = !sbHeadCollapsed[head];
+        var hChevron = hOpen ? '▼' : '▶';
+        var hHeader = '<div onclick="App.toggleCatReviewSentBackHead(\'' + escapeHtml(hKeyEsc) + '\')" style="display:flex; align-items:center; gap:10px; margin:0 0 12px 6px; cursor:pointer; user-select:none;">' +
+            '<span style="font-size:11px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:12px;">' + hChevron + '</span>' +
             '<div style="width:30px; height:30px; border-radius:50%; background:var(--accent-dim); color:var(--accent2); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:12px;">' + escapeHtml(hInitials) + '</div>' +
             '<div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(head) + '</div>' +
             '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:11px; padding:2px 10px; border-radius:20px;">' + hAssets.length + '</span>' +
@@ -9900,14 +9907,19 @@ function renderCatReviewView() {
           if (!byCat[c]) { byCat[c] = []; cOrder.push(c); }
           byCat[c].push(a);
         });
-        var cBlocks = cOrder.map(function(cat) {
+        var cBlocks = !hOpen ? '' : cOrder.map(function(cat) {
           var cAssets = byCat[cat];
-          var cHeader = '<div style="display:flex; align-items:center; gap:10px; margin:0 0 10px 12px;">' +
+          var cKey = head + '||' + cat;
+          var cKeyEsc = cKey.replace(/'/g, "\\'");
+          var cOpen = !sbCatCollapsed[cKey];
+          var cChevron = cOpen ? '▼' : '▶';
+          var cHeader = '<div onclick="App.toggleCatReviewSentBackCat(\'' + escapeHtml(cKeyEsc) + '\')" style="display:flex; align-items:center; gap:10px; margin:0 0 10px 12px; cursor:pointer; user-select:none;">' +
+              '<span style="font-size:10px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:10px;">' + cChevron + '</span>' +
               categoryBadgeHtml(cat) +
               '<span style="font-size:12px; color:var(--text3);">' + cAssets.length + ' video' + (cAssets.length === 1 ? '' : 's') + '</span>' +
             '</div>';
           // Category rides on the sub-header, so suppress the per-card badge here.
-          var cCards = '<div style="margin-left:12px;">' + cAssets.map(function(a) { return renderCatReviewCard(a, true, { forceCommentsOpen: true }); }).join('') + '</div>';
+          var cCards = !cOpen ? '' : '<div style="margin-left:12px;">' + cAssets.map(function(a) { return renderCatReviewCard(a, true, { forceCommentsOpen: true }); }).join('') + '</div>';
           return '<div style="margin-bottom:16px;">' + cHeader + cCards + '</div>';
         }).join('');
         return '<div style="margin-bottom:24px;">' + hHeader + cBlocks + '</div>';
@@ -14814,6 +14826,16 @@ var App = {
   },
   toggleCatReviewSentBack: function() {
     STATE.catReviewSentBackCollapsed = !STATE.catReviewSentBackCollapsed;
+    render();
+  },
+  toggleCatReviewSentBackHead: function(head) {
+    if (!STATE.catReviewSentBackHeadCollapsed) STATE.catReviewSentBackHeadCollapsed = {};
+    STATE.catReviewSentBackHeadCollapsed[head] = !STATE.catReviewSentBackHeadCollapsed[head];
+    render();
+  },
+  toggleCatReviewSentBackCat: function(catKey) {
+    if (!STATE.catReviewSentBackCatCollapsed) STATE.catReviewSentBackCatCollapsed = {};
+    STATE.catReviewSentBackCatCollapsed[catKey] = !STATE.catReviewSentBackCatCollapsed[catKey];
     render();
   },
   addCatReviewComment: function(id) {
