@@ -9871,8 +9871,49 @@ function renderCatReviewView() {
         '<div style="font-size:12px; color:var(--text3);">Waiting on the editor to re-submit — your comments stay here so nothing gets lost</div></div>' +
         '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + sentBack.length + ' sent back</span>' +
       '</div>';
-    var sbCards = sbCollapsed ? '' : '<div>' + sentBack.map(function(a) { return renderCatReviewCard(a, false, { forceCommentsOpen: true }); }).join('') + '</div>';
-    sentBackSection = '<div style="margin-top:8px; padding-top:24px; border-top:1px solid var(--border);">' + sbHeader + sbCards + '</div>';
+    // Organize the same way as the live queue: by cat head (CH_HEAD_ORDER ranking), then
+    // by category within each head, cards oldest-sent-first (sentBack is pre-sorted). The
+    // whole section already collapses via the header above, so these head/category headers
+    // are lightweight labels rather than independently collapsible blocks.
+    var sbBody = '';
+    if (!sbCollapsed) {
+      var sbHeadOrder = [], sbByHead = {};
+      sentBack.forEach(function(a) {
+        var h = getCategoryHead(a.category) || '—';
+        if (!sbByHead[h]) { sbByHead[h] = []; sbHeadOrder.push(h); }
+        sbByHead[h].push(a);
+      });
+      sbHeadOrder.sort(function(a, b) { return catHeadRank(a) - catHeadRank(b); });
+      sbBody = sbHeadOrder.map(function(head) {
+        var hAssets = sbByHead[head];
+        var hInitials = head.slice(0, 2).toUpperCase();
+        var hHeader = '<div style="display:flex; align-items:center; gap:10px; margin:0 0 12px 6px;">' +
+            '<div style="width:30px; height:30px; border-radius:50%; background:var(--accent-dim); color:var(--accent2); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:12px;">' + escapeHtml(hInitials) + '</div>' +
+            '<div style="font-weight:600; font-size:14px; color:var(--text1);">' + escapeHtml(head) + '</div>' +
+            '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:11px; padding:2px 10px; border-radius:20px;">' + hAssets.length + '</span>' +
+          '</div>';
+        // Group this head's sent-back videos by category, category order following the
+        // oldest-waiting video (hAssets is already chronological).
+        var cOrder = [], byCat = {};
+        hAssets.forEach(function(a) {
+          var c = a.category || '—';
+          if (!byCat[c]) { byCat[c] = []; cOrder.push(c); }
+          byCat[c].push(a);
+        });
+        var cBlocks = cOrder.map(function(cat) {
+          var cAssets = byCat[cat];
+          var cHeader = '<div style="display:flex; align-items:center; gap:10px; margin:0 0 10px 12px;">' +
+              categoryBadgeHtml(cat) +
+              '<span style="font-size:12px; color:var(--text3);">' + cAssets.length + ' video' + (cAssets.length === 1 ? '' : 's') + '</span>' +
+            '</div>';
+          // Category rides on the sub-header, so suppress the per-card badge here.
+          var cCards = '<div style="margin-left:12px;">' + cAssets.map(function(a) { return renderCatReviewCard(a, true, { forceCommentsOpen: true }); }).join('') + '</div>';
+          return '<div style="margin-bottom:16px;">' + cHeader + cCards + '</div>';
+        }).join('');
+        return '<div style="margin-bottom:24px;">' + hHeader + cBlocks + '</div>';
+      }).join('');
+    }
+    sentBackSection = '<div style="margin-top:8px; padding-top:24px; border-top:1px solid var(--border);">' + sbHeader + sbBody + '</div>';
   }
 
   return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header + sections + sentBackSection + '</div></div>';
