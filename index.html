@@ -11682,7 +11682,7 @@ function buildBatchMessage(recipient, items, opts) {
     // Category-head "For Review" pings are a per-manager digest: one running total
     // with a per-category breakdown, computed live. All items in a CHQ batch share
     // one head, so they collapse under this single header. (Note: this is the HEAD's
-    // digest label. The editor's own "FOR REVIEW from <@head>" confirmation uses the
+    // digest label. The editor's own "FOR REVIEW sent to <@head>" confirmation uses the
     // 'For Review (Category Head)' label handled in the switch below.)
     if (status === 'For Review Digest (Category Head)') {
       var bd = catHeadPendingBreakdown(getCategoryHead(it.category));
@@ -11749,7 +11749,9 @@ function buildBatchMessage(recipient, items, opts) {
       case 'Approved':
         recipientMention = editorM; senderMention = pmM; break;
       case 'For Review (Category Head)':
-        recipientMention = editorM; senderMention = chM; break;
+        // Editor's video submitted to the category head for QC — same outbound framing
+        // as the PM-stage For Review: "<@editor> — FOR REVIEW sent to <@head>".
+        recipientMention = editorM; senderMention = chM; senderVerb = 'sent to'; break;
       case 'Needs Revisions (Category Head)':
         recipientMention = editorM; senderMention = chM; break;
       case 'Approved (Category Head)':
@@ -13154,7 +13156,7 @@ var App = {
         queueNotification('CHQ:' + chqHead, 'for-review', a, '', { statusLabel: 'For Review Digest (Category Head)' });
         // Also ping the assigned editor with a per-video confirmation that their
         // submission is now in the head's review queue. Header reads
-        // "<@editor> — FOR REVIEW from <@CategoryHead>" (routes to the editor's batch
+        // "<@editor> — FOR REVIEW sent to <@CategoryHead>" (routes to the editor's batch
         // / daily thread, video name + link + Tracker).
         if (a.editor) {
           queueNotification(a.editor, 'category-for-review', a, '', { statusLabel: 'For Review (Category Head)' });
