@@ -9590,6 +9590,19 @@ function catReviewPendingAssets() {
   });
 }
 
+// Videos a cat head sent back for revisions and that are still awaiting the editor
+// (categoryHeadQc === 'Needs Revisions'), same country scope as the pending queue. These
+// have already left the pending list, so without a home on the tab they'd vanish the
+// instant the head set them back — taking the comment left explaining why with them.
+function catReviewSentBackAssets() {
+  return STATE.assets.filter(function(a) {
+    if (a.categoryHeadQc !== 'Needs Revisions') return false;
+    var camp = findCampaignById(a.campaignId);
+    var country = camp && camp.country;
+    return !!(country && CHQ_COUNTRY_ALLOWLIST[country]);
+  });
+}
+
 // Count for the tab badge — scoped to the viewer's own categories if they're a head,
 // otherwise the full pending count (for PMs / admins overseeing everyone).
 function catReviewPendingCount() {
@@ -9732,6 +9745,21 @@ function renderCatReviewView() {
     return ax < bx ? -1 : (ax > bx ? 1 : 0);
   });
 
+  // Videos the viewer (or, for a PM/admin, any head) sent back for revisions that still
+  // await the editor. Head-scoped like the queue, but intentionally NOT window-filtered:
+  // chReviewReadyAt is stamped when a video first entered review (not when it was sent
+  // back), so a daily/weekly window would wrongly hide a video sent back today whose
+  // review clock started earlier — defeating the whole point of keeping it visible. These
+  // stay in the section until the editor re-submits (→ For Review) or they're approved.
+  var sentBack = catReviewSentBackAssets().filter(function(a) {
+    if (mine && getCategoryHead(a.category) !== mine) return false;
+    return true;
+  });
+  sentBack.sort(function(a, b) {
+    var ax = catReviewSinceISO(a) || '0000-00-00', bx = catReviewSinceISO(b) || '0000-00-00';
+    return ax < bx ? -1 : (ax > bx ? 1 : 0);
+  });
+
   // Which heads get a section: the viewer if they're a head, otherwise all heads that
   // have in-window pending items (PM/admin overview), stacked in the CH_HEAD_ORDER ranking.
   var heads;
@@ -9761,7 +9789,7 @@ function renderCatReviewView() {
       '<div style="font-size:13px; color:var(--text3); margin-top:2px;">' + subLine + '</div></div>' +
       toggle + '</div>';
 
-  if (pending.length === 0) {
+  if (pending.length === 0 && sentBack.length === 0) {
     return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header +
       '<div style="padding:60px 20px; text-align:center; color:var(--text3); font-size:14px; background:var(--bg2); border:1px solid var(--border); border-radius:12px;">' +
       'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.</div></div></div>';
@@ -9777,7 +9805,9 @@ function renderCatReviewView() {
     // is the chronological review order — the videos that have been waiting longest sit
     // at the top of each cat head's list.
     var headAssets = pending.filter(function(a) { return getCategoryHead(a.category) === head; });
-    if (headAssets.length === 0 && !mine) return '';
+    // Skip heads with nothing live in the queue — including the viewer themselves, so an
+    // empty queue never renders a bare "0 pending" header above the sent-back section.
+    if (headAssets.length === 0) return '';
 
     var headKey = head.replace(/'/g, "\\'");
     var headOpen = !headCollapsed[head];
@@ -9825,13 +9855,34 @@ function renderCatReviewView() {
     return '<div style="margin-bottom:32px;">' + headHeader + catBlocks + '</div>';
   }).join('');
 
-  return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header + sections + '</div></div>';
+  // "Sent back for revisions" — videos the head returned to the editor. Rendered as a
+  // distinct collapsible block below the live queue, with each card's comment thread
+  // force-opened so the note the head left (the reason for the send-back) is visible at a
+  // glance. Cards keep their Approve/Cancel actions; a video leaves this block when the
+  // editor re-submits it (categoryHeadQc → For Review) and it rejoins the queue above.
+  var sbCollapsed = !!STATE.catReviewSentBackCollapsed;
+  var sentBackSection = '';
+  if (sentBack.length) {
+    var sbChevron = sbCollapsed ? '▶' : '▼';
+    var sbHeader = '<div onclick="App.toggleCatReviewSentBack()" style="display:flex; align-items:center; gap:12px; margin-bottom:12px; cursor:pointer; user-select:none; padding:4px 6px;">' +
+        '<span style="font-size:11px; color:var(--text3); font-family:\'JetBrains Mono\',monospace; width:12px;">' + sbChevron + '</span>' +
+        '<div style="width:36px; height:36px; border-radius:50%; background:var(--amber-bg); color:var(--amber-text); display:flex; align-items:center; justify-content:center; font-size:15px;">↺</div>' +
+        '<div style="flex:1;"><div style="font-weight:600; font-size:15px; color:var(--text1);">Sent back for revisions</div>' +
+        '<div style="font-size:12px; color:var(--text3);">Waiting on the editor to re-submit — your comments stay here so nothing gets lost</div></div>' +
+        '<span style="background:var(--amber-bg); color:var(--amber-text); font-size:12px; padding:3px 12px; border-radius:20px;">' + sentBack.length + ' sent back</span>' +
+      '</div>';
+    var sbCards = sbCollapsed ? '' : '<div>' + sentBack.map(function(a) { return renderCatReviewCard(a, false, { forceCommentsOpen: true }); }).join('') + '</div>';
+    sentBackSection = '<div style="margin-top:8px; padding-top:24px; border-top:1px solid var(--border);">' + sbHeader + sbCards + '</div>';
+  }
+
+  return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header + sections + sentBackSection + '</div></div>';
 }
 
 // One video row on the Cat Heads Review tab: status, actions, and comment thread.
 // hideCatBadge omits the inline category pill (used when the card sits under a
 // per-category group header that already shows the category).
-function renderCatReviewCard(a, hideCatBadge) {
+function renderCatReviewCard(a, hideCatBadge, opts) {
+  opts = opts || {};
   var id = String(a.id).replace(/'/g, "\\'");
   var camp = findCampaignById(a.campaignId);
   var country = camp && camp.country ? camp.country : '';
@@ -9892,7 +9943,7 @@ function renderCatReviewCard(a, hideCatBadge) {
 
   // Comments are collapsed by default (optional) — a toggle reveals the thread and the
   // input box, so the card stays compact until you actually want to discuss a video.
-  var commentsOpen = !!(STATE.catReviewCommentsOpen && STATE.catReviewCommentsOpen[a.id]);
+  var commentsOpen = !!opts.forceCommentsOpen || !!(STATE.catReviewCommentsOpen && STATE.catReviewCommentsOpen[a.id]);
   var commentCount = comments.length;
   var commentToggle = '<button onclick="App.toggleCatReviewComments(\'' + id + '\')" style="border:none; background:transparent; color:var(--text3); font-size:12px; padding:0; cursor:pointer; display:flex; align-items:center; gap:6px;">' +
       '<span style="font-family:\'JetBrains Mono\',monospace; font-size:10px;">' + (commentsOpen ? '▼' : '▶') + '</span>' +
@@ -14718,6 +14769,10 @@ var App = {
   toggleCatReviewComments: function(id) {
     if (!STATE.catReviewCommentsOpen) STATE.catReviewCommentsOpen = {};
     STATE.catReviewCommentsOpen[id] = !STATE.catReviewCommentsOpen[id];
+    render();
+  },
+  toggleCatReviewSentBack: function() {
+    STATE.catReviewSentBackCollapsed = !STATE.catReviewSentBackCollapsed;
     render();
   },
   addCatReviewComment: function(id) {
