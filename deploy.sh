@@ -28,22 +28,37 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   exit 1
 fi
 
-# 2. Anything to deploy?
-if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcelain)" ]; then
-  echo "✓ Nothing to deploy — working tree is clean."
+# 2. Is there anything to deploy? Two cases count:
+#    (a) uncommitted changes in the working tree, or
+#    (b) a clean tree but local commits not yet pushed to origin.
+HAS_CHANGES=0
+if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git status --porcelain)" ]; then
+  HAS_CHANGES=1
+fi
+UNPUSHED=0
+if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+  # Upstream exists — count commits ahead of it.
+  [ "$(git rev-list --count '@{u}'..HEAD)" -gt 0 ] && UNPUSHED=1
+else
+  # No upstream yet — any local commit needs a first push.
+  git rev-parse HEAD >/dev/null 2>&1 && UNPUSHED=1
+fi
+if [ "$HAS_CHANGES" -eq 0 ] && [ "$UNPUSHED" -eq 0 ]; then
+  echo "✓ Nothing to deploy — tree is clean and origin is up to date."
   exit 0
 fi
 
-# 3. Show what's going out.
-echo "Changes to deploy:"
-git status --short
-echo
-
-# 4. Commit message: use the argument, or a default with the date.
-MSG="${1:-Update tracker ($(date '+%Y-%m-%d %H:%M'))}"
-
-git add -A
-git commit -m "$MSG"
+# 3. Commit any uncommitted work (skip if the tree is already clean).
+if [ "$HAS_CHANGES" -eq 1 ]; then
+  echo "Changes to commit:"
+  git status --short
+  echo
+  MSG="${1:-Update tracker ($(date '+%Y-%m-%d %H:%M'))}"
+  git add -A
+  git commit -m "$MSG"
+else
+  echo "No new changes — pushing existing commit(s)."
+fi
 
 # 5. Push to the current branch's upstream (or set it on first push).
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
