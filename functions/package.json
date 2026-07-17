@@ -1,0 +1,11 @@
+{
+  "name": "functions",
+  "description": "Cloud Functions for Tilt Creative Tracker",
+  "engines": { "node": "20" },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^12.6.0",
+    "firebase-functions": "^6.0.1"
+  },
+  "private": true
+}

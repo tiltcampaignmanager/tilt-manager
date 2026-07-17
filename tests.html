@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tilt Creative Tracker — Tests</title>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; background: #0e0e12; color: #e0dff5; margin: 0; padding: 24px; }
+    h1 { font-size: 18px; color: #a09db8; margin-bottom: 4px; }
+    h2 { font-size: 13px; color: #7f77dd; text-transform: uppercase; letter-spacing: .08em; margin: 28px 0 8px; border-bottom: 1px solid #2a2a38; padding-bottom: 6px; }
+    .suite { margin-bottom: 8px; }
+    .test { display: flex; align-items: flex-start; gap: 10px; padding: 7px 12px; border-radius: 6px; margin: 4px 0; font-size: 13px; }
+    .test.pass { background: #04342c; border-left: 3px solid #1d9e75; }
+    .test.fail { background: #501313; border-left: 3px solid #e24b4a; }
+    .badge { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; flex-shrink: 0; margin-top: 1px; }
+    .badge.pass { background: #1d9e75; color: #fff; }
+    .badge.fail { background: #e24b4a; color: #fff; }
+    .detail { font-size: 11px; color: #a09db8; margin-top: 3px; }
+    .err { font-size: 11px; color: #f09595; margin-top: 3px; font-family: monospace; }
+    #summary { margin-top: 24px; padding: 12px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; }
+    #summary.all-pass { background: #04342c; color: #5dcaa5; border: 1px solid #1d9e75; }
+    #summary.has-fail { background: #501313; color: #f09595; border: 1px solid #e24b4a; }
+    .run-btn { margin-top: 16px; padding: 8px 18px; background: #7f77dd; color: #fff; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; font-family: inherit; }
+    .run-btn:hover { background: #afa9ec; }
+  </style>
+</head>
+<body>
+  <h1>Tilt Creative Tracker — Feature Tests</h1>
+  <p style="font-size:12px;color:#6b6880;margin:0 0 4px">Open this file in a browser and click Run to execute all tests.</p>
+  <button class="run-btn" onclick="runAll()">▶ Run All Tests</button>
+  <div id="results"></div>
+  <div id="summary" style="display:none"></div>
+
+  <script>
+    // ─── Minimal test harness ───────────────────────────────────────────────
+    var suites = [];
+    var currentSuite = null;
+
+    function describe(name, fn) {
+      currentSuite = { name: name, tests: [] };
+      suites.push(currentSuite);
+      fn();
+      currentSuite = null;
+    }
+
+    function it(name, fn) {
+      currentSuite.tests.push({ name: name, fn: fn });
+    }
+
+    function expect(val) {
+      return {
+        toBe: function(expected) {
+          if (val !== expected) throw new Error('Expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(val));
+        },
+        toEqual: function(expected) {
+          var a = JSON.stringify(val), b = JSON.stringify(expected);
+          if (a !== b) throw new Error('Expected ' + b + ', got ' + a);
+        },
+        toBeTruthy: function() {
+          if (!val) throw new Error('Expected truthy, got ' + JSON.stringify(val));
+        },
+        toBeFalsy: function() {
+          if (val) throw new Error('Expected falsy, got ' + JSON.stringify(val));
+        },
+        toContain: function(item) {
+          if (!val.includes(item)) throw new Error('Expected ' + JSON.stringify(val) + ' to contain ' + JSON.stringify(item));
+        },
+        toBeGreaterThan: function(n) {
+          if (!(val > n)) throw new Error('Expected ' + val + ' > ' + n);
+        }
+      };
+    }
+
+    // ─── Helpers copied/extracted from index.html logic ────────────────────
+
+    // Mirrors the insertion logic from showAddSubCampaignModal
+    function insertCampaign(campaigns, newCamp, country) {
+      var firstDoneIdx = -1;
+      for (var i = 0; i < campaigns.length; i++) {
+        if (campaigns[i].country === country && campaigns[i].done) {
+          firstDoneIdx = i; break;
+        }
+      }
+      if (firstDoneIdx === -1) {
+        campaigns.push(newCamp);
+      } else {
+        campaigns.splice(firstDoneIdx, 0, newCamp);
+      }
+    }
+
+    // Mirrors reorderCampaigns from index.html
+    function reorderCampaigns(campaigns) {
+      var counters = {};
+      for (var i = 0; i < campaigns.length; i++) {
+        var c = campaigns[i];
+        counters[c.country] = (counters[c.country] || 0) + 1;
+        c.rank = counters[c.country];
+      }
+    }
+
+    // Mirrors the Sparks Code visibility check
+    function showSparksCode(countryCode) {
+      return ['IT', 'ES', 'PL'].indexOf(countryCode) !== -1;
+    }
+
+    // Mirrors the sync indicator HTML generation
+    function syncIndicatorHtml(syncStatus) {
+      if (syncStatus === 'saving') return '<div class="sync-indicator visible"><div class="sync-spinner"></div>Saving…</div>';
+      if (syncStatus === 'saved')  return '<div class="sync-indicator visible saved">✓ All changes saved</div>';
+      if (syncStatus === 'error')  return '<div class="sync-indicator visible error">⚠ Save failed</div>';
+      return '<div class="sync-indicator"></div>';
+    }
+
+    // Mirrors Fb._uploadTimer guard in applySnapshot
+    // Returns true if the snapshot should be deferred
+    function shouldDeferSnapshot(aeBusy, ptrDragActive, uploadTimerSet, retries) {
+      return (aeBusy || ptrDragActive || uploadTimerSet) && retries < 8;
+    }
+
+    // ─── Test suites ────────────────────────────────────────────────────────
+
+    describe('New campaign inserts above done campaigns', function() {
+      it('appends to end when no done campaigns exist', function() {
+        var campaigns = [
+          { id: 1, country: 'UK', done: false },
+          { id: 2, country: 'UK', done: false }
+        ];
+        var newCamp = { id: 3, country: 'UK', done: false };
+        insertCampaign(campaigns, newCamp, 'UK');
+        expect(campaigns[campaigns.length - 1].id).toBe(3);
+      });
+
+      it('inserts before the first done campaign', function() {
+        var campaigns = [
+          { id: 1, country: 'UK', done: false },
+          { id: 2, country: 'UK', done: true },
+          { id: 3, country: 'UK', done: true }
+        ];
+        var newCamp = { id: 4, country: 'UK', done: false };
+        insertCampaign(campaigns, newCamp, 'UK');
+        expect(campaigns[1].id).toBe(4);
+        expect(campaigns[2].id).toBe(2);
+      });
+
+      it('inserts before the only done campaign', function() {
+        var campaigns = [
+          { id: 1, country: 'UK', done: true }
+        ];
+        var newCamp = { id: 2, country: 'UK', done: false };
+        insertCampaign(campaigns, newCamp, 'UK');
+        expect(campaigns[0].id).toBe(2);
+        expect(campaigns[1].id).toBe(1);
+      });
+
+      it('does not affect done campaigns from other countries', function() {
+        var campaigns = [
+          { id: 1, country: 'UK', done: false },
+          { id: 2, country: 'IT', done: true },
+          { id: 3, country: 'UK', done: true }
+        ];
+        var newCamp = { id: 4, country: 'UK', done: false };
+        insertCampaign(campaigns, newCamp, 'UK');
+        // Should insert at index 2 (before UK done at index 3, after IT done at index 1)
+        // firstDoneIdx for UK = index 2 (campaigns[2].country==='UK' && done)
+        expect(campaigns[2].id).toBe(4);
+        expect(campaigns[3].id).toBe(3);
+      });
+
+      it('re-ranks correctly after insertion', function() {
+        var campaigns = [
+          { id: 1, country: 'UK', done: false },
+          { id: 2, country: 'UK', done: true }
+        ];
+        var newCamp = { id: 3, country: 'UK', done: false };
+        insertCampaign(campaigns, newCamp, 'UK');
+        reorderCampaigns(campaigns);
+        expect(campaigns[0].rank).toBe(1);
+        expect(campaigns[1].rank).toBe(2);
+        expect(campaigns[2].rank).toBe(3);
+      });
+    });
+
+    describe('Sparks Code column visibility', function() {
+      it('shows for Italy (IT)', function() {
+        expect(showSparksCode('IT')).toBeTruthy();
+      });
+
+      it('shows for Spain (ES)', function() {
+        expect(showSparksCode('ES')).toBeTruthy();
+      });
+
+      it('shows for Poland (PL)', function() {
+        expect(showSparksCode('PL')).toBeTruthy();
+      });
+
+      it('hidden for United Kingdom (UK)', function() {
+        expect(showSparksCode('UK')).toBeFalsy();
+      });
+
+      it('hidden for United States (US)', function() {
+        expect(showSparksCode('US')).toBeFalsy();
+      });
+
+      it('hidden for unknown country code', function() {
+        expect(showSparksCode('FR')).toBeFalsy();
+      });
+    });
+
+    describe('Sync indicator HTML', function() {
+      it('idle: renders invisible indicator', function() {
+        var html = syncIndicatorHtml('idle');
+        expect(html).toContain('sync-indicator');
+        expect(html.includes('visible')).toBeFalsy();
+      });
+
+      it('saving: renders spinner and "Saving…" text', function() {
+        var html = syncIndicatorHtml('saving');
+        expect(html).toContain('visible');
+        expect(html).toContain('sync-spinner');
+        expect(html).toContain('Saving');
+      });
+
+      it('saved: renders green check and correct text', function() {
+        var html = syncIndicatorHtml('saved');
+        expect(html).toContain('visible saved');
+        expect(html).toContain('✓ All changes saved');
+      });
+
+      it('error: renders error text', function() {
+        var html = syncIndicatorHtml('error');
+        expect(html).toContain('visible error');
+        expect(html).toContain('Save failed');
+      });
+
+      it('unknown status falls back to idle (invisible)', function() {
+        var html = syncIndicatorHtml('unknown-state');
+        expect(html.includes('visible')).toBeFalsy();
+      });
+    });
+
+    describe('Snapshot deferral guard (multi-browser race condition fix)', function() {
+      it('defers when upload timer is pending', function() {
+        expect(shouldDeferSnapshot(false, false, true, 0)).toBeTruthy();
+      });
+
+      it('defers when input is focused (aeBusy)', function() {
+        expect(shouldDeferSnapshot(true, false, false, 0)).toBeTruthy();
+      });
+
+      it('defers when drag is in flight', function() {
+        expect(shouldDeferSnapshot(false, true, false, 0)).toBeTruthy();
+      });
+
+      it('does NOT defer when idle and no upload pending', function() {
+        expect(shouldDeferSnapshot(false, false, false, 0)).toBeFalsy();
+      });
+
+      it('stops deferring after 8 retries even if upload timer is set', function() {
+        expect(shouldDeferSnapshot(false, false, true, 8)).toBeFalsy();
+      });
+
+      it('stops deferring after 8 retries even if input is focused', function() {
+        expect(shouldDeferSnapshot(true, false, false, 8)).toBeFalsy();
+      });
+
+      it('defers at retry 7 (last allowed)', function() {
+        expect(shouldDeferSnapshot(false, false, true, 7)).toBeTruthy();
+      });
+    });
+
+    describe('Add Campaign / Import Campaign button placement', function() {
+      // These tests verify the HTML rendered for the sidebar country action buttons
+
+      function renderCountryActionBtns(compact, countryCode) {
+        if (compact) return '';
+        return '<div class="country-action-btns">' +
+          '<button class="add-sub-btn" onclick="App.addSub(\'' + countryCode + '\')">+ Add Campaign</button>' +
+          '<button class="add-sub-btn" onclick="App.showImportModal()">⬇ Import</button>' +
+        '</div>';
+      }
+
+      it('renders both buttons in full mode', function() {
+        var html = renderCountryActionBtns(false, 'UK');
+        expect(html).toContain('+ Add Campaign');
+        expect(html).toContain('⬇ Import');
+      });
+
+      it('Add Campaign button calls addSub with correct country code', function() {
+        var html = renderCountryActionBtns(false, 'IT');
+        expect(html).toContain("App.addSub('IT')");
+      });
+
+      it('Import button calls showImportModal', function() {
+        var html = renderCountryActionBtns(false, 'UK');
+        expect(html).toContain('App.showImportModal()');
+      });
+
+      it('buttons are hidden in compact mode', function() {
+        var html = renderCountryActionBtns(true, 'UK');
+        expect(html).toBe('');
+      });
+
+      it('buttons render for each country independently', function() {
+        ['UK', 'IT', 'ES', 'US', 'PL'].forEach(function(code) {
+          var html = renderCountryActionBtns(false, code);
+          expect(html).toContain("App.addSub('" + code + "')");
+        });
+      });
+    });
+
+    // ─── Runner ─────────────────────────────────────────────────────────────
+
+    function runAll() {
+      var passed = 0, failed = 0;
+      var html = '';
+
+      suites.forEach(function(suite) {
+        html += '<h2>' + suite.name + '</h2><div class="suite">';
+        suite.tests.forEach(function(test) {
+          try {
+            test.fn();
+            passed++;
+            html += '<div class="test pass"><span class="badge pass">PASS</span><div>' + escHtml(test.name) + '</div></div>';
+          } catch(e) {
+            failed++;
+            html += '<div class="test fail"><span class="badge fail">FAIL</span><div>' + escHtml(test.name) + '<div class="err">' + escHtml(e.message) + '</div></div></div>';
+          }
+        });
+        html += '</div>';
+      });
+
+      document.getElementById('results').innerHTML = html;
+
+      var summary = document.getElementById('summary');
+      var total = passed + failed;
+      summary.style.display = 'block';
+      if (failed === 0) {
+        summary.className = 'all-pass';
+        summary.textContent = '✓ All ' + total + ' tests passed';
+      } else {
+        summary.className = 'has-fail';
+        summary.textContent = '✗ ' + failed + ' of ' + total + ' tests failed';
+      }
+    }
+
+    function escHtml(str) {
+      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+</body>
+</html>

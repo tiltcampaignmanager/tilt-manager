@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Cloud Functions deps (installed with `npm install`, never committed)
+functions/node_modules/
+
+# Firebase local artifacts
+.firebase/
+firebase-debug.log
+firestore-debug.log
+functions/*.log
+
+# Editor / OS junk
+*.swp
+Thumbs.db
+
+# NOTE: firebase-config.js IS committed on purpose — GitHub Pages has no way to
+# inject it at runtime, and Firebase Web API keys are project identifiers, not
+# secrets. The real secrets (Slack/Meta tokens) live in Cloud Function secrets,
+# never in this repo.
