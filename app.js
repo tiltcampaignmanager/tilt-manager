@@ -1328,7 +1328,8 @@ var CATEGORY_HEADS = {
   'Watches':              'Jacob',
   'Mixed Deals':          'Anand',
   'Womenswear':           'Avy',
-  'Event - Stone Island': 'Millie'
+  'Event - Stone Island': 'Millie',
+  'Content Lead':         'Millie'
 };
 
 // Display ranking for the Cat Heads Review tab — the order manager sections stack
