@@ -5720,8 +5720,11 @@ function assetPeriodDate(a) { return (a && (a.estDelivery || a.dateApproved)) ||
 function assetPeriodYM(a) { var d = assetPeriodDate(a); return d ? d.slice(0, 7) : ''; }
 
 // The single grade linked to a campaign video (grades are 1-per-asset now).
+// Compare as strings — asset ids may be numeric (seed data) or strings (newLocalId),
+// and the id round-trips through inline handlers as a string, so loose-match by value.
 function gradeForAsset(assetId) {
-  return (STATE.grades || []).filter(function(g) { return g.assetId === assetId; })[0] || null;
+  var sid = String(assetId);
+  return (STATE.grades || []).filter(function(g) { return String(g.assetId) === sid; })[0] || null;
 }
 
 // Resolve the selected {year, month('01'..'12'), ym, label}. Defaults to the most recent
@@ -5834,6 +5837,9 @@ function renderGradingView() {
 
   function assetRowHtml(a) {
     var g = gradeForAsset(a.id);
+    // Quote the id for inline handlers — asset ids are strings for app-created videos
+    // (newLocalId 'a…'), so an unquoted id becomes an undefined variable reference.
+    var aid = "'" + String(a.id).replace(/'/g, "\\'") + "'";
     var graded = !!g;
     var dismissed = graded && g.dismissed;
     var contentType = graded ? g.contentType : 'Net New';
@@ -5845,21 +5851,21 @@ function renderGradingView() {
     var within = rounds <= cap;
     var ver = assetVer(a);
     var name = a.name + ((ver && a.name.indexOf(ver) < 0) ? ' ' + ver : '');
-    var typeSel = '<select class="grading-log-type" onchange="App.setAssetGradeField(' + a.id + ',\'contentType\',this.value)">' +
+    var typeSel = '<select class="grading-log-type" onchange="App.setAssetGradeField(' + aid + ',\'contentType\',this.value)">' +
       '<option value="Net New"' + (contentType === 'Net New' ? ' selected' : '') + '>Net New</option>' +
       '<option value="Maintenance"' + (contentType === 'Maintenance' ? ' selected' : '') + '>Maint.</option>' +
     '</select>';
     function chk(field, on, title) {
       return '<td class="grading-log-check"><input type="checkbox"' + (on ? ' checked' : '') +
-        ' onchange="App.toggleAssetGradeField(' + a.id + ',\'' + field + '\')" title="' + escapeHtml(title) + '"></td>';
+        ' onchange="App.toggleAssetGradeField(' + aid + ',\'' + field + '\')" title="' + escapeHtml(title) + '"></td>';
     }
     var roundsTag = isAuto
       ? '<span class="grading-rounds-tag is-auto" title="Auto from this video’s revision history (Needs Revisions kickbacks)">auto</span>'
-      : '<button class="grading-rounds-revert" onclick="App.resetAssetGradeRoundsAuto(' + a.id + ')" title="Revert to auto (live from revision history)">↺</button>';
+      : '<button class="grading-rounds-revert" onclick="App.resetAssetGradeRoundsAuto(' + aid + ')" title="Revert to auto (live from revision history)">↺</button>';
     var actions = dismissed
-      ? '<button class="grading-restore-btn" onclick="App.restoreAssetVideo(' + a.id + ')" title="Restore — count it again">↩</button>'
-      : '<button class="grading-dismiss-btn" onclick="App.dismissAssetVideo(' + a.id + ')" title="Dismiss — exclude from the scorecard">⊘</button>';
-    if (graded) actions += '<button class="grading-del-btn" onclick="App.deleteAssetGrade(' + a.id + ')" title="Clear this video’s grade">🗑</button>';
+      ? '<button class="grading-restore-btn" onclick="App.restoreAssetVideo(' + aid + ')" title="Restore — count it again">↩</button>'
+      : '<button class="grading-dismiss-btn" onclick="App.dismissAssetVideo(' + aid + ')" title="Dismiss — exclude from the scorecard">⊘</button>';
+    if (graded) actions += '<button class="grading-del-btn" onclick="App.deleteAssetGrade(' + aid + ')" title="Clear this video’s grade">🗑</button>';
     var rowCls = dismissed ? 'grading-row-dismissed' : (graded ? 'grading-row-graded' : '');
     return '<tr class="' + rowCls + '">' +
       '<td class="grading-log-video">' + escapeHtml(name) +
@@ -5870,7 +5876,7 @@ function renderGradingView() {
       '<td>' + typeSel + '</td>' +
       chk('brandPass', brand, 'Brand Pass (Avy)') +
       chk('qaClean', qa, 'QA Clean (Elsa)') +
-      '<td class="grading-log-rounds"><input type="number" class="grading-mini-input' + (isAuto ? ' is-auto' : '') + '" min="0" step="1" value="' + rounds + '" onchange="App.setAssetGradeField(' + a.id + ',\'revisionRounds\',this.value)">' + roundsTag + '</td>' +
+      '<td class="grading-log-rounds"><input type="number" class="grading-mini-input' + (isAuto ? ' is-auto' : '') + '" min="0" step="1" value="' + rounds + '" onchange="App.setAssetGradeField(' + aid + ',\'revisionRounds\',this.value)">' + roundsTag + '</td>' +
       '<td class="grading-log-cap"><span class="grading-cap-pill ' + (within ? 'is-in' : 'is-out') + '" title="Cap for ' + escapeHtml(contentType) + ': ≤ ' + cap + ' rounds">' + (within ? '✓' : '✗') + '</span></td>' +
       chk('newIdea', idea, 'New Idea (Elsa)') +
       '<td class="grading-log-actions">' + actions + '</td>' +
