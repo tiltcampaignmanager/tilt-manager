@@ -1376,6 +1376,24 @@ function getCategoryHead(category) {
   return '';
 }
 
+// Every category the app knows about — the shared STATE.categories list (which is
+// what users edit in Config) PLUS any keys that live only in the hardcoded
+// CATEGORY_HEADS map (e.g. 'Content Lead'). De-duplicated case-insensitively,
+// STATE order first. This is the single source used by all category-head-derived
+// UI (Automations threads, Config head rows) so a category added in Config — and
+// its head — propagates everywhere automatically without touching code.
+function allKnownCategories() {
+  var out = [], seen = {};
+  (STATE.categories || []).forEach(function(c) {
+    var n = c && c.name;
+    if (n && !seen[n.toLowerCase()]) { seen[n.toLowerCase()] = true; out.push(n); }
+  });
+  Object.keys(CATEGORY_HEADS).forEach(function(n) {
+    if (!seen[n.toLowerCase()]) { seen[n.toLowerCase()] = true; out.push(n); }
+  });
+  return out;
+}
+
 // Status values the category head can set on a video. Distinct from the
 // Footage QC values (which track raw-files / pricing readiness) — these track
 // the head's review verdict on the produced video.
@@ -6507,9 +6525,12 @@ function renderAutomationsView() {
 
   function renderCatHeadThreadCard() {
     var today = todayUK();
-    var cats = Object.keys(CATEGORY_HEADS);
+    // Every category that has a head assigned — merges Config-added categories +
+    // overrides (via allKnownCategories/getCategoryHead), not just the hardcoded map,
+    // so a new category + head shows up here automatically.
+    var cats = allKnownCategories().filter(function(c) { return getCategoryHead(c); });
     var rows = cats.map(function(cat) {
-      var head = CATEGORY_HEADS[cat];
+      var head = getCategoryHead(cat);
       var t = (STATE.catHeadDailyThreads && STATE.catHeadDailyThreads[cat]) || null;
       var url = t ? t.url : '';
       var dot = '', dotTitle = 'No thread set — falls back to webhook';
@@ -9264,21 +9285,16 @@ function renderConfigView() {
     '</div>';
   }).join('');
 
-  // Category head Slack member ID rows. One row per unique head listed in
-  // CATEGORY_HEADS — when set, the head gets @mentioned in PM batch messages
-  // for For Review items in their categories.
+  // Category head Slack member ID rows. One row per unique head — derived from
+  // allCategoryHeads() so Config-added categories + their heads (via overrides)
+  // get a row automatically, not just the hardcoded CATEGORY_HEADS entries.
   var headRows = (function() {
-    var seen = {};
-    var heads = [];
-    Object.keys(CATEGORY_HEADS).forEach(function(cat) {
-      var h = CATEGORY_HEADS[cat];
-      if (h && !seen[h]) { seen[h] = true; heads.push(h); }
-    });
+    var heads = allCategoryHeads();
     return heads.map(function(name) {
       var slackId = (STATE.categoryHeadSlackIds && STATE.categoryHeadSlackIds[name]) || '';
       var slackIdEsc = escapeHtml(slackId);
       // Categories owned by this head — small caption so the user knows who handles what.
-      var cats = Object.keys(CATEGORY_HEADS).filter(function(cat) { return CATEGORY_HEADS[cat] === name; });
+      var cats = allKnownCategories().filter(function(cat) { return getCategoryHead(cat) === name; });
       return '<div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);">' +
         '<div style="width:34px; flex-shrink:0;"></div>' +
         '<div style="font-size:13px; font-weight:600; color:var(--text1); width:90px; flex-shrink:0;">' + escapeHtml(name) + '</div>' +
