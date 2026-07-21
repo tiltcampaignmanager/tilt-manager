@@ -393,6 +393,8 @@ var Fb = {
       nextCampaignId: STATE.nextCampaignId,
       nextBatchItemId: STATE.nextBatchItemId,
       qcDismissed: STATE.qcDismissed || {},
+      grades: Array.isArray(STATE.grades) ? STATE.grades : [],
+      scorecardMeta: STATE.scorecardMeta || {},
       _lastEditedBy: Auth.user ? Auth.user.uid : null,
       _lastEditedByName: Auth.user ? Auth.user.displayName : null,
       _lastEditedAt: Date.now()
@@ -473,7 +475,14 @@ var Fb = {
         reportingCategory: true,
         reportingView: true,
         reportingApproval: true,
-        editorTallyCollapsed: true
+        editorTallyCollapsed: true,
+        gradingPeriod: true,
+        gradingEditorFilter: true,
+        gradingCustomEntry: true,
+        gradingCampaignId: true,
+        gradingYear: true,
+        gradingMonth: true,
+        gradingShowDismissed: true
       };
       // Copy known fields onto STATE. Skip metadata fields prefixed with `_` and any
       // per-user UI field (so a teammate's tab/campaign/expansion choices don't override
@@ -1367,6 +1376,24 @@ function getCategoryHead(category) {
   return '';
 }
 
+// Every category the app knows about — the shared STATE.categories list (which is
+// what users edit in Config) PLUS any keys that live only in the hardcoded
+// CATEGORY_HEADS map (e.g. 'Content Lead'). De-duplicated case-insensitively,
+// STATE order first. This is the single source used by all category-head-derived
+// UI (Automations threads, Config head rows) so a category added in Config — and
+// its head — propagates everywhere automatically without touching code.
+function allKnownCategories() {
+  var out = [], seen = {};
+  (STATE.categories || []).forEach(function(c) {
+    var n = c && c.name;
+    if (n && !seen[n.toLowerCase()]) { seen[n.toLowerCase()] = true; out.push(n); }
+  });
+  Object.keys(CATEGORY_HEADS).forEach(function(n) {
+    if (!seen[n.toLowerCase()]) { seen[n.toLowerCase()] = true; out.push(n); }
+  });
+  return out;
+}
+
 // Status values the category head can set on a video. Distinct from the
 // Footage QC values (which track raw-files / pricing readiness) — these track
 // the head's review verdict on the produced video.
@@ -1514,6 +1541,28 @@ var STATE = {
   reportingView:        'table',
   reportingApproval:    'all',
   editorTallyCollapsed: false,
+
+  // ── Grading (Editor KPI Scorecard) ──────────────────────────────────────────
+  // Shared workspace data. `grades` is one row per delivered video (mirrors the
+  // Notion "Daily Log"); the Editor Scorecard rolls these up per editor. See
+  // renderGradingView / computeScorecard. Kept as a plain array in the synced
+  // main doc (like `campaigns`) — small enough to fit the snapshot budget.
+  // Each grade: { id, video, date (YYYY-MM-DD), editor, contentType ('Net New'|
+  //   'Maintenance'), brandPass (bool, Avy), qaClean (bool, Elsa), revisionRounds
+  //   (int), newIdea (bool, Elsa), createdAt, createdBy, updatedAt }.
+  grades: [],
+  // Per-editor manual scorecard inputs that a single video row can't capture:
+  //   { <editor>: { avgVideosPerDay: number|null, targetPerDay: number|null } }.
+  scorecardMeta: {},
+  // Per-user UI (NOT shared): which period the scorecard covers and which editor
+  // the grades list is filtered to.
+  gradingPeriod: 'quarter',   // 'quarter' | 'month' | 'all'
+  gradingEditorFilter: 'all',
+  gradingCampaignId: null,    // selected campaign whose videos you're grading
+  gradingYear: null,          // selected year (string 'YYYY'); null = latest month with videos
+  gradingMonth: null,         // selected month (string '01'..'12')
+  gradingCustomEntry: false,  // (legacy) unused since grading moved to campaign videos
+  gradingShowDismissed: false,// true = also show dismissed videos in the grade list
 
   countries: [
     { code: 'UK', name: 'United Kingdom' },
@@ -3808,13 +3857,14 @@ var TAB_DEFS = {
   catReview:        { label: 'Cat Heads Review', badge: true },
   editingCalendar:  { label: 'Editing Calendar' },
   log:              { label: 'Daily Log' },
+  grading:          { label: 'Grading' },
   notifications:    { label: 'Notifications', badge: true },
   automations:      { label: 'Automations' },
   reporting:        { label: 'Reporting' },
   content:          { label: 'Content' },
   config:           { label: 'Config' }
 };
-var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'log', 'editingCalendar', 'automations', 'reporting', 'content', 'config'];
+var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'log', 'editingCalendar', 'grading', 'automations', 'reporting', 'content', 'config'];
 
 // Role-based tab visibility. Editors and PMs share the same day-to-day set
 // (Campaigns → Reporting, plus Notifications). Cat Head and Content Lead can open
@@ -3822,10 +3872,10 @@ var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'lo
 // gated by roleAtLeast('admin') inside Config/Automations.
 // Tab visibility is also enforced server-side in Phase D via Firestore rules on
 // the documents these tabs touch (config/app and the users collection).
-var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'automations', 'reporting', 'content', 'config'];
+var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'automations', 'reporting', 'content', 'config'];
 var ROLE_TAB_VISIBILITY = {
-  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'],
-  pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'],
+  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
+  pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
   catHead:     ALL_TABS.slice(),
   contentLead: ALL_TABS.slice(),
   admin:       ALL_TABS.slice()
@@ -5580,6 +5630,341 @@ function renderDailyLogView() {
   '</div>';
 }
 
+// ===================== GRADING — EDITOR KPI SCORECARD =====================
+// Implements the Notion "Editing Team — Q3 KPI Framework": every delivered video
+// is graded across four pillars (Brand 25 / QA 30 / Speed 30 / Innovation 15 =
+// 100) and each editor gets one composite /100 + a rating band. Grade rows live
+// in STATE.grades; the scorecard rolls them up per editor. See computeScorecard.
+
+// Editors that get graded — Elsa is a PM/grader and "Seller" isn't an editor, so
+// both are excluded (same set the Daily Log tracks).
+var GRADING_EDITORS = DAILY_LOG_EDITORS.slice();
+
+// Notion source-of-truth for the rubric (opened from the "Framework" button).
+var GRADING_FRAMEWORK_URL = 'https://app.notion.com/p/teamtilt/Editing-Team-Q3-KPI-Framework-3a0d662480788095b85ff3c4c54d0273';
+
+// Pillar point weights (sum = 100). Speed is split into Output + Revisions.
+var GRADE_POINTS = { brand: 25, qa: 30, innovation: 15, speedOutput: 15, speedRevisions: 15 };
+
+// Revision-round cap by content type: Net New ≤ 4, Maintenance ≤ 2.
+var REVISION_CAP = { 'Net New': 4, 'Maintenance': 2 };
+
+// The effective revision-round count for a grade. When the grade is linked to a
+// tracked campaign video (assetId) and hasn't been manually overridden, this reads
+// LIVE from that asset's auto-counted revisionRounds — so the scorecard reflects the
+// Board's revision history automatically. A manual edit (roundsManual) pins the typed
+// value instead, and free-text grades (no assetId) always use the typed value.
+function gradeRounds(g) {
+  if (g && !g.roundsManual && g.assetId) {
+    var a = findAssetById(g.assetId);
+    if (a) return Number(a.revisionRounds) || 0;
+  }
+  return Number(g.revisionRounds) || 0;
+}
+
+// A single video is "within cap" if its revision rounds didn't exceed the cap for
+// its content type. Unknown content type → not within cap (shouldn't happen).
+function gradeWithinCap(g) {
+  var cap = REVISION_CAP[g.contentType];
+  if (cap === undefined) return false;
+  return gradeRounds(g) <= cap;
+}
+
+// Composite score → rating band (matches the Notion "Composite Score Bands" table).
+function gradeRating(score) {
+  if (score >= 90) return { key: 'excellent', label: 'Excellent',  dot: '🟢' };
+  if (score >= 75) return { key: 'solid',     label: 'Solid',      dot: '🟡' };
+  if (score >= 60) return { key: 'needswork', label: 'Needs Work', dot: '🟠' };
+  return { key: 'atrisk', label: 'At Risk', dot: '🔴' };
+}
+
+// Roll a set of grade rows + the editor's manual meta (Avg Videos/Day, Target/Day)
+// up into one scorecard object. `grades` is the already period-filtered list.
+function computeScorecard(editor, grades) {
+  var rows = (grades || []).filter(function(g) { return g.editor === editor; });
+  var meta = (STATE.scorecardMeta && STATE.scorecardMeta[editor]) || {};
+  var total = rows.length;
+  var brandN = rows.filter(function(g) { return g.brandPass; }).length;
+  var qaN    = rows.filter(function(g) { return g.qaClean; }).length;
+  var ideas  = rows.filter(function(g) { return g.newIdea; }).length;
+  var capN   = rows.filter(gradeWithinCap).length;
+  var brandRate = total ? (brandN / total * 100) : 0;
+  var qaRate    = total ? (qaN    / total * 100) : 0;
+  var capRate   = total ? (capN   / total * 100) : 0;
+
+  function num(v) { return (v === '' || v === null || v === undefined) ? null : Number(v); }
+  var avgPerDay = num(meta.avgVideosPerDay);
+  var targetDay = num(meta.targetPerDay);
+  var hasOutput = (avgPerDay != null && !isNaN(avgPerDay) && targetDay != null && !isNaN(targetDay) && targetDay > 0);
+
+  // Points per pillar (see the Notion "How Points Are Counted" table).
+  var ptsBrand = brandRate / 100 * GRADE_POINTS.brand;
+  var ptsQa    = qaRate    / 100 * GRADE_POINTS.qa;
+  var ptsInnov = ideas >= 1 ? GRADE_POINTS.innovation : 0;
+  var ptsOut   = hasOutput ? Math.min(GRADE_POINTS.speedOutput, (avgPerDay / targetDay) * GRADE_POINTS.speedOutput) : 0;
+  var ptsRev   = capRate / 100 * GRADE_POINTS.speedRevisions;
+  var composite = ptsBrand + ptsQa + ptsInnov + ptsOut + ptsRev;
+
+  return {
+    editor: editor, total: total,
+    brandRate: brandRate, qaRate: qaRate, ideas: ideas, capRate: capRate,
+    avgPerDay: avgPerDay, targetDay: targetDay, hasOutput: hasOutput,
+    ptsBrand: ptsBrand, ptsQa: ptsQa, ptsInnov: ptsInnov, ptsOut: ptsOut, ptsRev: ptsRev,
+    composite: composite, rating: gradeRating(composite)
+  };
+}
+
+// A video's "period" for grading = the month it's delivered/approved in. Uses
+// estDelivery (the planned/actual delivery date), falling back to dateApproved.
+function assetPeriodDate(a) { return (a && (a.estDelivery || a.dateApproved)) || ''; }
+function assetPeriodYM(a) { var d = assetPeriodDate(a); return d ? d.slice(0, 7) : ''; }
+
+// The single grade linked to a campaign video (grades are 1-per-asset now).
+function gradeForAsset(assetId) {
+  return (STATE.grades || []).filter(function(g) { return g.assetId === assetId; })[0] || null;
+}
+
+// Resolve the selected {year, month('01'..'12'), ym, label}. Defaults to the most recent
+// month that actually has videos, so the view always opens on data.
+function resolveGradingYM() {
+  var y = STATE.gradingYear, m = STATE.gradingMonth;
+  if (!y || !m) {
+    var yms = (STATE.assets || []).map(assetPeriodYM).filter(Boolean).sort();
+    var latest = yms.length ? yms[yms.length - 1] : todayUK().slice(0, 7);
+    y = latest.slice(0, 4); m = latest.slice(5, 7);
+  }
+  y = String(y); m = String(m);
+  var ym = y + '-' + m;
+  return { year: y, month: m, ym: ym, label: MONTH_SHORT[parseInt(m, 10) - 1] + ' ' + y };
+}
+
+// The grades that fall inside the given YM ('YYYY-MM'), by their stored date.
+function gradesInYM(ym) {
+  return (STATE.grades || []).filter(function(g) { return (g.date || '').slice(0, 7) === ym; });
+}
+
+function renderGradingView() {
+  function fmt1(x) { return (Math.round(x * 10) / 10).toFixed(1); }
+  function pct(x) { return Math.round(x) + '%'; }
+  function assetVer(a) { return (typeof deriveVersionFromName === 'function') ? deriveVersionFromName(a) : (a.version || ''); }
+  var MONTHS_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  // ── Selected month/year ──
+  var sel = resolveGradingYM();
+  var selYM = sel.ym, selYear = sel.year, selMonth = sel.month;
+
+  // Campaigns that have at least one video delivered in the selected month.
+  var campsInMonth = (STATE.campaigns || []).filter(function(c) {
+    return (STATE.assets || []).some(function(a) { return a.campaignId === c.id && assetPeriodYM(a) === selYM; });
+  });
+  // Resolve the selected campaign — must be one that has videos this month.
+  var campId = STATE.gradingCampaignId;
+  if (!campsInMonth.some(function(c) { return String(c.id) === String(campId); })) {
+    campId = campsInMonth.length ? campsInMonth[0].id : null;
+  }
+  var campSel = campId != null ? findCampaignById(campId) : null;
+
+  // This campaign's videos for the month, and this month's grades (all campaigns) for the scorecard.
+  var monthCampAssets = campSel ? (STATE.assets || []).filter(function(a) {
+    return a.campaignId === campSel.id && assetPeriodYM(a) === selYM;
+  }).slice().sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); }) : [];
+  var monthGrades = gradesInYM(selYM).filter(function(g) { return !g.dismissed; });
+  var gradedThisCamp = monthCampAssets.filter(function(a) { var g = gradeForAsset(a.id); return g && !g.dismissed; }).length;
+
+  // ── Header ──
+  var header =
+    '<div class="grading-top">' +
+      '<div class="grading-top-left">' +
+        '<h2 class="grading-title">Grading</h2>' +
+        '<div class="grading-sub">' +
+          (campSel ? escapeHtml(campSel.country + ' · ' + campSel.name) + ' · ' : '') +
+          '<b>' + escapeHtml(sel.label) + '</b>' +
+          (campSel ? ' · ' + gradedThisCamp + '/' + monthCampAssets.length + ' graded' : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="grading-top-actions">' +
+        '<button class="run-btn" onclick="App.showGradingGuide()" title="Step-by-step: how to grade one video">📘 How to grade</button>' +
+        '<a class="run-btn" href="' + GRADING_FRAMEWORK_URL + '" target="_blank" rel="noopener" title="Open the KPI framework in Notion">↗ Framework</a>' +
+      '</div>' +
+    '</div>';
+
+  // ── Controls: Month · Year · Campaign ──
+  var monthOpts = MONTHS_FULL.map(function(name, i) {
+    var mv = String(i + 1).padStart(2, '0');
+    return '<option value="' + mv + '"' + (mv === selMonth ? ' selected' : '') + '>' + name + '</option>';
+  }).join('');
+  var yearsSet = {};
+  (STATE.assets || []).forEach(function(a) { var ym = assetPeriodYM(a); if (ym) yearsSet[ym.slice(0, 4)] = true; });
+  yearsSet[todayUK().slice(0, 4)] = true; yearsSet[selYear] = true;
+  var yearOpts = Object.keys(yearsSet).sort().reverse().map(function(y) {
+    return '<option value="' + y + '"' + (y === selYear ? ' selected' : '') + '>' + y + '</option>';
+  }).join('');
+  var campOptsHtml = (function() {
+    var byCountry = {};
+    campsInMonth.forEach(function(c) { (byCountry[c.country] = byCountry[c.country] || []).push(c); });
+    return (STATE.countries || []).map(function(co) {
+      var list = byCountry[co.code] || [];
+      if (!list.length) return '';
+      var opts = list.map(function(c) {
+        return '<option value="' + c.id + '"' + (campSel && campSel.id === c.id ? ' selected' : '') + '>' + escapeHtml(c.name) + '</option>';
+      }).join('');
+      return '<optgroup label="' + escapeHtml(co.code) + '">' + opts + '</optgroup>';
+    }).join('');
+  })();
+  var controls =
+    '<div class="grading-form-card">' +
+      '<div class="grading-form-grid">' +
+        '<div class="grading-field"><label class="form-label">Month</label>' +
+          '<select class="form-input" onchange="App.setGradingMonth(this.value)">' + monthOpts + '</select></div>' +
+        '<div class="grading-field grading-field-narrow"><label class="form-label">Year</label>' +
+          '<select class="form-input" onchange="App.setGradingYear(this.value)">' + yearOpts + '</select></div>' +
+        '<div class="grading-field grading-field-grow"><label class="form-label">Campaign</label>' +
+          (campsInMonth.length
+            ? '<select class="form-input" onchange="App.setGradingCampaign(this.value)">' + campOptsHtml + '</select>'
+            : '<div class="grading-controls-empty">No campaigns have videos delivered in ' + escapeHtml(sel.label) + '</div>') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  // ── Grade videos (the selected campaign's videos for the month) ──
+  var showDismissed = !!STATE.gradingShowDismissed;
+  var activeAssets = monthCampAssets.filter(function(a) { var g = gradeForAsset(a.id); return !(g && g.dismissed); });
+  var dismissedAssets = monthCampAssets.filter(function(a) { var g = gradeForAsset(a.id); return g && g.dismissed; });
+  var assetsToRender = showDismissed ? activeAssets.concat(dismissedAssets) : activeAssets;
+
+  function assetRowHtml(a) {
+    var g = gradeForAsset(a.id);
+    var graded = !!g;
+    var dismissed = graded && g.dismissed;
+    var contentType = graded ? g.contentType : 'Net New';
+    var brand = graded && g.brandPass, qa = graded && g.qaClean, idea = graded && g.newIdea;
+    var manual = graded && g.roundsManual;
+    var rounds = manual ? (Number(g.revisionRounds) || 0) : (a.revisionRounds || 0);
+    var isAuto = !manual;
+    var cap = REVISION_CAP[contentType];
+    var within = rounds <= cap;
+    var ver = assetVer(a);
+    var name = a.name + ((ver && a.name.indexOf(ver) < 0) ? ' ' + ver : '');
+    var typeSel = '<select class="grading-log-type" onchange="App.setAssetGradeField(' + a.id + ',\'contentType\',this.value)">' +
+      '<option value="Net New"' + (contentType === 'Net New' ? ' selected' : '') + '>Net New</option>' +
+      '<option value="Maintenance"' + (contentType === 'Maintenance' ? ' selected' : '') + '>Maint.</option>' +
+    '</select>';
+    function chk(field, on, title) {
+      return '<td class="grading-log-check"><input type="checkbox"' + (on ? ' checked' : '') +
+        ' onchange="App.toggleAssetGradeField(' + a.id + ',\'' + field + '\')" title="' + escapeHtml(title) + '"></td>';
+    }
+    var roundsTag = isAuto
+      ? '<span class="grading-rounds-tag is-auto" title="Auto from this video’s revision history (Needs Revisions kickbacks)">auto</span>'
+      : '<button class="grading-rounds-revert" onclick="App.resetAssetGradeRoundsAuto(' + a.id + ')" title="Revert to auto (live from revision history)">↺</button>';
+    var actions = dismissed
+      ? '<button class="grading-restore-btn" onclick="App.restoreAssetVideo(' + a.id + ')" title="Restore — count it again">↩</button>'
+      : '<button class="grading-dismiss-btn" onclick="App.dismissAssetVideo(' + a.id + ')" title="Dismiss — exclude from the scorecard">⊘</button>';
+    if (graded) actions += '<button class="grading-del-btn" onclick="App.deleteAssetGrade(' + a.id + ')" title="Clear this video’s grade">🗑</button>';
+    var rowCls = dismissed ? 'grading-row-dismissed' : (graded ? 'grading-row-graded' : '');
+    return '<tr class="' + rowCls + '">' +
+      '<td class="grading-log-video">' + escapeHtml(name) +
+        (dismissed ? ' <span class="grading-dismissed-tag">dismissed</span>' : '') + '</td>' +
+      '<td class="grading-log-editor">' + (a.editor
+        ? '<div class="editor-avatar av-' + escapeHtml(a.editor) + '">' + escapeHtml(editorInitials(a.editor)) + '</div>'
+        : '<span class="grading-log-noeditor" title="No editor assigned">—</span>') + '</td>' +
+      '<td>' + typeSel + '</td>' +
+      chk('brandPass', brand, 'Brand Pass (Avy)') +
+      chk('qaClean', qa, 'QA Clean (Elsa)') +
+      '<td class="grading-log-rounds"><input type="number" class="grading-mini-input' + (isAuto ? ' is-auto' : '') + '" min="0" step="1" value="' + rounds + '" onchange="App.setAssetGradeField(' + a.id + ',\'revisionRounds\',this.value)">' + roundsTag + '</td>' +
+      '<td class="grading-log-cap"><span class="grading-cap-pill ' + (within ? 'is-in' : 'is-out') + '" title="Cap for ' + escapeHtml(contentType) + ': ≤ ' + cap + ' rounds">' + (within ? '✓' : '✗') + '</span></td>' +
+      chk('newIdea', idea, 'New Idea (Elsa)') +
+      '<td class="grading-log-actions">' + actions + '</td>' +
+    '</tr>';
+  }
+
+  var vidRows;
+  if (!campSel) {
+    vidRows = '<tr><td colspan="9" class="grading-log-empty">Pick a month and campaign above to start grading its videos.</td></tr>';
+  } else if (assetsToRender.length === 0) {
+    vidRows = '<tr><td colspan="9" class="grading-log-empty">' +
+      (dismissedAssets.length && !showDismissed
+        ? 'All videos here are dismissed (' + dismissedAssets.length + '). Use “Show dismissed”.'
+        : 'No videos in ' + escapeHtml(campSel.name) + ' for ' + escapeHtml(sel.label) + '.') +
+      '</td></tr>';
+  } else {
+    vidRows = assetsToRender.map(assetRowHtml).join('');
+  }
+  var dismissToggle = dismissedAssets.length
+    ? '<button class="grading-link-btn grading-dismiss-toggle" onclick="App.setGradingShowDismissed(' + (showDismissed ? 'false' : 'true') + ')">' +
+        (showDismissed ? 'Hide dismissed (' + dismissedAssets.length + ')' : 'Show dismissed (' + dismissedAssets.length + ')') + '</button>'
+    : '';
+
+  var gradeList =
+    '<div class="grading-section">' +
+      '<div class="grading-section-title">Graded Videos' +
+        (campSel ? ' <span class="grading-section-note">' + escapeHtml(campSel.name) + ' · ' + escapeHtml(sel.label) + '</span>' : '') +
+        dismissToggle +
+      '</div>' +
+      '<div class="grading-table-scroll grading-scroll-videos">' +
+      '<table class="grading-log-table">' +
+        '<thead><tr>' +
+          '<th>Video</th><th>Editor</th><th>Type</th>' +
+          '<th title="Brand Pass — Avy">Brand</th><th title="QA Clean — Elsa">QA</th>' +
+          '<th title="Revision rounds">Rounds</th><th title="Within revision cap">Cap</th>' +
+          '<th title="New Idea — Elsa">Idea</th><th></th>' +
+        '</tr></thead>' +
+        '<tbody>' + vidRows + '</tbody>' +
+      '</table>' +
+      '</div>' +
+    '</div>';
+
+  // ── Editor Scorecard (rolls up ALL of the selected month's grades, at the bottom) ──
+  var cards = GRADING_EDITORS.map(function(e) { return computeScorecard(e, monthGrades); });
+  var scoreRows = cards.map(function(c) {
+    var e = c.editor;
+    var meta = (STATE.scorecardMeta && STATE.scorecardMeta[e]) || {};
+    var avgVal = (meta.avgVideosPerDay === '' || meta.avgVideosPerDay == null) ? '' : meta.avgVideosPerDay;
+    var tgtVal = (meta.targetPerDay === '' || meta.targetPerDay == null) ? '' : meta.targetPerDay;
+    function cell(pts, sub, title) {
+      return '<td class="grading-sc-num" title="' + escapeHtml(title) + '"><b>' + fmt1(pts) + '</b><span class="grading-sc-sub">' + sub + '</span></td>';
+    }
+    var outCell = c.hasOutput
+      ? cell(c.ptsOut, fmt1(c.avgPerDay) + '/' + fmt1(c.targetDay), 'Output: ' + fmt1(c.avgPerDay) + ' ÷ ' + fmt1(c.targetDay) + ' target')
+      : '<td class="grading-sc-num grading-sc-empty" title="Set Avg/Day + Target/Day to score output">—<span class="grading-sc-sub">set below</span></td>';
+    var rd = c.rating;
+    return '<tr>' +
+      '<td class="grading-sc-editor"><div class="editor-avatar av-' + escapeHtml(e) + '">' + escapeHtml(editorInitials(e)) + '</div><span>' + escapeHtml(e) + '</span></td>' +
+      '<td class="grading-sc-total">' + c.total + '</td>' +
+      cell(c.ptsBrand, pct(c.brandRate), 'Brand pass rate ' + pct(c.brandRate) + ' → ' + fmt1(c.ptsBrand) + '/25') +
+      cell(c.ptsQa, pct(c.qaRate), 'QA clean rate ' + pct(c.qaRate) + ' → ' + fmt1(c.ptsQa) + '/30') +
+      cell(c.ptsInnov, c.ideas + ' idea' + (c.ideas === 1 ? '' : 's'), c.ideas + ' new idea(s) → ' + fmt1(c.ptsInnov) + '/15') +
+      outCell +
+      cell(c.ptsRev, pct(c.capRate), 'Within revision cap ' + pct(c.capRate) + ' → ' + fmt1(c.ptsRev) + '/15') +
+      '<td class="grading-sc-input"><input type="number" class="grading-mini-input" min="0" step="0.1" value="' + escapeHtml(String(avgVal)) + '" placeholder="—" onchange="App.setScorecardMeta(\'' + escapeHtml(e) + '\',\'avgVideosPerDay\',this.value)" title="Avg videos delivered per day (you set this)"></td>' +
+      '<td class="grading-sc-input"><input type="number" class="grading-mini-input" min="0" step="0.5" value="' + escapeHtml(String(tgtVal)) + '" placeholder="—" onchange="App.setScorecardMeta(\'' + escapeHtml(e) + '\',\'targetPerDay\',this.value)" title="Daily target (1 Net New / 3–4 Maintenance)"></td>' +
+      '<td class="grading-sc-composite"><span class="grading-composite-num">' + fmt1(c.composite) + '</span><span class="grading-composite-max">/100</span></td>' +
+      '<td class="grading-sc-rating"><span class="grading-rating grading-rating-' + rd.key + '">' + rd.dot + ' ' + rd.label + '</span></td>' +
+    '</tr>';
+  }).join('');
+
+  var scorecard =
+    '<div class="grading-section">' +
+      '<div class="grading-section-title">Editor Scorecard <span class="grading-section-note">' + escapeHtml(sel.label) + ' · all campaigns</span></div>' +
+      '<div class="grading-table-scroll grading-scroll-scorecard">' +
+      '<table class="grading-scorecard">' +
+        '<thead><tr>' +
+          '<th>Editor</th><th>Videos</th>' +
+          '<th title="25 pts">Brand<span class="grading-th-pts">25</span></th>' +
+          '<th title="30 pts">QA<span class="grading-th-pts">30</span></th>' +
+          '<th title="15 pts">Innov.<span class="grading-th-pts">15</span></th>' +
+          '<th title="15 pts">Output<span class="grading-th-pts">15</span></th>' +
+          '<th title="15 pts">Revisions<span class="grading-th-pts">15</span></th>' +
+          '<th class="grading-th-input">Avg/Day</th><th class="grading-th-input">Target/Day</th>' +
+          '<th>Composite</th><th>Rating</th>' +
+        '</tr></thead>' +
+        '<tbody>' + scoreRows + '</tbody>' +
+      '</table>' +
+      '</div>' +
+    '</div>';
+
+  return '<div class="grading-wrap">' + header + controls + gradeList + scorecard + '</div>';
+}
+
 function renderNotificationsView() {
   // Any webhook configured at all? (for the top-level warning banner only)
   var cw = STATE.countryWebhooks || {};
@@ -6140,9 +6525,12 @@ function renderAutomationsView() {
 
   function renderCatHeadThreadCard() {
     var today = todayUK();
-    var cats = Object.keys(CATEGORY_HEADS);
+    // Every category that has a head assigned — merges Config-added categories +
+    // overrides (via allKnownCategories/getCategoryHead), not just the hardcoded map,
+    // so a new category + head shows up here automatically.
+    var cats = allKnownCategories().filter(function(c) { return getCategoryHead(c); });
     var rows = cats.map(function(cat) {
-      var head = CATEGORY_HEADS[cat];
+      var head = getCategoryHead(cat);
       var t = (STATE.catHeadDailyThreads && STATE.catHeadDailyThreads[cat]) || null;
       var url = t ? t.url : '';
       var dot = '', dotTitle = 'No thread set — falls back to webhook';
@@ -8897,21 +9285,16 @@ function renderConfigView() {
     '</div>';
   }).join('');
 
-  // Category head Slack member ID rows. One row per unique head listed in
-  // CATEGORY_HEADS — when set, the head gets @mentioned in PM batch messages
-  // for For Review items in their categories.
+  // Category head Slack member ID rows. One row per unique head — derived from
+  // allCategoryHeads() so Config-added categories + their heads (via overrides)
+  // get a row automatically, not just the hardcoded CATEGORY_HEADS entries.
   var headRows = (function() {
-    var seen = {};
-    var heads = [];
-    Object.keys(CATEGORY_HEADS).forEach(function(cat) {
-      var h = CATEGORY_HEADS[cat];
-      if (h && !seen[h]) { seen[h] = true; heads.push(h); }
-    });
+    var heads = allCategoryHeads();
     return heads.map(function(name) {
       var slackId = (STATE.categoryHeadSlackIds && STATE.categoryHeadSlackIds[name]) || '';
       var slackIdEsc = escapeHtml(slackId);
       // Categories owned by this head — small caption so the user knows who handles what.
-      var cats = Object.keys(CATEGORY_HEADS).filter(function(cat) { return CATEGORY_HEADS[cat] === name; });
+      var cats = allKnownCategories().filter(function(cat) { return getCategoryHead(cat) === name; });
       return '<div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);">' +
         '<div style="width:34px; flex-shrink:0;"></div>' +
         '<div style="font-size:13px; font-weight:600; color:var(--text1); width:90px; flex-shrink:0;">' + escapeHtml(name) + '</div>' +
@@ -10560,6 +10943,7 @@ function render() {
   else if (STATE.tab === 'campaigns') body = renderSidebar() + renderCampaignsView();
   else if (STATE.tab === 'editingCalendar') body = renderEditingCalendarView();
   else if (STATE.tab === 'log') body = renderDailyLogView();
+  else if (STATE.tab === 'grading') body = renderGradingView();
   else if (STATE.tab === 'notifications') body = renderNotificationsView();
   else if (STATE.tab === 'automations') body = renderAutomationsView();
   else if (STATE.tab === 'reporting') body = renderReportingView();
@@ -10625,7 +11009,7 @@ function captureRenderSnapshot() {
     }
     // Capture scroll positions of known-scrollable containers. Add more selectors here
     // if other scroll-preserve candidates appear.
-    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap'].forEach(function(sel) {
+    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap', '.grading-wrap', '.grading-scroll-videos', '.grading-scroll-scorecard'].forEach(function(sel) {
       var el = document.querySelector(sel);
       if (el) snap.scrolls[sel] = { top: el.scrollTop, left: el.scrollLeft };
     });
@@ -10673,6 +11057,245 @@ function restoreScrollPositions(snap) {
 // ===================== EVENTS =====================
 var App = {
   setTab: function(t) { STATE.tab = t; Presence.update(); render(); },
+
+  // ===== Grading (Editor KPI Scorecard) =====
+  setGradingPeriod: function(p) { STATE.gradingPeriod = p; saveState(); render(); },
+  setGradingEditorFilter: function(e) { STATE.gradingEditorFilter = e; saveState(); render(); },
+
+  // ── Grading controls: month / year / campaign ──
+  setGradingMonth: function(m) { STATE.gradingMonth = m || null; render(); },
+  setGradingYear: function(y) { STATE.gradingYear = y || null; render(); },
+  setGradingCampaign: function(id) { STATE.gradingCampaignId = id || null; render(); },
+  setGradingShowDismissed: function(on) { STATE.gradingShowDismissed = !!on; render(); },
+
+  // Get-or-create the single grade record linked to a campaign video. Grading a video
+  // inline (ticking Brand/QA/Idea, setting type/rounds) lazily creates it the first time.
+  ensureGradeForAsset: function(assetId) {
+    var g = gradeForAsset(assetId);
+    if (g) return g;
+    var a = findAssetById(assetId);
+    if (!a) return null;
+    var ver = (typeof deriveVersionFromName === 'function') ? deriveVersionFromName(a) : (a.version || '');
+    var name = a.name + ((ver && a.name.indexOf(ver) < 0) ? ' ' + ver : '');
+    var now = Date.now();
+    g = {
+      id: newLocalId('g'), assetId: assetId, video: name,
+      editor: a.editor || GRADING_EDITORS[0],
+      date: assetPeriodDate(a) || todayISO(),  // buckets the grade into the video's delivery month
+      contentType: 'Net New',
+      brandPass: false, qaClean: false, newIdea: false,
+      roundsManual: false, revisionRounds: (a.revisionRounds || 0),
+      dismissed: false, createdAt: now, createdBy: Auth.user ? Auth.user.displayName : null, updatedAt: now
+    };
+    if (!Array.isArray(STATE.grades)) STATE.grades = [];
+    STATE.grades.push(g);
+    return g;
+  },
+  toggleAssetGradeField: function(assetId, field) {
+    var g = this.ensureGradeForAsset(assetId); if (!g) return;
+    g[field] = !g[field]; g.updatedAt = Date.now();
+    saveState(); render();
+  },
+  setAssetGradeField: function(assetId, field, value) {
+    var g = this.ensureGradeForAsset(assetId); if (!g) return;
+    if (field === 'revisionRounds') { value = Math.max(0, parseInt(value, 10) || 0); g.roundsManual = true; }
+    g[field] = value; g.updatedAt = Date.now();
+    saveState(); render();
+  },
+  resetAssetGradeRoundsAuto: function(assetId) {
+    var g = gradeForAsset(assetId); if (!g) return;
+    g.roundsManual = false; g.updatedAt = Date.now();
+    saveState(); render();
+  },
+  dismissAssetVideo: function(assetId) {
+    var g = this.ensureGradeForAsset(assetId); if (!g) return;
+    g.dismissed = true; g.updatedAt = Date.now();
+    saveState(); render();
+    toast('Dismissed “' + (g.video || 'video') + '” — won’t count toward the scorecard', 'success');
+  },
+  restoreAssetVideo: function(assetId) {
+    var g = gradeForAsset(assetId); if (!g) return;
+    g.dismissed = false; g.updatedAt = Date.now();
+    saveState(); render();
+  },
+  deleteAssetGrade: function(assetId) {
+    var g = gradeForAsset(assetId); if (!g) return;
+    if (!window.confirm('Clear the grade for “' + (g.video || 'this video') + '”? The video stays; only your grading is cleared.')) return;
+    STATE.grades = (STATE.grades || []).filter(function(x) { return x.id !== g.id; });
+    saveState(); render();
+    toast('Grade cleared', 'success');
+  },
+
+  // Picker onchange: link is chosen at submit time, but pre-fill editor + rounds now so
+  // the form reflects the video's live revision history before you hit Add grade.
+  onGradingAssetPick: function(assetId) {
+    var a = assetId ? findAssetById(assetId) : null;
+    if (!a) return;
+    if (a.editor && GRADING_EDITORS.indexOf(a.editor) >= 0) {
+      var ed = document.getElementById('gr-editor'); if (ed) ed.value = a.editor;
+    }
+    var rd = document.getElementById('gr-rounds'); if (rd) rd.value = (a.revisionRounds || 0);
+  },
+
+  // Read the Log-a-video form and push a new grade row.
+  addGrade: function() {
+    var date   = (document.getElementById('gr-date')   || {}).value || todayISO();
+    var editor = (document.getElementById('gr-editor') || {}).value || GRADING_EDITORS[0];
+    var type   = (document.getElementById('gr-type')   || {}).value || 'Net New';
+    var rounds = (document.getElementById('gr-rounds') || {}).value;
+    var brand  = !!(document.getElementById('gr-brand') || {}).checked;
+    var qa     = !!(document.getElementById('gr-qa')    || {}).checked;
+    var idea   = !!(document.getElementById('gr-idea')  || {}).checked;
+
+    // Video comes from either the campaign-video picker (linked → auto rounds) or a
+    // typed custom name (free-text → manual rounds).
+    var assetSel = document.getElementById('gr-asset');
+    var assetId = assetSel ? assetSel.value : '';
+    var video, linkedAsset = null;
+    if (assetId) {
+      linkedAsset = findAssetById(assetId);
+      if (!linkedAsset) { toast('That video is no longer available', 'error'); return; }
+      var ver = (typeof deriveVersionFromName === 'function') ? deriveVersionFromName(linkedAsset) : (linkedAsset.version || '');
+      video = (linkedAsset.name + ((ver && linkedAsset.name.indexOf(ver) < 0) ? ' ' + ver : '')).trim();
+    } else {
+      video = ((document.getElementById('gr-video') || {}).value || '').trim();
+      if (!video) { toast('Pick a campaign video or type a name first', 'error'); return; }
+    }
+
+    var roundsN = Math.max(0, parseInt(rounds, 10) || 0);
+    var now = Date.now();
+    var grade = {
+      id: newLocalId('g'),
+      video: video,
+      assetId: assetId || null,
+      date: date,
+      editor: editor,
+      contentType: type,
+      brandPass: brand,
+      qaClean: qa,
+      // Linked + typed value matches the asset's live count → keep it AUTO (tracks the
+      // Board). Linked but a different number was typed → pin as manual. Free-text → manual.
+      roundsManual: assetId ? (roundsN !== (linkedAsset.revisionRounds || 0)) : true,
+      revisionRounds: roundsN,
+      newIdea: idea,
+      createdAt: now,
+      createdBy: Auth.user ? Auth.user.displayName : null,
+      updatedAt: now
+    };
+    if (!Array.isArray(STATE.grades)) STATE.grades = [];
+    STATE.grades.push(grade);
+    saveState();
+    render();
+    toast('Graded “' + video + '” for ' + editor, 'success');
+    // Re-focus the first form control so several videos can be logged in a row.
+    setTimeout(function() { var el = document.getElementById('gr-asset') || document.getElementById('gr-video'); if (el) el.focus(); }, 60);
+  },
+
+  // Snap a manually-overridden linked grade back to live auto rounds.
+  resetGradeRoundsAuto: function(id) {
+    var g = (STATE.grades || []).filter(function(x) { return x.id === id; })[0];
+    if (!g) return;
+    g.roundsManual = false;
+    g.updatedAt = Date.now();
+    saveState();
+    render();
+  },
+
+  // Flip a boolean field on a grade row (brandPass / qaClean / newIdea) — lets Avy
+  // and Elsa tick their columns after the fact, straight from the graded-videos list.
+  toggleGradeField: function(id, field) {
+    var g = (STATE.grades || []).filter(function(x) { return x.id === id; })[0];
+    if (!g) return;
+    g[field] = !g[field];
+    g.updatedAt = Date.now();
+    saveState();
+    render();
+  },
+
+  // Set a value field on a grade row (contentType / revisionRounds / editor / date / video).
+  setGradeField: function(id, field, value) {
+    var g = (STATE.grades || []).filter(function(x) { return x.id === id; })[0];
+    if (!g) return;
+    if (field === 'revisionRounds') {
+      value = Math.max(0, parseInt(value, 10) || 0);
+      g.roundsManual = true; // a hand-typed count pins the value; ↺ reverts to auto
+    }
+    g[field] = value;
+    g.updatedAt = Date.now();
+    saveState();
+    render();
+  },
+
+  deleteGrade: function(id) {
+    var g = (STATE.grades || []).filter(function(x) { return x.id === id; })[0];
+    if (!g) return;
+    if (!window.confirm('Delete the grade for “' + (g.video || 'this video') + '”?')) return;
+    STATE.grades = (STATE.grades || []).filter(function(x) { return x.id !== id; });
+    saveState();
+    render();
+    toast('Grade deleted', 'success');
+  },
+
+  // Dismiss (soft): drop the video from the scorecard + hide it from the list, but keep
+  // the data so it can be restored. Use for mistakes or videos that shouldn't count.
+  dismissGrade: function(id) {
+    var g = (STATE.grades || []).filter(function(x) { return x.id === id; })[0];
+    if (!g) return;
+    g.dismissed = true;
+    g.updatedAt = Date.now();
+    saveState();
+    render();
+    toast('Dismissed “' + (g.video || 'video') + '” — won’t count toward the scorecard', 'success');
+  },
+  restoreGrade: function(id) {
+    var g = (STATE.grades || []).filter(function(x) { return x.id === id; })[0];
+    if (!g) return;
+    g.dismissed = false;
+    g.updatedAt = Date.now();
+    saveState();
+    render();
+    toast('Restored to the scorecard', 'success');
+  },
+
+  // Set an editor's manual scorecard input (avgVideosPerDay / targetPerDay).
+  setScorecardMeta: function(editor, field, value) {
+    if (!STATE.scorecardMeta) STATE.scorecardMeta = {};
+    if (!STATE.scorecardMeta[editor]) STATE.scorecardMeta[editor] = {};
+    STATE.scorecardMeta[editor][field] = (value === '' ? '' : Number(value));
+    saveState();
+    render();
+  },
+
+  // Step-by-step "how to grade one video" reference (mirrors the Notion framework).
+  showGradingGuide: function() {
+    var html =
+      '<div class="modal-title">📘 How to grade one video</div>' +
+      '<div class="grading-guide">' +
+        '<p class="grading-guide-lead">Grading a video = making <b>5 clean judgment calls</b> in the form. Everything else (rates, points, composite, rating) calculates itself.</p>' +
+        '<ol class="grading-guide-steps">' +
+          '<li><b>Content Type</b> — <i>“Have we made this style before?”</i> No → <b>Net New</b> (cap ≤ 4 rounds). Yes → <b>Maintenance</b> (cap ≤ 2 rounds). This sets the revision cap.</li>' +
+          '<li><b>Brand Pass ✅</b> <span class="grading-guide-owner">Avy · 25 pts</span> — tick <u>only</u> if it passed brand on the <b>first</b> submission: right sticker size/placement, fonts, colours, logo. Any brand fix sent back → leave unticked.</li>' +
+          '<li><b>QA Clean ✅</b> <span class="grading-guide-owner">Elsa · 30 pts</span> — tick if there were <b>no technical issues at all</b>: clean transitions, balanced audio (BGM/SFX), no glitches, strong export. One thing off → unticked. Keep this separate from brand.</li>' +
+          '<li><b>Revision Rounds</b> — pick the video from the campaign dropdown and this <b>auto-fills</b> from its revision history (every time it hit “Needs Revisions”, PM or Cat Head). Type over it to override; ↺ reverts to auto. “Within cap” is worked out for you.</li>' +
+          '<li><b>New Idea ✅</b> <span class="grading-guide-owner">Elsa · 15 pts</span> — tick <u>only</u> if the editor introduced a <b>new hook/technique beyond the brief that actually worked</b>. Doing the brief well is not a new idea — most videos stay unticked.</li>' +
+        '</ol>' +
+        '<div class="grading-guide-hard">' +
+          '<div class="grading-guide-hard-title">The 3 calls people get stuck on</div>' +
+          '<ul>' +
+            '<li><b>Net New vs Maintenance</b> → “Have we done this before?” That alone sets the cap.</li>' +
+            '<li><b>Brand ✅ vs QA ✅</b> → Brand = <i>does it look like us?</i> QA = <i>is it technically clean?</i> Two questions, two owners.</li>' +
+            '<li><b>New Idea ✅</b> → reserve it for “went beyond the brief and it worked”. Unsure? Leave it off.</li>' +
+          '</ul>' +
+        '</div>' +
+        '<p class="grading-guide-foot">Output (15 pts) isn’t per-video — set each editor’s <b>Avg/Day</b> and <b>Target/Day</b> in the scorecard. Full rubric lives in the ' +
+          '<a href="' + GRADING_FRAMEWORK_URL + '" target="_blank" rel="noopener">Notion framework ↗</a>.</p>' +
+      '</div>' +
+      '<div class="modal-actions">' +
+        '<button class="submit-btn" id="modal-cancel">Got it</button>' +
+      '</div>';
+    openModal(html, function() { closeModal(); });
+  },
+
 
   // Editing Calendar month nav. STATE.calendarMonth is transient (not in saveState),
   // so reloads always land on the current month.
@@ -11016,8 +11639,14 @@ var App = {
       return;
     }
     var oldStatus = a.status;
-    recordUndo(a, ['status', 'assignedAt', 'dateApproved'], 'status: ' + oldStatus + ' \u2192 ' + newStatus);
+    recordUndo(a, ['status', 'assignedAt', 'dateApproved', 'revisionRounds'], 'status: ' + oldStatus + ' \u2192 ' + newStatus);
     a.status = newStatus;
+    // Auto-count revision rounds: each fresh entry into "Needs Revisions" is one round
+    // of rework sent back to the editor. Feeds the Grading tab's Rounds column. Counts
+    // both PM/editor kickbacks (here) and category-head kickbacks (setAssetCategoryHeadQc).
+    if (newStatus === 'Needs Revisions' && oldStatus !== 'Needs Revisions') {
+      a.revisionRounds = (a.revisionRounds || 0) + 1;
+    }
     // Stamp assignedAt whenever the transition is INTO Assigned (from any other state).
     // This powers the "To Do Today" column on the Today board.
     if (newStatus === 'Assigned' && oldStatus !== 'Assigned') a.assignedAt = todayISO();
@@ -11794,6 +12423,10 @@ var App = {
     var old = a.categoryHeadQc || 'Draft';
     if (old === newVal) { render(); return; }
     a.categoryHeadQc = newVal;
+    // Auto-count revision rounds on category-head kickbacks too (see setAssetStatus).
+    if (newVal === 'Needs Revisions' && old !== 'Needs Revisions') {
+      a.revisionRounds = (a.revisionRounds || 0) + 1;
+    }
     if (newVal === 'Approved') {
       a.chDateApproved = todayLocalISO();
     } else {
