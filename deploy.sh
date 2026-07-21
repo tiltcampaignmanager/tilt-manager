@@ -28,6 +28,20 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   exit 1
 fi
 
+# 1b. Cache-bust the asset references in index.html with each file's CONTENT HASH.
+# GitHub Pages serves app.js/styles.css with a 10-minute cache and no way to set
+# headers, so without this a deploy stays invisible until the browser cache expires
+# (or a manual hard-refresh). Stamping "?v=<hash>" gives changed files a brand-new
+# URL the browser has never cached — so updates show up immediately — while
+# UNCHANGED files keep the same hash and stay cached. Runs before the change check
+# so a real edit to app.js/styles.css is picked up as an index.html change to deploy.
+if command -v git >/dev/null 2>&1; then
+  APP_VER="$(git hash-object app.js | cut -c1-8)"
+  CSS_VER="$(git hash-object styles.css | cut -c1-8)"
+  perl -pi -e "s/(app\.js\?v=)[\w.\-]+/\${1}$APP_VER/g; s/(styles\.css\?v=)[\w.\-]+/\${1}$CSS_VER/g" index.html
+  echo "Stamped index.html → app.js?v=$APP_VER · styles.css?v=$CSS_VER"
+fi
+
 # 2. Is there anything to deploy? Two cases count:
 #    (a) uncommitted changes in the working tree, or
 #    (b) a clean tree but local commits not yet pushed to origin.
