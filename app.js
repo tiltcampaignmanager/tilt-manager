@@ -647,6 +647,12 @@ var Fb = {
           STATE.categories.push({ name: 'Womenswear', color: CATEGORY_PALETTE[0] });
           setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
         }
+        // Ensure Content Lead exists as a selectable category (head = Millie via CATEGORY_HEADS).
+        var hasContentLead = STATE.categories.some(function(c) { return c.name === 'Content Lead'; });
+        if (!hasContentLead) {
+          STATE.categories.push({ name: 'Content Lead', color: CATEGORY_PALETTE[3] });
+          setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
+        }
         var CANONICAL_ORDER = ['Sneakers','TCG','Stone Island','Luxury','Vintage','Bags and Accessories','Y2K','Streetwear','Health and Beauty','Jewellery','Womenswear','Essentials','BTS'];
         STATE.categories.sort(function(a, b) {
           var ai = CANONICAL_ORDER.indexOf(a.name);
