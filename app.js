@@ -384,6 +384,7 @@ var Fb = {
       intlDailyThreadHistory: STATE.intlDailyThreadHistory,
       countries: STATE.countries,
       categories: STATE.categories,
+      categoriesOrganic: STATE.categoriesOrganic,
       campaigns: STATE.campaigns,
       pendingBatches: STATE.pendingBatches,
       recentNotifKeys: Array.isArray(STATE.recentNotifKeys) ? STATE.recentNotifKeys.slice(0, 300) : [],
@@ -460,6 +461,7 @@ var Fb = {
         editorFilter: true,
         qcFilter: true,
         catReviewWindow: true,
+        videoWeeklyGroup: true,
         search: true,
         logEditor: true,
         logWeekOffset: true,
@@ -630,11 +632,23 @@ var Fb = {
         setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
       }
       // Backfill categories missing the color sub-object (created before this field existed).
-      (STATE.categories || []).forEach(function(cat) {
-        if (!cat.color && (cat.bg || cat.fg)) {
-          cat.color = { bg: cat.bg || 'var(--bg4)', fg: cat.fg || 'var(--text2)' };
-        }
-      });
+      var backfillColors = function(list) {
+        (list || []).forEach(function(cat) {
+          if (!cat.color && (cat.bg || cat.fg)) {
+            cat.color = { bg: cat.bg || 'var(--bg4)', fg: cat.fg || 'var(--text2)' };
+          }
+        });
+      };
+      backfillColors(STATE.categories);
+      // Seed the Organic category list for snapshots created before paid/organic lists
+      // were split. Defaults to a copy of the Paid list so nothing looks empty; the user
+      // can then diverge the two in Config.
+      if (!Array.isArray(STATE.categoriesOrganic) || !STATE.categoriesOrganic.length) {
+        var seedFrom = (STATE.categories && STATE.categories.length) ? STATE.categories : DEFAULT_CATEGORIES;
+        STATE.categoriesOrganic = seedFrom.map(function(c) { return { name: c.name, color: c.color }; });
+        setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
+      }
+      backfillColors(STATE.categoriesOrganic);
       // Ensure Streetwear exists and reorder categories to the canonical display order.
       if (STATE.categories && STATE.categories.length) {
         var hasStreetwear = STATE.categories.some(function(c) { return c.name === 'Streetwear'; });
@@ -1390,15 +1404,43 @@ function getCategoryHead(category) {
 // its head — propagates everywhere automatically without touching code.
 function allKnownCategories() {
   var out = [], seen = {};
-  (STATE.categories || []).forEach(function(c) {
-    var n = c && c.name;
-    if (n && !seen[n.toLowerCase()]) { seen[n.toLowerCase()] = true; out.push(n); }
-  });
+  var addList = function(list) {
+    (list || []).forEach(function(c) {
+      var n = c && c.name;
+      if (n && !seen[n.toLowerCase()]) { seen[n.toLowerCase()] = true; out.push(n); }
+    });
+  };
+  addList(STATE.categories);          // Paid Ads list
+  addList(STATE.categoriesOrganic);   // Organic list
   Object.keys(CATEGORY_HEADS).forEach(function(n) {
     if (!seen[n.toLowerCase()]) { seen[n.toLowerCase()] = true; out.push(n); }
   });
   return out;
 }
+
+// Campaigns are either 'Paid Ads' or 'Organic'; each type has its own editable category
+// list. `STATE.categories` is the Paid list (legacy name), `STATE.categoriesOrganic` the
+// Organic one. Returns the {name,color}[] list for a given campaign type. Falls back to
+// the Paid list if the Organic list is somehow empty so a dropdown is never blank.
+function categoriesForType(type) {
+  if (type === 'Organic') {
+    var org = STATE.categoriesOrganic;
+    return (org && org.length) ? org : (STATE.categories || DEFAULT_CATEGORIES);
+  }
+  return STATE.categories || DEFAULT_CATEGORIES;
+}
+// Resolve the category list backing a Config list key ('paid' | 'organic'). Used by the
+// Config category-management handlers so one set of handlers edits either list.
+function categoryListByKey(listKey) {
+  if (listKey === 'organic') {
+    if (!Array.isArray(STATE.categoriesOrganic)) STATE.categoriesOrganic = [];
+    return STATE.categoriesOrganic;
+  }
+  if (!Array.isArray(STATE.categories)) STATE.categories = [];
+  return STATE.categories;
+}
+// The campaign type ('Paid Ads' | 'Organic') a Config list key maps to.
+function typeForListKey(listKey) { return listKey === 'organic' ? 'Organic' : 'Paid Ads'; }
 
 // Status values the category head can set on a video. Distinct from the
 // Footage QC values (which track raw-files / pricing readiness) — these track
@@ -1461,6 +1503,9 @@ var STATE = {
   qcFilter: 'all',
   dateApprovedFilter: '',
   estDeliveryFilter: '',
+  // Video Log: when true, the asset table is broken into week-headed sections grouped by
+  // Estimated Delivery date (Mon–Sun ISO weeks). Per-user view toggle, not synced.
+  videoWeeklyGroup: false,
   // Cat Heads Review tab: time-window bucket for the review queue — 'daily' (ready
   // today), 'weekly' (this week), or 'monthly' (this month).
   catReviewWindow: 'daily',
@@ -1577,9 +1622,13 @@ var STATE = {
     { code: 'US', name: 'United States' },
     { code: 'PL', name: 'Poland' }
   ],
-  // Sub-campaign category list. Seeded with three defaults but user-managed: can add via
+  // Sub-campaign category list. Seeded with the defaults but user-managed: can add via
   // the Add/Edit Sub-Campaign modal or the Config tab, rename/delete via Config.
+  // `categories` is the PAID ADS list (kept under this name for backward-compat with
+  // every stored snapshot). `categoriesOrganic` is the separate ORGANIC list — the
+  // dropdown a campaign shows depends on its `type`. See categoriesForType().
   categories: DEFAULT_CATEGORIES.map(function(c) { return { name: c.name, color: c.color }; }),
+  categoriesOrganic: DEFAULT_CATEGORIES.map(function(c) { return { name: c.name, color: c.color }; }),
   campaigns: [
     { id: 1, country: 'UK', rank: 1, name: 'Privilege Supply \u2013 Luxury', brief: 'High-end product showcase, tone = aspirational', driveId: '1a2B3cD4eF5gH6iJ', category: 'Luxury', type: 'Paid Ads', slackOverride: '' },
     { id: 2, country: 'UK', rank: 2, name: 'Privilege Supply \u2013 Essentials', brief: 'Everyday essentials, tone = practical', driveId: '', category: 'Essentials', type: 'Paid Ads', slackOverride: '' },
@@ -1680,6 +1729,33 @@ function getThisWeekRange() {
     return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
   }
   return { start: fmt(mon), end: fmt(sun) };
+}
+
+// Monday (ISO week start, Mon–Sun) for a given ISO date 'YYYY-MM-DD', returned as ISO.
+// Used to bucket the Video Log into weekly sections by Estimated Delivery. Returns null
+// for a blank/invalid date so callers can group those into a "no date" bucket.
+function isoWeekStart(iso) {
+  if (!iso) return null;
+  var d = new Date(iso + 'T12:00:00');
+  if (isNaN(d.getTime())) return null;
+  var dow = d.getDay(); // 0=Sun..6=Sat
+  var daysFromMon = (dow + 6) % 7;
+  d.setDate(d.getDate() - daysFromMon);
+  var mm = d.getMonth() + 1, dd = d.getDate();
+  return d.getFullYear() + '-' + (mm < 10 ? '0' + mm : mm) + '-' + (dd < 10 ? '0' + dd : dd);
+}
+// Human label for the Mon–Sun week starting at `mondayIso`, e.g. "21–27 Jul 2026" or,
+// when the week straddles a month boundary, "28 Jul – 3 Aug 2026".
+function weekRangeLabel(mondayIso) {
+  var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var s = new Date(mondayIso + 'T12:00:00');
+  var e = new Date(s); e.setDate(e.getDate() + 6);
+  if (s.getMonth() === e.getMonth() && s.getFullYear() === e.getFullYear()) {
+    return s.getDate() + '–' + e.getDate() + ' ' + MON[e.getMonth()] + ' ' + e.getFullYear();
+  }
+  var sameYear = s.getFullYear() === e.getFullYear();
+  return s.getDate() + ' ' + MON[s.getMonth()] + (sameYear ? '' : ' ' + s.getFullYear()) +
+    ' – ' + e.getDate() + ' ' + MON[e.getMonth()] + ' ' + e.getFullYear();
 }
 
 // ===================== TARGETS / GOALS =====================
@@ -2044,6 +2120,7 @@ function openModal(html, onSubmit) {
   // panel) before swapping in new content \u2014 otherwise a previous variant's
   // layout leaks into the next modal that reuses this container.
   modalEl.classList.remove('modal-vh');
+  modalEl.classList.remove('modal-video');
   modalEl.innerHTML = html;
   ov.classList.add('open');
   var cancel = document.getElementById('modal-cancel');
@@ -2138,6 +2215,78 @@ function escapeHtml(s) {
   });
 }
 
+// ===================== VIDEO PREVIEW =====================
+// Convert a single-file Google Drive URL to its embeddable /preview form, or null if it
+// isn't one (folder links, non-Drive URLs). Handles the common shapes:
+//   https://drive.google.com/file/d/FILEID/view?...  ->  .../file/d/FILEID/preview
+//   https://drive.google.com/open?id=FILEID          ->  .../file/d/FILEID/preview
+//   https://drive.google.com/uc?id=FILEID&...         ->  .../file/d/FILEID/preview
+function driveEmbedUrl(url) {
+  if (!url || !/drive\.google\.com/i.test(url)) return null;
+  var m = url.match(/\/file\/d\/([^/?#]+)/) || url.match(/[?&]id=([^&#]+)/);
+  if (m && m[1]) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
+  return null;
+}
+// Decide how (if at all) a URL can be embedded in the preview modal:
+//   { kind: 'iframe', src }  — Google Drive file, embed via iframe
+//   { kind: 'video',  src }  — direct video file, play via <video>
+//   null                     — can't embed inline (e.g. Frame.io blocks framing); the
+//                              caller falls back to an "open in new tab" button.
+function videoEmbedInfo(url) {
+  if (!url) return null;
+  var drive = driveEmbedUrl(url);
+  if (drive) return { kind: 'iframe', src: drive };
+  if (/\.(mp4|webm|ogg|ogv|mov|m4v)(\?.*)?$/i.test(url)) return { kind: 'video', src: url };
+  return null;
+}
+
+// Open the video preview modal for an asset. Embeds the video when the link is playable
+// inside the app (Google Drive file, or a direct video file); otherwise (Frame.io and
+// most external hosts, which block iframing) shows a prompt plus an open-in-new-tab
+// button. Prefers the Final video, falling back to the Raw (Drive) footage for the embed.
+function showVideoPreviewModal(id) {
+  var a = findAssetById(id);
+  if (!a) { toast('Video not found', 'error'); return; }
+  var finalUrl = extractSingleUrl(a.finalVideo);
+  var rawUrl = extractSingleUrl(a.rawVideo);
+  var embed = null, embedFrom = '';
+  var fe = videoEmbedInfo(finalUrl);
+  var re = videoEmbedInfo(rawUrl);
+  if (fe) { embed = fe; embedFrom = 'Final video'; }
+  else if (re) { embed = re; embedFrom = 'Raw footage (Drive)'; }
+
+  var playerHtml;
+  if (embed && embed.kind === 'iframe') {
+    playerHtml = '<div class="video-preview-frame"><iframe src="' + escapeHtml(embed.src) + '" allow="autoplay; fullscreen" allowfullscreen></iframe></div>';
+  } else if (embed && embed.kind === 'video') {
+    playerHtml = '<div class="video-preview-frame"><video src="' + escapeHtml(embed.src) + '" controls autoplay playsinline></video></div>';
+  } else {
+    var hasAny = finalUrl || rawUrl;
+    playerHtml = '<div class="video-preview-empty">' +
+      (hasAny
+        ? '<div class="video-preview-empty-icon">▶</div><div>This video is hosted somewhere that can’t play inside the tracker (e.g. Frame.io). Use the button below to open it in a new tab.</div>'
+        : '<div class="video-preview-empty-icon">—</div><div>No video link on this row yet. Add a Frame.io or Drive link with the Edit button.</div>') +
+      '</div>';
+  }
+
+  var openBtns = '';
+  if (finalUrl) openBtns += '<a class="submit-btn" style="text-decoration:none;" href="' + escapeHtml(finalUrl) + '" target="_blank" rel="noopener">Open final video ↗</a>';
+  if (rawUrl) openBtns += '<a class="edit-btn" style="text-decoration:none;" href="' + escapeHtml(rawUrl) + '" target="_blank" rel="noopener">Open raw (Drive) ↗</a>';
+
+  var version = deriveVersionFromName(a);
+  var html =
+    '<div class="modal-title">Preview · ' + escapeHtml(a.name || 'Video') + (version ? ' <span style="color:var(--text3);font-weight:400;">' + escapeHtml(version) + '</span>' : '') + '</div>' +
+    (embedFrom ? '<div style="font-size:11.5px;color:var(--text3);margin:-8px 0 12px;">Showing: ' + escapeHtml(embedFrom) + '</div>' : '') +
+    playerHtml +
+    '<div class="modal-actions" style="justify-content:space-between;">' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;">' + openBtns + '</div>' +
+      '<button class="cancel-btn" id="modal-cancel">Close</button>' +
+    '</div>';
+  openModal(html);
+  var modalEl = document.getElementById('modal');
+  if (modalEl) modalEl.classList.add('modal-video');
+}
+
 function editorInitials(e) { return ({Zidni:'ZD', Patty:'PT', Sharm:'SH', Elsa:'EL', Seller:'SL'})[e] || '??'; }
 function statusClass(s) { return 'st-' + s.replace(/ /g, '_'); }
 
@@ -2229,8 +2378,11 @@ var EDITABLE_FIELDS = {
   // unchanged from before, just clickable now.
   category: {
     kind: 'select',
-    options: function() {
-      return (STATE.categories || []).map(function(c) { return c.name; });
+    // Options depend on the asset's campaign type — Paid Ads and Organic each have
+    // their own category list. `a` is passed by renderEditableCell.
+    options: function(a) {
+      var camp = a ? findCampaignById(a.campaignId) : null;
+      return categoriesForType(camp && camp.type).map(function(c) { return c.name; });
     },
     display: function(a) {
       return '<span class="cat-tag">' + escapeHtml(a.category || '') + '</span>';
@@ -2399,7 +2551,7 @@ function renderEditableCell(asset, field) {
     'onblur="App.commitEdit(\'' + field + '\', this.value)"';
 
   if (def.kind === 'select') {
-    var opts = def.options().map(function(v) {
+    var opts = def.options(asset).map(function(v) {
       var label = def.optionLabel ? def.optionLabel(v) : v;
       return '<option value="' + escapeHtml(v) + '"' + (v === currentValue ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
     }).join('');
@@ -2465,11 +2617,21 @@ function getCountryByCode(code) {
 
 // ===================== CATEGORY HELPERS =====================
 // Find a category by name (case-insensitive). Returns the object or null.
-function findCategory(name) {
+// Look up a category object by name. Searches BOTH the Paid and Organic lists so
+// display helpers (colors, pills) resolve a category regardless of which list it
+// lives in. `listKey` optionally restricts the search to one list (used by the
+// Config add/rename dedupe checks so the two lists can hold the same name).
+function findCategory(name, listKey) {
   if (!name) return null;
   var lower = String(name).toLowerCase();
-  for (var i = 0; i < STATE.categories.length; i++) {
-    if (STATE.categories[i].name.toLowerCase() === lower) return STATE.categories[i];
+  var lists = listKey
+    ? [categoryListByKey(listKey)]
+    : [STATE.categories || [], STATE.categoriesOrganic || []];
+  for (var l = 0; l < lists.length; l++) {
+    var list = lists[l];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].name.toLowerCase() === lower) return list[i];
+    }
   }
   return null;
 }
@@ -2504,7 +2666,7 @@ function categoryBadgeSelectHtml(camp) {
   var c = categoryColor(camp.category);
   var bgL = c.bgLight || c.bg;
   var fgL = c.fgLight || c.fg;
-  var opts = (STATE.categories || []).map(function(cat) {
+  var opts = categoriesForType(camp.type).map(function(cat) {
     var sel = cat.name === camp.category ? ' selected' : '';
     return '<option value="' + escapeHtml(cat.name) + '"' + sel + '>' + escapeHtml(cat.name) + '</option>';
   }).join('');
@@ -2525,41 +2687,47 @@ function typeBadgeHtml(type) {
   return '<div class="' + cls + '" title="Campaign type \u2014 ' + t + '">' + escapeHtml(t) + '</div>';
 }
 
-// Next palette entry not yet used by any category. If all are used, cycles back to palette[0].
-function pickNextCategoryColor() {
+// Next palette entry not yet used by any category in `list`. If all are used, cycles.
+function pickNextCategoryColor(list) {
+  var target = list || STATE.categories;
   for (var i = 0; i < CATEGORY_PALETTE.length; i++) {
     var used = false;
-    for (var j = 0; j < STATE.categories.length; j++) {
-      if (STATE.categories[j].color && STATE.categories[j].color.bg === CATEGORY_PALETTE[i].bg) {
+    for (var j = 0; j < target.length; j++) {
+      if (target[j].color && target[j].color.bg === CATEGORY_PALETTE[i].bg) {
         used = true; break;
       }
     }
     if (!used) return CATEGORY_PALETTE[i];
   }
   // all used \u2014 cycle
-  return CATEGORY_PALETTE[STATE.categories.length % CATEGORY_PALETTE.length];
+  return CATEGORY_PALETTE[target.length % CATEGORY_PALETTE.length];
 }
 
-// Add a category by name if it doesn't already exist. Returns the category object.
-// Name is trimmed; empty names are rejected (returns null). Duplicate names (case-insensitive)
-// return the existing category without creating a second entry.
-function addCategory(name) {
+// Add a category by name to a list ('paid' by default) if it doesn't already exist in
+// that list. Returns the category object. Name is trimmed; empty names are rejected
+// (returns null). Duplicate names (case-insensitive) return the existing entry.
+function addCategory(name, listKey) {
   var trimmed = String(name || '').trim();
   if (!trimmed) return null;
-  var existing = findCategory(trimmed);
+  var list = categoryListByKey(listKey || 'paid');
+  var existing = findCategory(trimmed, listKey || 'paid');
   if (existing) return existing;
-  var cat = { name: trimmed, color: pickNextCategoryColor() };
-  STATE.categories.push(cat);
-  logAction('created', 'Category "' + trimmed + '" added');
+  var cat = { name: trimmed, color: pickNextCategoryColor(list) };
+  list.push(cat);
+  logAction('created', 'Category "' + trimmed + '" added to ' + typeForListKey(listKey || 'paid') + ' list');
   return cat;
 }
 
-// Count how many campaigns use a given category name (for delete-safety checks).
-function categoryUsageCount(name) {
+// Count how many campaigns use a given category name (for delete-safety checks). When
+// `type` is given ('Paid Ads' | 'Organic'), only campaigns of that type are counted so
+// deleting from one list isn't blocked by usage in the other.
+function categoryUsageCount(name, type) {
   var lower = String(name).toLowerCase();
   var n = 0;
   for (var i = 0; i < STATE.campaigns.length; i++) {
-    if ((STATE.campaigns[i].category || '').toLowerCase() === lower) n++;
+    var c = STATE.campaigns[i];
+    if (type && (c.type || DEFAULT_CAMPAIGN_TYPE) !== type) continue;
+    if ((c.category || '').toLowerCase() === lower) n++;
   }
   return n;
 }
@@ -3227,19 +3395,29 @@ function monthYearPickerHtml(selected) {
   '</div>';
 }
 
-function categoryPickerHtml(selected) {
-  var opts = STATE.categories.length === 0
+// The Config list key ('paid' | 'organic') matching the campaign modal's current Type
+// select. Read live so add/rename/delete operate on the list the campaign type shows.
+function modalCampaignListKey() {
+  var t = document.getElementById('f-ctype');
+  return (t && t.value === 'Organic') ? 'organic' : 'paid';
+}
+
+function categoryPickerHtml(selected, listKey) {
+  listKey = listKey || 'paid';
+  var list = categoryListByKey(listKey);
+  var type = typeForListKey(listKey);
+  var opts = list.length === 0
     ? '<option value="" disabled selected>\u2014 no categories \u2014</option>'
-    : STATE.categories.map(function(c) {
+    : list.map(function(c) {
         return '<option value="' + escapeHtml(c.name) + '"' + (c.name === selected ? ' selected' : '') + '>' + escapeHtml(c.name) + '</option>';
       }).join('');
-  // Delete-button state depends on the currently-selected category's usage count
-  var currentUsage = selected ? categoryUsageCount(selected) : 0;
+  // Delete-button state depends on the currently-selected category's usage count (same type)
+  var currentUsage = selected ? categoryUsageCount(selected, type) : 0;
   var delEnabled = selected && currentUsage === 0;
   var delTitle = !selected
     ? 'Pick a category to delete'
     : (currentUsage > 0
-        ? currentUsage + ' campaign(s) use "' + selected + '" \u2014 reassign them before deleting'
+        ? currentUsage + ' ' + type + ' campaign(s) use "' + selected + '" \u2014 reassign them before deleting'
         : 'Delete "' + selected + '"');
   var renameTitle = selected ? 'Rename "' + selected + '"' : 'Pick a category to rename';
   return '<div class="form-row"><label class="form-label">Category</label>' +
@@ -3302,7 +3480,7 @@ function refreshModalCategoryPicker(selectThis) {
   // Build the new form-row in a detached container, then swap the whole wrapper.
   // categoryPickerHtml returns a full form-row; we replace `container` with its contents.
   var tmp = document.createElement('div');
-  tmp.innerHTML = categoryPickerHtml(current);
+  tmp.innerHTML = categoryPickerHtml(current, modalCampaignListKey());
   var newFormRow = tmp.firstChild;
   if (!newFormRow) return; // defensive: if markup generation ever returns empty, no-op
 
@@ -3333,8 +3511,8 @@ function showAddSubCampaignModal(forCountry) {
     '<div class="form-grid">' +
       '<div class="form-row full"><label class="form-label">Campaign Name *</label><input id="f-cname" class="form-input" placeholder="e.g. Brand - Category"></div>' +
       '<div class="form-row"><label class="form-label">Country</label><select id="f-ccountry" class="form-select">' + countryOpts + '</select></div>' +
-      '<div class="form-row"><label class="form-label">Type</label><select id="f-ctype" class="form-select">' + typeOpts + '</select></div>' +
-      categoryPickerHtml('') +
+      '<div class="form-row"><label class="form-label">Type</label><select id="f-ctype" class="form-select" onchange="App.onModalTypeChange(this.value)">' + typeOpts + '</select></div>' +
+      categoryPickerHtml('', 'paid') +
       monthYearPickerHtml('') +
       '<div class="form-row full">' +
         '<div style="display:flex; align-items:center; gap:8px; justify-content:space-between;">' +
@@ -3424,8 +3602,8 @@ function showEditCampaignModal() {
     '<div class="form-grid">' +
       '<div class="form-row full"><label class="form-label">Campaign Name</label><input id="f-cname" class="form-input" value="' + escapeHtml(c.name) + '"></div>' +
       '<div class="form-row"><label class="form-label">Country</label><select id="f-ccountry" class="form-select">' + countryOpts + '</select></div>' +
-      '<div class="form-row"><label class="form-label">Type</label><select id="f-ctype" class="form-select">' + typeOpts + '</select></div>' +
-      categoryPickerHtml(c.category) +
+      '<div class="form-row"><label class="form-label">Type</label><select id="f-ctype" class="form-select" onchange="App.onModalTypeChange(this.value)">' + typeOpts + '</select></div>' +
+      categoryPickerHtml(c.category, (currentType === 'Organic' ? 'organic' : 'paid')) +
       monthYearPickerHtml(c.monthYear || '') +
       (function() {
         var briefUrl = extractSingleUrl(c.brief);
@@ -3701,7 +3879,7 @@ function showAssetModal(existing) {
       '<div class="form-row full"><label class="form-label">Video Name *</label><input id="f-vname" class="form-input" value="' + escapeHtml(a.name) + '"></div>' +
       '<div class="form-row"><label class="form-label">NO.</label><input id="f-vpn" type="number" min="1" class="form-input" value="' + a.pn + '"></div>' +
       '<div class="form-row"><label class="form-label">Version</label><input id="f-vver" class="form-input" value="' + escapeHtml(a.version) + '"></div>' +
-      '<div class="form-row"><label class="form-label">Category</label><select id="f-vcat" class="form-select">' + (STATE.categories || DEFAULT_CATEGORIES).map(function(c) { var n = c.name || c; return '<option value="' + escapeHtml(n) + '"' + (n === a.category ? ' selected' : '') + '>' + escapeHtml(n) + '</option>'; }).join('') + '</select></div>' +
+      '<div class="form-row"><label class="form-label">Category</label><select id="f-vcat" class="form-select">' + categoriesForType(camp.type).map(function(c) { var n = c.name || c; return '<option value="' + escapeHtml(n) + '"' + (n === a.category ? ' selected' : '') + '>' + escapeHtml(n) + '</option>'; }).join('') + '</select></div>' +
       '<div class="form-row"><label class="form-label">Difficulty</label><select id="f-vdiff" class="form-select">' + diffOpts + '</select></div>' +
       '<div class="form-row full"><label class="form-label">Editor</label><select id="f-veditor" class="form-select">' + editorOpts + '</select></div>' +
       mismatchWarning +
@@ -4252,42 +4430,75 @@ function renderCampaignsView() {
   var showSparksCode = ['IT', 'ES', 'PL'].indexOf(camp.country) !== -1;
   var showIgLink = camp.country === 'IT';
   var hideCHQC = ['IT', 'ES', 'PL'].indexOf(camp.country) !== -1;
+  // Total column count for full-width rows (empty state, week-group headers). Mirrors the
+  // conditional columns in the <thead>/row markup below.
+  var colCount = 12 + (hideLinkCols ? 0 : 2) + (showSparksCode ? 1 : 0) + (showIgLink ? 1 : 0) + (hideCHQC ? 0 : 2);
+
+  // Build one <tr> for an asset. Extracted so it can be emitted either flat or under
+  // weekly group headers.
+  function buildAssetRow(a) {
+    return '<tr data-asset-id="' + a.id + '" draggable="true" ondragstart="App.videoDragStart(event,\'' + a.id + '\')" ondragover="App.videoDragOver(event)" ondrop="App.videoDrop(event,\'' + a.id + '\')" ondragend="App.videoDragEnd(event)">' +
+        '<td style="width:28px;padding:0 6px;cursor:grab"><span class="drag-handle" title="Drag to reorder">⠿</span></td>' +
+        '<td><span class="pn">' + a.pn + '</span></td>' +
+        '<td><div class="video-name-cell">' + renderEditableCell(a, 'name') + renderEditableCell(a, 'version') + '</div></td>' +
+        '<td>' + renderEditableCell(a, 'category') + '</td>' +
+        '<td>' + renderEditableCell(a, 'difficulty') + '</td>' +
+        (hideLinkCols ? '' :
+          '<td class="link-cell">' + renderEditableCell(a, 'rawVideo') + '</td>' +
+          '<td class="link-cell">' + renderEditableCell(a, 'editingBrief') + '</td>') +
+        '<td>' + renderEditableCell(a, 'editor') + '</td>' +
+        '<td class="link-cell">' + renderEditableCell(a, 'finalVideo') + '</td>' +
+        (showSparksCode ? '<td>' + renderEditableCell(a, 'sparksCode') + '</td>' : '') +
+        (showIgLink ? '<td class="link-cell">' + renderEditableCell(a, 'igLink') + '</td>' : '') +
+        '<td>' + renderEditableCell(a, 'estDelivery') + '</td>' +
+        '<td>' + renderEditableCell(a, 'dateApproved') + '</td>' +
+        '<td>' + renderEditableCell(a, 'qc') + '</td>' +
+        '<td>' + renderStatusSelect(a) + '</td>' +
+        (hideCHQC ? '' :
+          '<td>' + (function() {
+            var head = getCategoryHead(a.category);
+            var nameHtml = head
+              ? '<span class="cat-head-chip" title="Auto-assigned by category: ' + escapeHtml(a.category) + '">' + escapeHtml(head) + '</span>'
+              : '<span class="cat-head-chip cat-head-chip-empty" title="No head assigned for this category">—</span>';
+            return '<div class="cat-head-cell">' + nameHtml + renderEditableCell(a, 'categoryHeadQc') + '</div>';
+          })() + '</td>' +
+          '<td>' + renderEditableCell(a, 'chDateApproved') + '</td>') +
+        '<td><div class="row-actions"><button class="action-btn action-btn-play" onclick="App.previewVideo(\'' + a.id + '\')" title="Preview video">▶</button><button class="action-btn" onclick="App.editAssetById(\'' + a.id + '\')" title="Open edit modal">Edit</button><button class="action-btn" onclick="App.duplicateAsset(\'' + a.id + '\')" title="Duplicate this row">Dup</button><button class="action-btn" onclick="App.openAdReport(\'' + a.id + '\')" title="Open ad report in ForceStaff">Report</button>' + (roleAtLeast('admin') ? '<button class="action-btn del-btn" onclick="App.deleteAsset(\'' + a.id + '\')" title="Delete this row">Del</button>' : '') + '</div></td>' +
+      '</tr>';
+  }
+
   var rows = '';
   if (filtered.length === 0) {
-    var baseColspan = hideLinkCols ? 14 : 16;
-    rows = '<tr><td colspan="' + (baseColspan + (showSparksCode ? 1 : 0) - (hideCHQC ? 2 : 0)) + '"><div class="empty-state">No assets match your filters</div></td></tr>';
+    rows = '<tr><td colspan="' + colCount + '"><div class="empty-state">No assets match your filters</div></td></tr>';
+  } else if (STATE.videoWeeklyGroup) {
+    // Weekly grouping: bucket by the Mon–Sun ISO week of Estimated Delivery. Videos with
+    // no delivery date collect in a trailing "No delivery date" group. Within each week,
+    // keep the existing pn order (filtered is already pn-sorted).
+    var buckets = {}; var order = []; var noDate = [];
+    filtered.forEach(function(a) {
+      var wk = isoWeekStart(toISODate(a.estDelivery));
+      if (!wk) { noDate.push(a); return; }
+      if (!buckets[wk]) { buckets[wk] = []; order.push(wk); }
+      buckets[wk].push(a);
+    });
+    order.sort(); // ISO week-start strings sort chronologically
+    var groupHeader = function(label, count) {
+      return '<tr class="week-group-row"><td colspan="' + colCount + '">' +
+        '<span class="week-group-label">' + escapeHtml(label) + '</span>' +
+        '<span class="week-group-count">' + count + ' video' + (count === 1 ? '' : 's') + '</span>' +
+        '</td></tr>';
+    };
+    order.forEach(function(wk) {
+      rows += groupHeader('Week of ' + weekRangeLabel(wk), buckets[wk].length);
+      buckets[wk].forEach(function(a) { rows += buildAssetRow(a); });
+    });
+    if (noDate.length) {
+      rows += groupHeader('No delivery date', noDate.length);
+      noDate.forEach(function(a) { rows += buildAssetRow(a); });
+    }
   } else {
     for (var i = 0; i < filtered.length; i++) {
-      var a = filtered[i];
-      rows +=
-        '<tr data-asset-id="' + a.id + '" draggable="true" ondragstart="App.videoDragStart(event,\'' + a.id + '\')" ondragover="App.videoDragOver(event)" ondrop="App.videoDrop(event,\'' + a.id + '\')" ondragend="App.videoDragEnd(event)">' +
-          '<td style="width:28px;padding:0 6px;cursor:grab"><span class="drag-handle" title="Drag to reorder">⠿</span></td>' +
-          '<td><span class="pn">' + a.pn + '</span></td>' +
-          '<td><div class="video-name-cell">' + renderEditableCell(a, 'name') + renderEditableCell(a, 'version') + '</div></td>' +
-          '<td>' + renderEditableCell(a, 'category') + '</td>' +
-          '<td>' + renderEditableCell(a, 'difficulty') + '</td>' +
-          (hideLinkCols ? '' :
-            '<td class="link-cell">' + renderEditableCell(a, 'rawVideo') + '</td>' +
-            '<td class="link-cell">' + renderEditableCell(a, 'editingBrief') + '</td>') +
-          '<td>' + renderEditableCell(a, 'editor') + '</td>' +
-          '<td class="link-cell">' + renderEditableCell(a, 'finalVideo') + '</td>' +
-          (showSparksCode ? '<td>' + renderEditableCell(a, 'sparksCode') + '</td>' : '') +
-          (showIgLink ? '<td class="link-cell">' + renderEditableCell(a, 'igLink') + '</td>' : '') +
-          '<td>' + renderEditableCell(a, 'estDelivery') + '</td>' +
-          '<td>' + renderEditableCell(a, 'dateApproved') + '</td>' +
-          '<td>' + renderEditableCell(a, 'qc') + '</td>' +
-          '<td>' + renderStatusSelect(a) + '</td>' +
-          (hideCHQC ? '' :
-            '<td>' + (function() {
-              var head = getCategoryHead(a.category);
-              var nameHtml = head
-                ? '<span class="cat-head-chip" title="Auto-assigned by category: ' + escapeHtml(a.category) + '">' + escapeHtml(head) + '</span>'
-                : '<span class="cat-head-chip cat-head-chip-empty" title="No head assigned for this category">—</span>';
-              return '<div class="cat-head-cell">' + nameHtml + renderEditableCell(a, 'categoryHeadQc') + '</div>';
-            })() + '</td>' +
-            '<td>' + renderEditableCell(a, 'chDateApproved') + '</td>') +
-          '<td><div class="row-actions"><button class="action-btn" onclick="App.editAssetById(\'' + a.id + '\')" title="Open edit modal">Edit</button><button class="action-btn" onclick="App.duplicateAsset(\'' + a.id + '\')" title="Duplicate this row">Dup</button><button class="action-btn" onclick="App.openAdReport(\'' + a.id + '\')" title="Open ad report in ForceStaff">Report</button>' + (roleAtLeast('admin') ? '<button class="action-btn del-btn" onclick="App.deleteAsset(\'' + a.id + '\')" title="Delete this row">Del</button>' : '') + '</div></td>' +
-        '</tr>';
+      rows += buildAssetRow(filtered[i]);
     }
   }
   // Build link pills for drive and brief. Three possible states per field:
@@ -4427,6 +4638,7 @@ function renderCampaignsView() {
           ? '<button class="edit-btn" onclick="App.bulkSyncChDateApproved()" title="Copy Date Approved → CH Date Approved for ' + mismatchCount + ' asset' + (mismatchCount === 1 ? '' : 's') + '" style="color:#38bdf8;border-color:#38bdf8;">⇄ Sync CH Date (' + mismatchCount + ')</button>'
           : '';
       })() : '') +
+      '<button class="edit-btn" onclick="App.toggleVideoWeeklyGroup()" title="Group videos into weekly sections by Estimated Delivery" style="' + (STATE.videoWeeklyGroup ? 'color:var(--accent2);border-color:var(--accent2);' : '') + '">' + (STATE.videoWeeklyGroup ? '☷ Weekly: On' : '☷ Group by week') + '</button>' +
       '<button class="primary-btn" onclick="App.showAssetModal(null)">+ Add Video</button>' +
     '</div>' +
     '<div class="table-wrap"><table><thead><tr>' +
@@ -5997,7 +6209,7 @@ function renderNotificationsView() {
     // CHQ batches are now keyed per manager (CHQ:<head>), so the suffix is the head
     // name. The subtitle lists the categories that head owns.
     var head = isChq ? recipient.slice(4) : '';
-    var headCats = isChq ? (STATE.categories || []).filter(function(cat) { return getCategoryHead(cat.name) === head; }).map(function(cat) { return cat.name; }) : [];
+    var headCats = isChq ? allKnownCategories().filter(function(cat) { return getCategoryHead(cat) === head; }) : [];
     // CHQ titles render as TWO lines: head on top, their categories as a smaller
     // muted subtitle below. PM and editor titles stay as a single plain string.
     var displayName;
@@ -7667,7 +7879,7 @@ function showItalyImportModal() {
           '<div>' +
             '<label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px;">Category</label>' +
             '<select id="it-category" class="edit-input" style="width:100%;box-sizing:border-box;">' +
-              STATE.categories.map(function(c){ return '<option value="'+escapeHtml(c.name)+'">'+escapeHtml(c.name)+'</option>'; }).join('') +
+              allKnownCategories().map(function(name){ return '<option value="'+escapeHtml(name)+'">'+escapeHtml(name)+'</option>'; }).join('') +
             '</select>' +
           '</div>' +
         '</div>' +
@@ -8364,7 +8576,7 @@ function renderReportingView() {
       return '<option value="' + t + '"' + (type === t ? ' selected' : '') + '>' + t + '</option>';
     }).join('');
 
-  var categoryList = (STATE.categories || []).map(function(c) { return c.name || c; });
+  var categoryList = allKnownCategories();
   var categoryOptsHtml = '<option value="all"' + (category === 'all' ? ' selected' : '') + '>All categories</option>' +
     categoryList.map(function(cat) {
       return '<option value="' + escapeHtml(cat) + '"' + (category === cat ? ' selected' : '') + '>' + escapeHtml(cat) + '</option>';
@@ -8502,6 +8714,7 @@ function allCategoryHeads() {
   var seen = {}, out = [];
   var add = function(h) { if (h && !seen[h]) { seen[h] = true; out.push(h); } };
   (STATE.categories || []).forEach(function(cat) { add(getCategoryHead(cat.name)); });
+  (STATE.categoriesOrganic || []).forEach(function(cat) { add(getCategoryHead(cat.name)); });
   Object.keys(CATEGORY_HEADS).forEach(function(cat) { add(getCategoryHead(cat)); });
   return out;
 }
@@ -9254,6 +9467,56 @@ function renderContentView() {
   '</div></div>';
 }
 
+// Render one category-management block (rows + add box) for a given list key
+// ('paid' | 'organic'). Both blocks share the same handlers, which take the list key
+// as their last argument. Delete-safety is scoped to campaigns of the matching type.
+function renderCategoryManageBlock(listKey, title) {
+  var list = categoryListByKey(listKey);
+  var type = typeForListKey(listKey);
+  var newInputId = 'cat-new-input-' + listKey;
+  var rows = list.map(function(cat, idx) {
+    var usage = categoryUsageCount(cat.name, type);
+    var canDelete = usage === 0;
+    var delTitle = canDelete ? 'Delete this category' : usage + ' ' + type + ' campaign(s) use this category — reassign them before deleting';
+    var overrides = STATE.categoryHeadOverrides || {};
+    var headVal = overrides[cat.name] !== undefined ? overrides[cat.name] : (CATEGORY_HEADS[cat.name] || '');
+    var headEsc = escapeHtml(headVal);
+    return '<div class="cat-manage-row" data-cat-idx="' + idx + '" style="display:grid; grid-template-columns:10px 1fr 1fr auto; align-items:center;">' +
+      '<span class="cat-swatch" style="background:' + ((cat.color || cat).bg || 'var(--bg4)') + '; margin:0;"></span>' +
+      '<input type="text" class="form-input cat-name-input" data-orig="' + escapeHtml(cat.name) + '" ' +
+        'value="' + escapeHtml(cat.name) + '" ' +
+        'onblur="App.renameCategory(' + idx + ', this.value, \'' + listKey + '\')" style="margin:0 4px;">' +
+      '<input type="text" class="form-input" ' +
+        'placeholder="e.g. Anand" ' +
+        'value="' + headEsc + '" ' +
+        'title="The person responsible for QC-reviewing videos in this category." ' +
+        'onblur="App.saveCategoryHead(' + idx + ', this.value, \'' + listKey + '\')" style="margin:0 4px;">' +
+      '<div style="display:flex; align-items:center; gap:6px;">' +
+        '<span class="cat-usage">' + usage + ' in use</span>' +
+        '<button class="edit-btn del-btn" ' + (canDelete ? '' : 'disabled ') +
+          'style="' + (canDelete ? '' : 'opacity:0.4; cursor:not-allowed;') + '" ' +
+          'title="' + escapeHtml(delTitle) + '" ' +
+          'onclick="App.deleteCategory(' + idx + ', \'' + listKey + '\')">✕</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  return '<div class="cat-manage-block">' +
+    '<div style="font-size:12.5px; font-weight:700; color:var(--text1); margin-bottom:8px; letter-spacing:0.02em;">' + escapeHtml(title) + '</div>' +
+    '<div style="display:grid; grid-template-columns: 10px 1fr 1fr auto; gap:0; align-items:center; padding:6px 0 8px; border-bottom:1px solid var(--border); margin-bottom:4px;">' +
+      '<div></div>' +
+      '<div style="font-size:10.5px; font-weight:600; color:var(--text3); text-transform:uppercase; letter-spacing:0.06em; padding:0 6px;">Category</div>' +
+      '<div style="font-size:10.5px; font-weight:600; color:var(--text3); text-transform:uppercase; letter-spacing:0.06em; padding:0 6px;">Category Head</div>' +
+      '<div></div>' +
+    '</div>' +
+    '<div class="category-rows" style="display:flex; flex-direction:column; gap:6px;">' + rows + '</div>' +
+    '<div style="display:flex; gap:6px; margin-top:10px; align-items:center;">' +
+      '<input id="' + newInputId + '" class="form-input" placeholder="New ' + escapeHtml(type) + ' category — press Enter to add" ' +
+        'style="flex:1;" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addCategoryFromConfig(\'' + listKey + '\');}">' +
+      '<button class="save-btn" style="padding:8px 14px;" onclick="App.addCategoryFromConfig(\'' + listKey + '\')">➕ Add category</button>' +
+    '</div>' +
+  '</div>';
+}
+
 function renderConfigView() {
   var counts = {};
   EDITORS.forEach(function(e) { counts[e] = STATE.assets.filter(function(a) { return a.editor === e; }).length; });
@@ -9502,46 +9765,10 @@ function renderConfigView() {
 
     '<div class="section-title">Categories</div>' +
     '<div class="auto-card">' +
-      '<div class="auto-desc" style="margin-bottom:12px;">Shared category list used by every campaign. Rename a category here and every campaign using it updates automatically. Delete is only available when no campaign currently uses the category.</div>' +
-      '<div style="display:grid; grid-template-columns: 10px 1fr 1fr auto; gap:0; align-items:center; padding:6px 0 8px; border-bottom:1px solid var(--border); margin-bottom:4px;">' +
-        '<div></div>' +
-        '<div style="font-size:10.5px; font-weight:600; color:var(--text3); text-transform:uppercase; letter-spacing:0.06em; padding:0 6px;">Category</div>' +
-        '<div style="font-size:10.5px; font-weight:600; color:var(--text3); text-transform:uppercase; letter-spacing:0.06em; padding:0 6px;">Category Head</div>' +
-        '<div></div>' +
-      '</div>' +
-      '<div id="category-rows" style="display:flex; flex-direction:column; gap:6px;">' +
-        STATE.categories.map(function(cat, idx) {
-          var usage = categoryUsageCount(cat.name);
-          var canDelete = usage === 0;
-          var delTitle = canDelete ? 'Delete this category' : usage + ' campaign(s) use this category \u2014 reassign them before deleting';
-          var overrides = STATE.categoryHeadOverrides || {};
-          var headVal = overrides[cat.name] !== undefined ? overrides[cat.name] : (CATEGORY_HEADS[cat.name] || '');
-          var headEsc = escapeHtml(headVal);
-          return '<div class="cat-manage-row" data-cat-idx="' + idx + '" style="display:grid; grid-template-columns:10px 1fr 1fr auto; align-items:center;">' +
-            '<span class="cat-swatch" style="background:' + ((cat.color || cat).bg || 'var(--bg4)') + '; margin:0;"></span>' +
-            '<input type="text" class="form-input cat-name-input" data-orig="' + escapeHtml(cat.name) + '" ' +
-              'value="' + escapeHtml(cat.name) + '" ' +
-              'onblur="App.renameCategory(' + idx + ', this.value)" style="margin:0 4px;">' +
-            '<input type="text" class="form-input" ' +
-              'placeholder="e.g. Anand" ' +
-              'value="' + headEsc + '" ' +
-              'title="The person responsible for QC-reviewing videos in this category." ' +
-              'onblur="App.saveCategoryHead(' + idx + ', this.value)" style="margin:0 4px;">' +
-            '<div style="display:flex; align-items:center; gap:6px;">' +
-              '<span class="cat-usage">' + usage + ' in use</span>' +
-              '<button class="edit-btn del-btn" ' + (canDelete ? '' : 'disabled ') +
-                'style="' + (canDelete ? '' : 'opacity:0.4; cursor:not-allowed;') + '" ' +
-                'title="' + escapeHtml(delTitle) + '" ' +
-                'onclick="App.deleteCategory(' + idx + ')">\u2715</button>' +
-            '</div>' +
-          '</div>';
-        }).join('') +
-      '</div>' +
-      '<div style="display:flex; gap:6px; margin-top:10px; align-items:center;">' +
-        '<input id="cat-new-input" class="form-input" placeholder="New category name \u2014 press Enter to add" ' +
-          'style="flex:1;" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addCategoryFromConfig();}">' +
-        '<button class="save-btn" style="padding:8px 14px;" onclick="App.addCategoryFromConfig()">\u2795 Add category</button>' +
-      '</div>' +
+      '<div class="auto-desc" style="margin-bottom:14px;">Paid Ads and Organic campaigns each pick from their own category list. A campaign (and its videos) shows the list matching its type. Rename a category and every campaign of that type using it updates automatically. Delete is only available when no campaign of that type uses it. Category Head is shared by category name across both lists.</div>' +
+      renderCategoryManageBlock('paid', 'Paid Ads categories') +
+      '<div style="height:22px;"></div>' +
+      renderCategoryManageBlock('organic', 'Organic categories') +
       '<div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--border);">' +
         '<div style="font-size:12px; font-weight:600; color:var(--text2); margin-bottom:4px; letter-spacing:0.04em; text-transform:uppercase;">Bulk sync video categories</div>' +
         '<div style="font-size:11.5px; color:var(--text3); margin-bottom:10px;">One click sets every video across all campaigns to match the category of its own campaign. Handy after a campaign\u2019s category changes or videos were imported with a stale category \u2014 keeps Cat Heads Review routing correct.</div>' +
@@ -12232,15 +12459,16 @@ var App = {
     render();
   },
 
-  // Inline category change. Validates the new name against STATE.categories so a
-  // dropdown commit can't introduce an unknown category. The Category Head QC
-  // column re-renders automatically (it computes the head from a.category at
-  // render time, so no extra wiring needed there).
+  // Inline category change. Validates the new name against the category list for the
+  // asset's campaign TYPE (Paid Ads / Organic) so a dropdown commit can't introduce an
+  // unknown category. The Category Head QC column re-renders automatically (it computes
+  // the head from a.category at render time, so no extra wiring needed there).
   setAssetCategory: function(id, newCat) {
     var a = null;
     a = findAssetById(id);
     if (!a) return;
-    var validNames = (STATE.categories || []).map(function(c) { return c.name; });
+    var camp = findCampaignById(a.campaignId);
+    var validNames = categoriesForType(camp && camp.type).map(function(c) { return c.name; });
     if (validNames.indexOf(newCat) < 0) { render(); return; } // unknown \u2014 ignore
     if (a.category === newCat) { render(); return; }
     var old = a.category;
@@ -12513,7 +12741,7 @@ var App = {
   setCampaignCategory: function(id, newCat) {
     var c = findCampaignById(id);
     if (!c) return;
-    var validNames = (STATE.categories || []).map(function(cat) { return cat.name; });
+    var validNames = categoriesForType(c.type).map(function(cat) { return cat.name; });
     if (validNames.indexOf(newCat) < 0) { render(); return; }
     if (c.category === newCat) return;
     var old = c.category || '';
@@ -12651,8 +12879,9 @@ var App = {
     if (!input) return;
     var name = (input.value || '').trim();
     if (!name) { toast('Type a category name first', 'error'); return; }
-    var existed = !!findCategory(name);
-    var cat = addCategory(name);
+    var listKey = modalCampaignListKey();
+    var existed = !!findCategory(name, listKey);
+    var cat = addCategory(name, listKey);
     if (!cat) return;
     saveState();
     // Full picker refresh so rename/delete buttons reflect the newly-selected category
@@ -12664,6 +12893,18 @@ var App = {
   // the rename/delete buttons reflect the new selection's "in use" state.
   onModalCategoryChange: function(value) {
     refreshModalCategoryPicker(value);
+  },
+
+  // Called when the campaign Type select changes. The category list a campaign shows
+  // depends on its type, so swap the picker to the matching list. The previously-selected
+  // category usually won't exist in the new list — default to that list's first entry.
+  onModalTypeChange: function(value) {
+    var listKey = (value === 'Organic') ? 'organic' : 'paid';
+    var list = categoryListByKey(listKey);
+    var sel = document.getElementById('f-ccat');
+    var current = sel ? sel.value : '';
+    var stillValid = list.some(function(c) { return c.name === current; });
+    refreshModalCategoryPicker(stillValid ? current : (list.length ? list[0].name : ''));
   },
 
   // Reveal the rename input, seeded with the currently-selected category name.
@@ -12702,9 +12943,11 @@ var App = {
       App.cancelRenameCategoryInModal();
       return;
     }
-    var cat = findCategory(orig);
+    var listKey = modalCampaignListKey();
+    var type = typeForListKey(listKey);
+    var cat = findCategory(orig, listKey);
     if (!cat) { App.cancelRenameCategoryInModal(); return; }
-    var collision = findCategory(proposed);
+    var collision = findCategory(proposed, listKey);
     if (collision && collision !== cat) {
       toast('A category named "' + proposed + '" already exists', 'error');
       input.focus();
@@ -12716,7 +12959,7 @@ var App = {
     cat.name = proposed;
     var updated = 0;
     STATE.campaigns.forEach(function(camp) {
-      if (camp.category === orig) { camp.category = proposed; updated++; }
+      if ((camp.type || DEFAULT_CAMPAIGN_TYPE) === type && camp.category === orig) { camp.category = proposed; updated++; }
     });
     saveState();
     logAction('updated', 'Category "' + orig + '" renamed to "' + proposed + '" (' + updated + ' campaign(s) updated)');
@@ -12737,34 +12980,38 @@ var App = {
     var sel = document.getElementById('f-ccat');
     if (!sel || !sel.value) return;
     var name = sel.value;
-    var usage = categoryUsageCount(name);
+    var listKey = modalCampaignListKey();
+    var type = typeForListKey(listKey);
+    var list = categoryListByKey(listKey);
+    var usage = categoryUsageCount(name, type);
     if (usage > 0) {
-      toast(usage + ' campaign(s) still use "' + name + '" \u2014 reassign them first', 'error');
+      toast(usage + ' ' + type + ' campaign(s) still use "' + name + '" \u2014 reassign them first', 'error');
       return;
     }
-    if (!confirm('Delete the category "' + name + '"?')) return;
+    if (!confirm('Delete the ' + type + ' category "' + name + '"?')) return;
     var idx = -1;
-    for (var i = 0; i < STATE.categories.length; i++) {
-      if (STATE.categories[i].name === name) { idx = i; break; }
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].name === name) { idx = i; break; }
     }
     if (idx < 0) return;
-    STATE.categories.splice(idx, 1);
+    list.splice(idx, 1);
     saveState();
-    logAction('deleted', 'Category "' + name + '" deleted from modal');
+    logAction('deleted', 'Category "' + name + '" deleted from ' + type + ' list (modal)');
     toast('Category "' + name + '" deleted', 'success');
     // Pick a sensible new selection: the first remaining category, or empty if none.
-    var newSelection = STATE.categories.length ? STATE.categories[0].name : '';
+    var newSelection = list.length ? list[0].name : '';
     refreshModalCategoryPicker(newSelection);
   },
 
   // Add a new category from the Config tab.
-  addCategoryFromConfig: function() {
-    var input = document.getElementById('cat-new-input');
+  addCategoryFromConfig: function(listKey) {
+    listKey = listKey || 'paid';
+    var input = document.getElementById('cat-new-input-' + listKey);
     if (!input) return;
     var name = (input.value || '').trim();
     if (!name) { toast('Type a category name first', 'error'); return; }
-    var existed = !!findCategory(name);
-    var cat = addCategory(name);
+    var existed = !!findCategory(name, listKey);
+    var cat = addCategory(name, listKey);
     if (!cat) return;
     saveState();
     input.value = '';
@@ -12773,17 +13020,20 @@ var App = {
     render();
   },
 
-  // Rename a category by index in STATE.categories. Updates the category's name and
-  // rewrites campaign.category on every campaign that referenced the old name, so display
-  // and filters stay consistent.
-  renameCategory: function(idx, newName) {
-    var cat = STATE.categories[idx];
+  // Rename a category by index within its list ('paid' | 'organic'). Updates the name and
+  // rewrites campaign.category on every campaign OF THAT TYPE that referenced the old name,
+  // so display and filters stay consistent without disturbing the other list.
+  renameCategory: function(idx, newName, listKey) {
+    listKey = listKey || 'paid';
+    var list = categoryListByKey(listKey);
+    var type = typeForListKey(listKey);
+    var cat = list[idx];
     if (!cat) return;
     var trimmed = String(newName || '').trim();
     if (!trimmed) { toast('Category name cannot be empty', 'error'); render(); return; }
     if (trimmed === cat.name) return; // no-op
-    // Check for a collision with an existing different category
-    var collision = findCategory(trimmed);
+    // Check for a collision with an existing different category IN THE SAME LIST
+    var collision = findCategory(trimmed, listKey);
     if (collision && collision !== cat) {
       toast('A category named "' + trimmed + '" already exists', 'error');
       render(); // resets the input to its stored value
@@ -12791,36 +13041,41 @@ var App = {
     }
     var oldName = cat.name;
     cat.name = trimmed;
-    // Rewrite campaign.category on every affected campaign
+    // Rewrite campaign.category on every affected campaign of this type
     var updated = 0;
     STATE.campaigns.forEach(function(camp) {
-      if (camp.category === oldName) { camp.category = trimmed; updated++; }
+      if ((camp.type || DEFAULT_CAMPAIGN_TYPE) === type && camp.category === oldName) { camp.category = trimmed; updated++; }
     });
-    // Migrate the category head override key so the assignment isn't orphaned.
-    if (STATE.categoryHeadOverrides && STATE.categoryHeadOverrides[oldName] !== undefined) {
+    // Migrate the category head override key so the assignment isn't orphaned \u2014 but only
+    // if the old name is no longer used by the OTHER list (heads are keyed by name globally).
+    if (STATE.categoryHeadOverrides && STATE.categoryHeadOverrides[oldName] !== undefined && !findCategory(oldName)) {
       STATE.categoryHeadOverrides[trimmed] = STATE.categoryHeadOverrides[oldName];
       delete STATE.categoryHeadOverrides[oldName];
     }
     saveState();
-    logAction('updated', 'Category "' + oldName + '" renamed to "' + trimmed + '" (' + updated + ' campaign(s) updated)');
+    logAction('updated', 'Category "' + oldName + '" renamed to "' + trimmed + '" (' + type + ', ' + updated + ' campaign(s) updated)');
     toast('Renamed to "' + trimmed + '"', 'success');
     render();
   },
 
-  // Delete a category by index. Only allowed when no campaign uses it.
-  deleteCategory: function(idx) {
-    var cat = STATE.categories[idx];
+  // Delete a category by index within its list. Only allowed when no campaign of that type uses it.
+  deleteCategory: function(idx, listKey) {
+    listKey = listKey || 'paid';
+    var list = categoryListByKey(listKey);
+    var type = typeForListKey(listKey);
+    var cat = list[idx];
     if (!cat) return;
-    var usage = categoryUsageCount(cat.name);
+    var usage = categoryUsageCount(cat.name, type);
     if (usage > 0) {
-      toast(usage + ' campaign(s) still use "' + cat.name + '" \u2014 reassign them first', 'error');
+      toast(usage + ' ' + type + ' campaign(s) still use "' + cat.name + '" \u2014 reassign them first', 'error');
       return;
     }
-    if (!confirm('Delete the category "' + cat.name + '"?')) return;
-    STATE.categories.splice(idx, 1);
-    if (STATE.categoryHeadOverrides) delete STATE.categoryHeadOverrides[cat.name];
+    if (!confirm('Delete the ' + type + ' category "' + cat.name + '"?')) return;
+    list.splice(idx, 1);
+    // Only drop the head override if the name is gone from BOTH lists.
+    if (STATE.categoryHeadOverrides && !findCategory(cat.name)) delete STATE.categoryHeadOverrides[cat.name];
     saveState();
-    logAction('deleted', 'Category "' + cat.name + '" deleted');
+    logAction('deleted', 'Category "' + cat.name + '" deleted from ' + type + ' list');
     toast('Category deleted', 'success');
     render();
   },
@@ -13914,6 +14169,10 @@ var App = {
   onQcFilter: function(v) { STATE.qcFilter = v; render(); },
   onDateApprovedFilter: function(v) { STATE.dateApprovedFilter = v; render(); },
   onEstDeliveryFilter: function(v) { STATE.estDeliveryFilter = v; render(); },
+  // Video Log: toggle weekly grouping (sections by Estimated Delivery). View-only, per-user.
+  toggleVideoWeeklyGroup: function() { STATE.videoWeeklyGroup = !STATE.videoWeeklyGroup; render(); },
+  // Open the in-app video preview popup for a row.
+  previewVideo: function(id) { showVideoPreviewModal(id); },
   // --- Cat Heads Review tab ---
   setCatReviewWindow: function(v) { STATE.catReviewWindow = v; render(); },
 
@@ -14162,8 +14421,8 @@ var App = {
   // Save the category head assignment for a category. Stored in
   // STATE.categoryHeadOverrides, which getCategoryHead() checks before
   // the hardcoded CATEGORY_HEADS defaults.
-  saveCategoryHead: function(idx, name) {
-    var cat = STATE.categories[idx];
+  saveCategoryHead: function(idx, name, listKey) {
+    var cat = categoryListByKey(listKey || 'paid')[idx];
     if (!cat) return;
     var trimmed = (name || '').trim();
     if (!STATE.categoryHeadOverrides) STATE.categoryHeadOverrides = {};

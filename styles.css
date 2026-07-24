@@ -728,6 +728,10 @@
      so the full URL is visible while typing. Uses absolute positioning anchored to the
      td (which gets position:relative below), so other columns don't shift. */
   .link-cell { position: relative; }
+  /* Weekly grouping: a full-width header row separating each Mon–Sun bucket in the Video Log. */
+  .week-group-row td { background: var(--bg3); padding: 8px 12px; border-top: 1px solid var(--border2); border-bottom: 1px solid var(--border); }
+  .week-group-label { font-size: 11.5px; font-weight: 700; letter-spacing: 0.02em; color: var(--text1); text-transform: uppercase; }
+  .week-group-count { margin-left: 10px; font-size: 11px; font-weight: 500; color: var(--text3); letter-spacing: 0.03em; }
   .inline-edit-input.inline-edit-url {
     position: absolute;
     top: 50%;
@@ -907,6 +911,13 @@
   .modal-overlay.open { opacity: 1; pointer-events: auto; }
   .modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 10px; padding: 22px 24px; width: 580px; max-width: 94vw; max-height: 90vh; overflow-y: auto; transform: translateY(8px); transition: transform 0.15s; }
   .modal-overlay.open .modal { transform: translateY(0); }
+  /* Video preview modal — wider than the form modal, with a 16:9 player. */
+  .modal.modal-video { width: 900px; }
+  .video-preview-frame { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; overflow: hidden; margin-bottom: 6px; }
+  .video-preview-frame iframe, .video-preview-frame video { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .video-preview-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; min-height: 200px; padding: 24px; background: var(--bg3); border: 1px dashed var(--border2); border-radius: 8px; color: var(--text2); font-size: 13px; line-height: 1.55; }
+  .video-preview-empty-icon { font-size: 30px; color: var(--text3); }
+  .action-btn-play { color: var(--accent2); }
   .modal-title { font-size: 15px; font-weight: 700; color: var(--text1); margin-bottom: 16px; letter-spacing: -0.2px; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .form-row.full { grid-column: span 2; }
