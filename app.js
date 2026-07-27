@@ -396,6 +396,7 @@ var Fb = {
       qcDismissed: STATE.qcDismissed || {},
       grades: Array.isArray(STATE.grades) ? STATE.grades : [],
       scorecardMeta: STATE.scorecardMeta || {},
+      gradingStreak: STATE.gradingStreak || { last: null, count: 0, best: 0 },
       _lastEditedBy: Auth.user ? Auth.user.uid : null,
       _lastEditedByName: Auth.user ? Auth.user.displayName : null,
       _lastEditedAt: Date.now()
@@ -484,7 +485,9 @@ var Fb = {
         gradingCampaignId: true,
         gradingYear: true,
         gradingMonth: true,
-        gradingShowDismissed: true
+        gradingShowDismissed: true,
+        gradingType: true,
+        gradingWeek: true
       };
       // Copy known fields onto STATE. Skip metadata fields prefixed with `_` and any
       // per-user UI field (so a teammate's tab/campaign/expansion choices don't override
@@ -1614,6 +1617,12 @@ var STATE = {
   gradingMonth: null,         // selected month (string '01'..'12')
   gradingCustomEntry: false,  // (legacy) unused since grading moved to campaign videos
   gradingShowDismissed: false,// true = also show dismissed videos in the grade list
+  gradingType: 'all',         // 'all' | 'Paid Ads' | 'Organic' — paid/organic filter
+  gradingWeek: null,          // null = whole month; else a Monday ISO ('YYYY-MM-DD') scoping to one week
+  // Shared streak: which day grading last happened (UK date), the current consecutive-day
+  // run, and the best run ever. Kept as data (persisted) so the "don't break the chain"
+  // nudge survives reloads and is visible to whoever grades. See bumpGradingStreak.
+  gradingStreak: { last: null, count: 0, best: 0 },
 
   countries: [
     { code: 'UK', name: 'United Kingdom' },
@@ -5867,6 +5876,100 @@ var GRADE_POINTS = { brand: 25, qa: 30, innovation: 15, speedOutput: 15, speedRe
 // Revision-round cap by content type: Net New ≤ 4, Maintenance ≤ 2.
 var REVISION_CAP = { 'Net New': 4, 'Maintenance': 2 };
 
+// Auto-detect a video's content type from its file name using Tilt's naming code.
+// The marker is one of the underscore tokens (usually the 2nd), e.g.
+//   TCG_1N_… / TCG_2N_…  → the "N" family  → Net New
+//   TCG_OP_… / TCG_IOP_… / TCG_2OP_…       → the "OP" family → Maintenance
+// Returns 'Net New' | 'Maintenance', or null when no marker is recognisable.
+// OP is checked before N so a token like "IOP" is never mistaken for an N marker.
+function detectContentType(name) {
+  if (!name) return null;
+  var tokens = String(name).split(/[_\s]+/);
+  for (var i = 0; i < tokens.length; i++) {
+    var t = tokens[i].toUpperCase();
+    if (/^\d*I?OP$/.test(t)) return 'Maintenance'; // OP / IOP / 2OP / 1OP …
+    if (/^\d*N$/.test(t))    return 'Net New';     // N / 1N / 2N / 3N …
+  }
+  return null;
+}
+
+// The campaign type ('Paid Ads' | 'Organic') behind a grade, resolved via its linked
+// asset → campaign. Returns null for free-text grades (no asset) or missing campaigns,
+// so the paid/organic filter can choose to include them only in the 'all' view.
+function gradeCampaignType(g) {
+  if (!g || !g.assetId) return null;
+  var a = findAssetById(g.assetId);
+  if (!a) return null;
+  var c = findCampaignById(a.campaignId);
+  return c ? (c.type || DEFAULT_CAMPAIGN_TYPE) : null;
+}
+
+// Auto-suggested Output target/day for the active paid/organic filter (see the KPI
+// framework, refined July 2026): Organic Net New is a full day's work → 1/day; Paid
+// videos (Net New or Maintenance / OP) are faster → 3–4/day, so 3.5 as the midpoint.
+// 'all' has no single expected pace, so returns null (editor sets it manually).
+function suggestedTargetForType(type) {
+  if (type === 'Organic')  return 1;
+  if (type === 'Paid Ads') return 3.5;
+  return null;
+}
+
+// Bump the shared grading streak for today (UK date). Only counts once per day, and only
+// on an actual grading action (not dismiss/restore/delete). Consecutive UK days grow the
+// run; a gap resets it to 1. Tracks the best run ever for a little bragging rights.
+function bumpGradingStreak() {
+  var today = todayUK();
+  var s = STATE.gradingStreak || { last: null, count: 0, best: 0 };
+  if (s.last === today) return; // already counted today
+  var y = new Date(today + 'T12:00:00'); y.setDate(y.getDate() - 1);
+  var mm = y.getMonth() + 1, dd = y.getDate();
+  var yesterday = y.getFullYear() + '-' + (mm < 10 ? '0' + mm : mm) + '-' + (dd < 10 ? '0' + dd : dd);
+  s.count = (s.last === yesterday) ? (Number(s.count) || 0) + 1 : 1;
+  s.last = today;
+  s.best = Math.max(Number(s.best) || 0, s.count);
+  STATE.gradingStreak = s;
+}
+
+// Whether the streak is "live" (something graded today) or dormant (last activity was
+// before today). Dormant streaks still show the number but read as a nudge, not a flex.
+function gradingStreakLive() {
+  var s = STATE.gradingStreak;
+  return !!(s && s.last === todayUK() && s.count > 0);
+}
+
+// One-shot celebration when a grading scope hits 100%. DOM confetti burst + toast,
+// auto-cleaned. Respects prefers-reduced-motion (skips the confetti, keeps the toast).
+function fireGradingCelebration(total) {
+  if (typeof toast === 'function') {
+    toast('All ' + total + ' graded — nice work! 🎉' +
+      (gradingStreakLive() && STATE.gradingStreak.count > 1 ? ' 🔥 ' + STATE.gradingStreak.count + '-day streak' : ''), 'success');
+  }
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce || typeof document === 'undefined') return;
+  var colors = ['#7f77dd', '#afa9ec', '#5dcaa5', '#fac775', '#f4c0d1', '#85b7eb'];
+  var burst = document.createElement('div');
+  burst.className = 'confetti-burst';
+  var frag = '';
+  for (var i = 0; i < 42; i++) {
+    var left = Math.round((i / 42) * 100);
+    var delay = (i % 7) * 40;
+    var dur = 900 + (i % 5) * 180;
+    var rot = (i % 2 ? 1 : -1) * (120 + (i % 6) * 90);
+    var col = colors[i % colors.length];
+    var size = 6 + (i % 3) * 2;
+    frag += '<i style="left:' + left + '%;width:' + size + 'px;height:' + (size + 3) + 'px;' +
+      'background:' + col + ';animation-delay:' + delay + 'ms;animation-duration:' + dur + 'ms;' +
+      '--rot:' + rot + 'deg;"></i>';
+  }
+  burst.innerHTML = frag;
+  document.body.appendChild(burst);
+  setTimeout(function() { if (burst.parentNode) burst.parentNode.removeChild(burst); }, 2200);
+}
+
+// Transient (non-persisted) guard so a scope only celebrates on the false→true transition,
+// never on a re-render or when you merely navigate to an already-complete scope.
+var GradingFx = { sig: null, wasComplete: false };
+
 // The effective revision-round count for a grade. When the grade is linked to a
 // tracked campaign video (assetId) and hasn't been manually overridden, this reads
 // LIVE from that asset's auto-counted revisionRounds — so the scorecard reflects the
@@ -5898,7 +6001,7 @@ function gradeRating(score) {
 
 // Roll a set of grade rows + the editor's manual meta (Avg Videos/Day, Target/Day)
 // up into one scorecard object. `grades` is the already period-filtered list.
-function computeScorecard(editor, grades) {
+function computeScorecard(editor, grades, suggestedTarget) {
   var rows = (grades || []).filter(function(g) { return g.editor === editor; });
   var meta = (STATE.scorecardMeta && STATE.scorecardMeta[editor]) || {};
   var total = rows.length;
@@ -5912,7 +6015,14 @@ function computeScorecard(editor, grades) {
 
   function num(v) { return (v === '' || v === null || v === undefined) ? null : Number(v); }
   var avgPerDay = num(meta.avgVideosPerDay);
-  var targetDay = num(meta.targetPerDay);
+  // Target/day: a manual per-editor value wins; otherwise fall back to the filter's
+  // auto-suggested pace (Organic 1/day · Paid 3–4/day). targetIsAuto drives the "auto"
+  // pill + placeholder in the scorecard so it's clear where the number came from.
+  var manualTarget = num(meta.targetPerDay);
+  var manualOk = (manualTarget != null && !isNaN(manualTarget));
+  var suggested = (suggestedTarget != null && !isNaN(suggestedTarget)) ? suggestedTarget : null;
+  var targetDay = manualOk ? manualTarget : suggested;
+  var targetIsAuto = !manualOk && suggested != null;
   var hasOutput = (avgPerDay != null && !isNaN(avgPerDay) && targetDay != null && !isNaN(targetDay) && targetDay > 0);
 
   // Points per pillar (see the Notion "How Points Are Counted" table).
@@ -5926,7 +6036,7 @@ function computeScorecard(editor, grades) {
   return {
     editor: editor, total: total,
     brandRate: brandRate, qaRate: qaRate, ideas: ideas, capRate: capRate,
-    avgPerDay: avgPerDay, targetDay: targetDay, hasOutput: hasOutput,
+    avgPerDay: avgPerDay, targetDay: targetDay, targetIsAuto: targetIsAuto, hasOutput: hasOutput,
     ptsBrand: ptsBrand, ptsQa: ptsQa, ptsInnov: ptsInnov, ptsOut: ptsOut, ptsRev: ptsRev,
     composite: composite, rating: gradeRating(composite)
   };
@@ -5974,23 +6084,76 @@ function renderGradingView() {
   var sel = resolveGradingYM();
   var selYM = sel.ym, selYear = sel.year, selMonth = sel.month;
 
-  // Campaigns that have at least one video delivered in the selected month.
-  var campsInMonth = (STATE.campaigns || []).filter(function(c) {
-    return (STATE.assets || []).some(function(a) { return a.campaignId === c.id && assetPeriodYM(a) === selYM; });
+  // ── Paid/Organic + weekly filters ──
+  var gradingType = STATE.gradingType || 'all';           // 'all' | 'Paid Ads' | 'Organic'
+  function campMatchesType(c) {
+    if (!c) return false;
+    if (gradingType === 'all') return true;
+    return (c.type || DEFAULT_CAMPAIGN_TYPE) === gradingType;
+  }
+  function assetInMonthType(a) {
+    if (assetPeriodYM(a) !== selYM) return false;
+    return campMatchesType(findCampaignById(a.campaignId));
+  }
+
+  // Weeks (Mon-anchored) that actually have videos in the month+type scope, so the week
+  // filter only offers weeks with gradable work. Clamp a stale selection to "whole month".
+  var weekSet = {};
+  (STATE.assets || []).forEach(function(a) {
+    if (!assetInMonthType(a)) return;
+    var w = isoWeekStart(assetPeriodDate(a)); if (w) weekSet[w] = true;
   });
-  // Resolve the selected campaign — must be one that has videos this month.
+  var weeks = Object.keys(weekSet).sort();
+  var week = STATE.gradingWeek || null;
+  if (week && weeks.indexOf(week) < 0) week = null;
+  function inWeek(dateOrAsset, isDate) {
+    if (!week) return true;
+    var d = isDate ? dateOrAsset : assetPeriodDate(dateOrAsset);
+    return isoWeekStart(d) === week;
+  }
+
+  // Campaigns with ≥1 video in the month AND matching the paid/organic filter. The campaign
+  // dropdown stays month+type scoped (not week) so switching weeks doesn't reshuffle it.
+  var campsInMonth = (STATE.campaigns || []).filter(function(c) {
+    return campMatchesType(c) && (STATE.assets || []).some(function(a) { return a.campaignId === c.id && assetPeriodYM(a) === selYM; });
+  });
+  // Resolve the selected campaign — must be one that has videos this month for this filter.
   var campId = STATE.gradingCampaignId;
   if (!campsInMonth.some(function(c) { return String(c.id) === String(campId); })) {
     campId = campsInMonth.length ? campsInMonth[0].id : null;
   }
   var campSel = campId != null ? findCampaignById(campId) : null;
 
-  // This campaign's videos for the month, and this month's grades (all campaigns) for the scorecard.
+  // The selected campaign's videos for the month, scoped to the week filter (drives the
+  // grade table). Grades in month+type+week (all campaigns) drive the scorecard.
   var monthCampAssets = campSel ? (STATE.assets || []).filter(function(a) {
-    return a.campaignId === campSel.id && assetPeriodYM(a) === selYM;
+    return a.campaignId === campSel.id && assetPeriodYM(a) === selYM && inWeek(a);
   }).slice().sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); }) : [];
-  var monthGrades = gradesInYM(selYM).filter(function(g) { return !g.dismissed; });
-  var gradedThisCamp = monthCampAssets.filter(function(a) { var g = gradeForAsset(a.id); return g && !g.dismissed; }).length;
+  var scopedGrades = gradesInYM(selYM).filter(function(g) {
+    if (g.dismissed) return false;
+    if (gradingType !== 'all' && gradeCampaignType(g) !== gradingType) return false;
+    return inWeek(g.date, true);
+  });
+  var suggestedTarget = suggestedTargetForType(gradingType);
+
+  // Progress of a video list: how many carry a (non-dismissed) grade. Powers the hero ring.
+  function progressOf(list) {
+    var active = list.filter(function(a) { var g = gradeForAsset(a.id); return !(g && g.dismissed); });
+    var graded = active.filter(function(a) { var g = gradeForAsset(a.id); return g && !g.dismissed; }).length;
+    var total = active.length;
+    return { graded: graded, total: total, pct: total ? Math.round(graded / total * 100) : 0, complete: total > 0 && graded === total };
+  }
+  // Primary = the campaign list you're looking at (drives the ring + celebration).
+  var primary = progressOf(monthCampAssets);
+  // Month-wide (this filter + week, across all campaigns) = the secondary "big picture" stat.
+  var monthScopeAssets = (STATE.assets || []).filter(function(a) { return assetInMonthType(a) && inWeek(a); });
+  var monthProg = progressOf(monthScopeAssets);
+  var gradedThisCamp = primary.graded;
+
+  // Scope labels reused in a few places.
+  var typeLabel = gradingType === 'all' ? 'All types' : (gradingType === 'Paid Ads' ? 'Paid ads' : 'Organic');
+  var weekLabel = week ? weekRangeLabel(week) : 'Whole month';
+  var scopeNote = escapeHtml(sel.label) + ' · ' + typeLabel + (week ? ' · ' + escapeHtml(weekLabel) : '');
 
   // ── Header ──
   var header =
@@ -5999,8 +6162,9 @@ function renderGradingView() {
         '<h2 class="grading-title">Grading</h2>' +
         '<div class="grading-sub">' +
           (campSel ? escapeHtml(campSel.country + ' · ' + campSel.name) + ' · ' : '') +
-          '<b>' + escapeHtml(sel.label) + '</b>' +
-          (campSel ? ' · ' + gradedThisCamp + '/' + monthCampAssets.length + ' graded' : '') +
+          '<b>' + escapeHtml(sel.label) + '</b>' + ' · ' + escapeHtml(typeLabel) +
+          (week ? ' · ' + escapeHtml(weekLabel) : '') +
+          (campSel ? ' · ' + gradedThisCamp + '/' + primary.total + ' graded' : '') +
         '</div>' +
       '</div>' +
       '<div class="grading-top-actions">' +
@@ -6008,6 +6172,60 @@ function renderGradingView() {
         '<a class="run-btn" href="' + GRADING_FRAMEWORK_URL + '" target="_blank" rel="noopener" title="Open the KPI framework in Notion">↗ Framework</a>' +
       '</div>' +
     '</div>';
+
+  // ── Progress hero: a satisfying "finish the list" ring + streak, so grading feels like
+  // a daily quest to complete rather than a chore. Primary ring tracks the current
+  // campaign+week list; the side shows the shared streak and the month-wide big picture.
+  var hero = (function() {
+    var p = primary;
+    var C = 119.38; // 2·π·19 (ring radius 19)
+    var offset = C * (1 - (p.total ? p.graded / p.total : 0));
+    var msg, tone;
+    if (!campSel) { msg = campsInMonth.length ? 'Pick a campaign to start grading' : 'No ' + (gradingType === 'all' ? '' : typeLabel.toLowerCase() + ' ') + 'videos to grade in ' + escapeHtml(sel.label); tone = 'idle'; }
+    else if (p.total === 0) { msg = 'Nothing to grade in this list 👍'; tone = 'idle'; }
+    else if (p.complete) { msg = 'All caught up — nice work! 🎉'; tone = 'done'; }
+    else if (p.graded === 0) { msg = "Let’s grade — " + p.total + ' waiting'; tone = 'start'; }
+    else if (p.pct < 50) { msg = 'Nice start — keep going'; tone = 'go'; }
+    else { msg = 'Almost there — ' + (p.total - p.graded) + ' to go'; tone = 'go'; }
+
+    var s = STATE.gradingStreak || { count: 0, best: 0 };
+    var live = gradingStreakLive();
+    var streakN = Number(s.count) || 0;
+    var best = Number(s.best) || 0;
+    var streakHtml =
+      '<div class="gr-streak' + (live ? ' is-live' : '') + '" title="' +
+        (live ? 'Graded today — streak is alive' : (streakN > 0 ? 'Grade a video today to keep the streak alive' : 'Grade a video to start a streak')) + '">' +
+        '<span class="gr-streak-flame">🔥</span>' +
+        '<span class="gr-streak-n"><b>' + streakN + '</b> day' + (streakN === 1 ? '' : 's') + '</span>' +
+      '</div>' +
+      '<div class="gr-streak-best">' + (best > 0 ? 'best ' + best : (live ? '' : 'start your streak')) + '</div>';
+
+    var ring =
+      '<div class="gr-ring-wrap">' +
+        '<svg class="gr-ring" viewBox="0 0 44 44" aria-hidden="true">' +
+          '<circle class="gr-ring-bg" cx="22" cy="22" r="19"></circle>' +
+          '<circle class="gr-ring-fg" cx="22" cy="22" r="19" stroke-dasharray="' + C.toFixed(2) + '" stroke-dashoffset="' + offset.toFixed(2) + '"></circle>' +
+        '</svg>' +
+        '<div class="gr-ring-pct">' + (p.total ? p.pct + '<span>%</span>' : '–') + '</div>' +
+      '</div>';
+
+    return '<div class="gr-hero tone-' + tone + '">' +
+      ring +
+      '<div class="gr-hero-main">' +
+        '<div class="gr-hero-msg">' + msg + '</div>' +
+        '<div class="gr-hero-sub">' +
+          (campSel ? '<b>' + p.graded + '/' + p.total + '</b> graded in ' + escapeHtml(campSel.name) : escapeHtml(scopeNote)) +
+          ' · <span class="gr-hero-scope">' + escapeHtml(week ? weekLabel : sel.label + ' · ' + typeLabel) + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="gr-hero-side">' +
+        '<div class="gr-streak-block">' + streakHtml + '</div>' +
+        '<div class="gr-month-mini" title="Everything graded this month for the current filter">' +
+          'Month <b>' + monthProg.graded + '/' + monthProg.total + '</b>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  })();
 
   // ── Controls: Month · Year · Campaign ──
   var monthOpts = MONTHS_FULL.map(function(name, i) {
@@ -6032,6 +6250,22 @@ function renderGradingView() {
       return '<optgroup label="' + escapeHtml(co.code) + '">' + opts + '</optgroup>';
     }).join('');
   })();
+  // Paid/Organic segmented control.
+  var TYPE_TABS = [['all', 'All'], ['Paid Ads', 'Paid'], ['Organic', 'Organic']];
+  var typeSeg = '<div class="gr-seg" role="tablist" aria-label="Paid or organic">' +
+    TYPE_TABS.map(function(t) {
+      var active = gradingType === t[0];
+      return '<button type="button" class="gr-seg-btn' + (active ? ' is-active' : '') + '"' +
+        ' aria-pressed="' + active + '"' +
+        ' onclick="App.setGradingType(\'' + t[0].replace(/'/g, "\\'") + '\')">' + escapeHtml(t[1]) + '</button>';
+    }).join('') + '</div>';
+
+  // Week filter — whole month + one option per week that has videos in scope.
+  var weekOpts = '<option value=""' + (!week ? ' selected' : '') + '>Whole month</option>' +
+    weeks.map(function(w) {
+      return '<option value="' + w + '"' + (w === week ? ' selected' : '') + '>' + escapeHtml(weekRangeLabel(w)) + '</option>';
+    }).join('');
+
   var controls =
     '<div class="grading-form-card">' +
       '<div class="grading-form-grid">' +
@@ -6042,8 +6276,13 @@ function renderGradingView() {
         '<div class="grading-field grading-field-grow"><label class="form-label">Campaign</label>' +
           (campsInMonth.length
             ? '<select class="form-input" onchange="App.setGradingCampaign(this.value)">' + campOptsHtml + '</select>'
-            : '<div class="grading-controls-empty">No campaigns have videos delivered in ' + escapeHtml(sel.label) + '</div>') +
+            : '<div class="grading-controls-empty">No ' + escapeHtml(gradingType === 'all' ? '' : typeLabel.toLowerCase() + ' ') + 'campaigns have videos delivered in ' + escapeHtml(sel.label) + '</div>') +
         '</div>' +
+      '</div>' +
+      '<div class="grading-form-grid gr-filter-row">' +
+        '<div class="grading-field"><label class="form-label">Type</label>' + typeSeg + '</div>' +
+        '<div class="grading-field grading-field-grow"><label class="form-label">Week</label>' +
+          '<select class="form-input" onchange="App.setGradingWeek(this.value)">' + weekOpts + '</select></div>' +
       '</div>' +
     '</div>';
 
@@ -6060,19 +6299,27 @@ function renderGradingView() {
     var aid = "'" + String(a.id).replace(/'/g, "\\'") + "'";
     var graded = !!g;
     var dismissed = graded && g.dismissed;
-    var contentType = graded ? g.contentType : 'Net New';
+    var ver = assetVer(a);
+    var name = a.name + ((ver && a.name.indexOf(ver) < 0) ? ' ' + ver : '');
+    // Auto-detect Net New (N) vs Maintenance (OP) from the file name. For ungraded rows
+    // this becomes the default; for graded rows we surface an "auto" tag when the stored
+    // type still matches the name (so a manual override reads as intentional).
+    var detected = detectContentType(name);
+    var contentType = graded ? g.contentType : (detected || 'Net New');
+    var typeIsAuto = !!detected && contentType === detected;
     var brand = graded && g.brandPass, qa = graded && g.qaClean, idea = graded && g.newIdea;
     var manual = graded && g.roundsManual;
     var rounds = manual ? (Number(g.revisionRounds) || 0) : (a.revisionRounds || 0);
     var isAuto = !manual;
     var cap = REVISION_CAP[contentType];
     var within = rounds <= cap;
-    var ver = assetVer(a);
-    var name = a.name + ((ver && a.name.indexOf(ver) < 0) ? ' ' + ver : '');
+    var typeAutoTag = typeIsAuto
+      ? '<span class="grading-type-auto" title="Auto-detected from the file name (OP → Maintenance, N → Net New)">auto</span>'
+      : '';
     var typeSel = '<select class="grading-log-type" onchange="App.setAssetGradeField(' + aid + ',\'contentType\',this.value)">' +
       '<option value="Net New"' + (contentType === 'Net New' ? ' selected' : '') + '>Net New</option>' +
       '<option value="Maintenance"' + (contentType === 'Maintenance' ? ' selected' : '') + '>Maint.</option>' +
-    '</select>';
+    '</select>' + typeAutoTag;
     function chk(field, on, title) {
       return '<td class="grading-log-check"><input type="checkbox"' + (on ? ' checked' : '') +
         ' onchange="App.toggleAssetGradeField(' + aid + ',\'' + field + '\')" title="' + escapeHtml(title) + '"></td>';
@@ -6108,7 +6355,7 @@ function renderGradingView() {
     vidRows = '<tr><td colspan="9" class="grading-log-empty">' +
       (dismissedAssets.length && !showDismissed
         ? 'All videos here are dismissed (' + dismissedAssets.length + '). Use “Show dismissed”.'
-        : 'No videos in ' + escapeHtml(campSel.name) + ' for ' + escapeHtml(sel.label) + '.') +
+        : 'No videos in ' + escapeHtml(campSel.name) + ' for ' + escapeHtml(week ? weekLabel : sel.label) + '.') +
       '</td></tr>';
   } else {
     vidRows = assetsToRender.map(assetRowHtml).join('');
@@ -6120,8 +6367,9 @@ function renderGradingView() {
 
   var gradeList =
     '<div class="grading-section">' +
-      '<div class="grading-section-title">Graded Videos' +
-        (campSel ? ' <span class="grading-section-note">' + escapeHtml(campSel.name) + ' · ' + escapeHtml(sel.label) + '</span>' : '') +
+      '<div class="grading-section-title">Grade Videos' +
+        (campSel ? ' <span class="grading-section-note">' + escapeHtml(campSel.name) + ' · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>' : '') +
+        ' <span class="grading-type-hint" title="Type is auto-set from the file name: OP → Maintenance, N → Net New. Change it in the dropdown if the name is unusual.">✨ type auto-detected</span>' +
         dismissToggle +
       '</div>' +
       '<div class="grading-table-scroll grading-scroll-videos">' +
@@ -6137,8 +6385,11 @@ function renderGradingView() {
       '</div>' +
     '</div>';
 
-  // ── Editor Scorecard (rolls up ALL of the selected month's grades, at the bottom) ──
-  var cards = GRADING_EDITORS.map(function(e) { return computeScorecard(e, monthGrades); });
+  // ── Editor Scorecard (rolls up the selected month's grades within the active filters) ──
+  var cards = GRADING_EDITORS.map(function(e) { return computeScorecard(e, scopedGrades, suggestedTarget); });
+  var targetAutoTitle = gradingType === 'Organic'
+    ? 'Auto target for Organic: 1 Net New/day'
+    : (gradingType === 'Paid Ads' ? 'Auto target for Paid: 3–4/day (OP or N)' : '');
   var scoreRows = cards.map(function(c) {
     var e = c.editor;
     var meta = (STATE.scorecardMeta && STATE.scorecardMeta[e]) || {};
@@ -6148,9 +6399,14 @@ function renderGradingView() {
       return '<td class="grading-sc-num" title="' + escapeHtml(title) + '"><b>' + fmt1(pts) + '</b><span class="grading-sc-sub">' + sub + '</span></td>';
     }
     var outCell = c.hasOutput
-      ? cell(c.ptsOut, fmt1(c.avgPerDay) + '/' + fmt1(c.targetDay), 'Output: ' + fmt1(c.avgPerDay) + ' ÷ ' + fmt1(c.targetDay) + ' target')
-      : '<td class="grading-sc-num grading-sc-empty" title="Set Avg/Day + Target/Day to score output">—<span class="grading-sc-sub">set below</span></td>';
+      ? cell(c.ptsOut, fmt1(c.avgPerDay) + '/' + fmt1(c.targetDay) + (c.targetIsAuto ? ' auto' : ''), 'Output: ' + fmt1(c.avgPerDay) + ' ÷ ' + fmt1(c.targetDay) + ' target' + (c.targetIsAuto ? ' (auto from ' + typeLabel + ')' : ''))
+      : '<td class="grading-sc-num grading-sc-empty" title="Set Avg/Day (Target auto-fills from the Paid/Organic filter)">—<span class="grading-sc-sub">set Avg/Day</span></td>';
     var rd = c.rating;
+    // Target input: a manual value wins; when blank the filter's auto target shows as a
+    // placeholder + "auto" pill and still scores Output. Clearing the box reverts to auto.
+    var tgtIsAutoShown = c.targetIsAuto && tgtVal === '';
+    var tgtPlaceholder = c.targetIsAuto ? fmt1(c.targetDay) : '—';
+    var tgtAutoPill = tgtIsAutoShown ? '<span class="grading-rounds-tag is-auto" title="' + escapeHtml(targetAutoTitle) + '">auto</span>' : '';
     return '<tr>' +
       '<td class="grading-sc-editor"><div class="editor-avatar av-' + escapeHtml(e) + '">' + escapeHtml(editorInitials(e)) + '</div><span>' + escapeHtml(e) + '</span></td>' +
       '<td class="grading-sc-total">' + c.total + '</td>' +
@@ -6160,7 +6416,7 @@ function renderGradingView() {
       outCell +
       cell(c.ptsRev, pct(c.capRate), 'Within revision cap ' + pct(c.capRate) + ' → ' + fmt1(c.ptsRev) + '/15') +
       '<td class="grading-sc-input"><input type="number" class="grading-mini-input" min="0" step="0.1" value="' + escapeHtml(String(avgVal)) + '" placeholder="—" onchange="App.setScorecardMeta(\'' + escapeHtml(e) + '\',\'avgVideosPerDay\',this.value)" title="Avg videos delivered per day (you set this)"></td>' +
-      '<td class="grading-sc-input"><input type="number" class="grading-mini-input" min="0" step="0.5" value="' + escapeHtml(String(tgtVal)) + '" placeholder="—" onchange="App.setScorecardMeta(\'' + escapeHtml(e) + '\',\'targetPerDay\',this.value)" title="Daily target (1 Net New / 3–4 Maintenance)"></td>' +
+      '<td class="grading-sc-input"><input type="number" class="grading-mini-input' + (tgtIsAutoShown ? ' is-auto' : '') + '" min="0" step="0.5" value="' + escapeHtml(String(tgtVal)) + '" placeholder="' + tgtPlaceholder + '" onchange="App.setScorecardMeta(\'' + escapeHtml(e) + '\',\'targetPerDay\',this.value)" title="Daily target. Auto: Organic 1/day · Paid 3–4/day. Type to override.">' + tgtAutoPill + '</td>' +
       '<td class="grading-sc-composite"><span class="grading-composite-num">' + fmt1(c.composite) + '</span><span class="grading-composite-max">/100</span></td>' +
       '<td class="grading-sc-rating"><span class="grading-rating grading-rating-' + rd.key + '">' + rd.dot + ' ' + rd.label + '</span></td>' +
     '</tr>';
@@ -6168,7 +6424,7 @@ function renderGradingView() {
 
   var scorecard =
     '<div class="grading-section">' +
-      '<div class="grading-section-title">Editor Scorecard <span class="grading-section-note">' + escapeHtml(sel.label) + ' · all campaigns</span></div>' +
+      '<div class="grading-section-title">Editor Scorecard <span class="grading-section-note">' + scopeNote + (gradingType === 'all' && !week ? ' · all campaigns' : '') + '</span></div>' +
       '<div class="grading-table-scroll grading-scroll-scorecard">' +
       '<table class="grading-scorecard">' +
         '<thead><tr>' +
@@ -6186,7 +6442,19 @@ function renderGradingView() {
       '</div>' +
     '</div>';
 
-  return '<div class="grading-wrap">' + header + controls + gradeList + scorecard + '</div>';
+  // Celebrate the moment a campaign list hits 100% — but only on the false→true edge,
+  // never on a plain re-render or when navigating to an already-complete list. Deferred so
+  // it runs after the DOM is painted (render() builds a string; side effects belong after).
+  (function(p) {
+    var sig = selYM + '|' + String(campId) + '|' + (week || '') + '|' + gradingType;
+    setTimeout(function() {
+      if (GradingFx.sig !== sig) { GradingFx.sig = sig; GradingFx.wasComplete = p.complete; return; }
+      if (p.complete && !GradingFx.wasComplete && p.total > 0) fireGradingCelebration(p.total);
+      GradingFx.wasComplete = p.complete;
+    }, 0);
+  })(primary);
+
+  return '<div class="grading-wrap">' + header + hero + controls + gradeList + scorecard + '</div>';
 }
 
 function renderNotificationsView() {
@@ -11306,6 +11574,11 @@ var App = {
   setGradingYear: function(y) { STATE.gradingYear = y || null; render(); },
   setGradingCampaign: function(id) { STATE.gradingCampaignId = id || null; render(); },
   setGradingShowDismissed: function(on) { STATE.gradingShowDismissed = !!on; render(); },
+  // Paid/Organic filter. Switching filters may make the current campaign invalid — clear
+  // it so renderGradingView re-resolves to the first campaign matching the new filter.
+  setGradingType: function(t) { STATE.gradingType = (t === 'Paid Ads' || t === 'Organic') ? t : 'all'; STATE.gradingCampaignId = null; render(); },
+  // Weekly filter. Empty string ('Whole month') clears it.
+  setGradingWeek: function(w) { STATE.gradingWeek = w || null; render(); },
 
   // Get-or-create the single grade record linked to a campaign video. Grading a video
   // inline (ticking Brand/QA/Idea, setting type/rounds) lazily creates it the first time.
@@ -11321,7 +11594,7 @@ var App = {
       id: newLocalId('g'), assetId: assetId, video: name,
       editor: a.editor || GRADING_EDITORS[0],
       date: assetPeriodDate(a) || todayISO(),  // buckets the grade into the video's delivery month
-      contentType: 'Net New',
+      contentType: detectContentType(name) || 'Net New',  // OP → Maintenance, N → Net New
       brandPass: false, qaClean: false, newIdea: false,
       roundsManual: false, revisionRounds: (a.revisionRounds || 0),
       dismissed: false, createdAt: now, createdBy: Auth.user ? Auth.user.displayName : null, updatedAt: now
@@ -11333,12 +11606,14 @@ var App = {
   toggleAssetGradeField: function(assetId, field) {
     var g = this.ensureGradeForAsset(assetId); if (!g) return;
     g[field] = !g[field]; g.updatedAt = Date.now();
+    bumpGradingStreak();
     saveState(); render();
   },
   setAssetGradeField: function(assetId, field, value) {
     var g = this.ensureGradeForAsset(assetId); if (!g) return;
     if (field === 'revisionRounds') { value = Math.max(0, parseInt(value, 10) || 0); g.roundsManual = true; }
     g[field] = value; g.updatedAt = Date.now();
+    bumpGradingStreak();
     saveState(); render();
   },
   resetAssetGradeRoundsAuto: function(assetId) {
@@ -11423,6 +11698,7 @@ var App = {
     };
     if (!Array.isArray(STATE.grades)) STATE.grades = [];
     STATE.grades.push(grade);
+    bumpGradingStreak();
     saveState();
     render();
     toast('Graded “' + video + '” for ' + editor, 'success');
@@ -11512,7 +11788,7 @@ var App = {
       '<div class="grading-guide">' +
         '<p class="grading-guide-lead">Grading a video = making <b>5 clean judgment calls</b> in the form. Everything else (rates, points, composite, rating) calculates itself.</p>' +
         '<ol class="grading-guide-steps">' +
-          '<li><b>Content Type</b> — <i>“Have we made this style before?”</i> No → <b>Net New</b> (cap ≤ 4 rounds). Yes → <b>Maintenance</b> (cap ≤ 2 rounds). This sets the revision cap.</li>' +
+          '<li><b>Content Type</b> — <span class="grading-guide-owner">auto</span> read from the file name: <b>N</b> (e.g. <code>TCG_1N_…</code>) → <b>Net New</b> (cap ≤ 4), <b>OP</b> (e.g. <code>TCG_OP_…</code>) → <b>Maintenance</b> (cap ≤ 2). Override in the dropdown if a name is unusual. This sets the revision cap.</li>' +
           '<li><b>Brand Pass ✅</b> <span class="grading-guide-owner">Avy · 25 pts</span> — tick <u>only</u> if it passed brand on the <b>first</b> submission: right sticker size/placement, fonts, colours, logo. Any brand fix sent back → leave unticked.</li>' +
           '<li><b>QA Clean ✅</b> <span class="grading-guide-owner">Elsa · 30 pts</span> — tick if there were <b>no technical issues at all</b>: clean transitions, balanced audio (BGM/SFX), no glitches, strong export. One thing off → unticked. Keep this separate from brand.</li>' +
           '<li><b>Revision Rounds</b> — pick the video from the campaign dropdown and this <b>auto-fills</b> from its revision history (every time it hit “Needs Revisions”, PM or Cat Head). Type over it to override; ↺ reverts to auto. “Within cap” is worked out for you.</li>' +
@@ -11526,7 +11802,7 @@ var App = {
             '<li><b>New Idea ✅</b> → reserve it for “went beyond the brief and it worked”. Unsure? Leave it off.</li>' +
           '</ul>' +
         '</div>' +
-        '<p class="grading-guide-foot">Output (15 pts) isn’t per-video — set each editor’s <b>Avg/Day</b> and <b>Target/Day</b> in the scorecard. Full rubric lives in the ' +
+        '<p class="grading-guide-foot">Output (15 pts) isn’t per-video — set each editor’s <b>Avg/Day</b>; <b>Target/Day</b> auto-fills from the Paid/Organic filter (<b>Organic</b> 1 Net New/day · <b>Paid</b> 3–4/day for OP or N) and can be overridden. Use the <b>Type</b> and <b>Week</b> filters up top to scope the scorecard. Full rubric lives in the ' +
           '<a href="' + GRADING_FRAMEWORK_URL + '" target="_blank" rel="noopener">Notion framework ↗</a>.</p>' +
       '</div>' +
       '<div class="modal-actions">' +
