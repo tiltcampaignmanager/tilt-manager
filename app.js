@@ -5970,6 +5970,96 @@ function fireGradingCelebration(total) {
 // never on a re-render or when you merely navigate to an already-complete scope.
 var GradingFx = { sig: null, wasComplete: false };
 
+// ===================== GAME FEEL (juicy clicks) =====================
+// A tiny dependency-free "game feel" layer inspired by web games: tactile button
+// presses (CSS), a click ripple on the prominent buttons, reward pops + sparkles when
+// you tick a grading pass, and a combo counter for rapid grading. Everything is rendered
+// into a fixed body-level #fx-layer so it survives the render() that rebuilds the tab on
+// every change, and everything is disabled under prefers-reduced-motion.
+var GameFx = {
+  _combo: 0,
+  _comboTs: 0,
+  _reduce: function() { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); },
+  _layer: function() {
+    var el = document.getElementById('fx-layer');
+    if (!el) { el = document.createElement('div'); el.id = 'fx-layer'; el.className = 'fx-layer'; document.body.appendChild(el); }
+    return el;
+  },
+  _pop: function(el, ms) { var L = this._layer(); L.appendChild(el); setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, ms); },
+  // Floating "+label" that rises and fades, colour-keyed to the pillar.
+  reward: function(x, y, label, kind) {
+    if (this._reduce()) return;
+    var t = document.createElement('div');
+    t.className = 'fx-reward fx-reward-' + (kind || 'pts');
+    t.textContent = label;
+    t.style.left = x + 'px'; t.style.top = y + 'px';
+    this._pop(t, 1000);
+    this.sparkle(x, y, kind);
+  },
+  // Radial burst of little dots (index-based angles — no RNG needed).
+  sparkle: function(x, y, kind) {
+    if (this._reduce()) return;
+    var L = this._layer(), n = 8;
+    for (var i = 0; i < n; i++) {
+      var s = document.createElement('i');
+      s.className = 'fx-spark fx-spark-' + (kind || 'pts');
+      var ang = (Math.PI * 2 * i) / n + (i % 2 ? 0.35 : 0);
+      var dist = 20 + (i % 3) * 9;
+      s.style.left = x + 'px'; s.style.top = y + 'px';
+      s.style.setProperty('--dx', (Math.cos(ang) * dist).toFixed(1) + 'px');
+      s.style.setProperty('--dy', (Math.sin(ang) * dist).toFixed(1) + 'px');
+      s.style.animationDelay = (i * 6) + 'ms';
+      this._pop(s, 760);
+    }
+  },
+  // Rapid-grading combo — chains while you keep grading within the window.
+  bumpCombo: function(x, y) {
+    if (this._reduce()) return;
+    var now = Date.now();
+    this._combo = (now - this._comboTs < 2600) ? this._combo + 1 : 1;
+    this._comboTs = now;
+    if (this._combo < 2) return;
+    var t = document.createElement('div');
+    t.className = 'fx-combo';
+    t.textContent = 'Combo ×' + this._combo + (this._combo >= 5 ? ' 🔥' : '');
+    t.style.left = x + 'px'; t.style.top = (y - 26) + 'px';
+    this._pop(t, 900);
+  },
+  // Material-style ripple from the click point inside a button.
+  ripple: function(btn, ev) {
+    if (this._reduce()) return;
+    var r = btn.getBoundingClientRect();
+    var d = Math.max(r.width, r.height) * 1.7;
+    var rip = document.createElement('span');
+    rip.className = 'fx-ripple';
+    rip.style.width = rip.style.height = d + 'px';
+    rip.style.left = (ev.clientX - r.left - d / 2) + 'px';
+    rip.style.top = (ev.clientY - r.top - d / 2) + 'px';
+    btn.appendChild(rip);
+    setTimeout(function() { if (rip.parentNode) rip.parentNode.removeChild(rip); }, 600);
+  },
+  init: function() {
+    if (this._inited || typeof document === 'undefined') return;
+    this._inited = true;
+    var self = this;
+    // Reward + combo when a grading pass checkbox is turned ON. Capture phase so we read
+    // the checkbox's on-screen position BEFORE its inline onchange triggers a re-render.
+    document.addEventListener('change', function(e) {
+      var t = e.target;
+      if (!t || !t.matches || !t.matches('.grading-log-check input') || !t.checked) return;
+      var r = t.getBoundingClientRect();
+      var x = r.left + r.width / 2, y = r.top + r.height / 2;
+      self.reward(x, y, t.getAttribute('data-reward') || '✓', t.getAttribute('data-kind') || 'pts');
+      self.bumpCombo(x, y);
+    }, true);
+    // Ripple on the prominent buttons.
+    document.addEventListener('click', function(e) {
+      var btn = e.target && e.target.closest && e.target.closest('.run-btn, .submit-btn, .gr-seg-btn, .grading-play-btn');
+      if (btn && !btn.disabled) self.ripple(btn, e);
+    }, true);
+  }
+};
+
 // The effective revision-round count for a grade. When the grade is linked to a
 // tracked campaign video (assetId) and hasn't been manually overridden, this reads
 // LIVE from that asset's auto-counted revisionRounds — so the scorecard reflects the
@@ -6322,7 +6412,10 @@ function renderGradingView() {
       '<option value="Maintenance"' + (contentType === 'Maintenance' ? ' selected' : '') + '>Maint.</option>' +
     '</select>' + typeAutoTag;
     function chk(field, on, title) {
+      var reward = field === 'brandPass' ? 'Brand ✓' : field === 'qaClean' ? 'QA ✓' : field === 'newIdea' ? 'New idea ✓' : '✓';
+      var kind = field === 'brandPass' ? 'brand' : field === 'qaClean' ? 'qa' : 'idea';
       return '<td class="grading-log-check"><input type="checkbox"' + (on ? ' checked' : '') +
+        ' data-reward="' + reward + '" data-kind="' + kind + '"' +
         ' onchange="App.toggleAssetGradeField(' + aid + ',\'' + field + '\')" title="' + escapeHtml(title) + '"></td>';
     }
     var roundsTag = isAuto
@@ -15423,3 +15516,4 @@ var Bridge = (function () {
 // the sign-in overlay shows until the user authenticates.
 Auth.init();
 Bridge.init();
+GameFx.init();
