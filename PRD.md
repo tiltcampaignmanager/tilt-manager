@@ -183,12 +183,16 @@ Each value: `{ items: [...], firstQueuedAt: timestamp | null }`.
 - `STATE.dailyThreadHistory` — last 7 archived thread URLs per editor.
 - `STATE.catHeadDailyThreads` — per-category daily thread, keyed by category name. Same shape as `dailyThreads`.
 - `STATE.catHeadDailyThreadHistory` — last 7 archived thread URLs per category.
+- `STATE.grades[]` — one grade row per graded asset (§5.8). Shape: `{ id, assetId, video, editor, date, contentType ('Net New' | 'Maintenance'), brandPass, qaClean, newIdea, revisionRounds, roundsManual, dismissed, createdAt/By, updatedAt }`. Persisted to Firestore.
+- `STATE.scorecardMeta` — `{ editor: { avgVideosPerDay, targetPerDay } }` for the scorecard's Output pillar. Persisted.
+- `STATE.gradingStreak` — `{ last (UK date), count, best }` shared grading streak. Persisted.
+- Grading UI filters (per-user, **not** synced): `gradingYear`, `gradingMonth`, `gradingCampaignId`, `gradingType` (`'all' | 'Paid Ads' | 'Organic'`), `gradingWeek` (Monday ISO or null), `gradingShowDismissed`.
 
 ---
 
 ## 5. Screens / Tabs
 
-All six tabs are drag-reorderable in the topbar; order is persisted.
+All tabs are drag-reorderable in the topbar; order is persisted.
 
 ### 5.1 Campaigns (default)
 - **Sidebar**: countries grouped, sub-campaigns underneath. Compact toggle (110px / 280px). A **global search bar** at the top of the sidebar searches asset names across all campaigns — results show the flag, asset name, and campaign name; clicking a result navigates to the campaign and flashes the asset row. Month filter dropdown filters campaigns by whether any of their assets has `estDelivery` in that month. Campaigns with `done = true` display with a **green left accent border**, light green background tint, and dimmed name text. Below each country section (in full mode), two side-by-side buttons: **+ Add Campaign** and **⬇ Import** — both always visible regardless of whether the country is expanded.
@@ -249,6 +253,28 @@ A lightweight brief-intake form for content leads to hand off work to the creati
 - **Export backup** — downloads a full JSON snapshot serialised from live `STATE` (not from any cache).
 - **Restore from backup** — picks a previously exported JSON file, applies it directly to `STATE`, and uploads to Firestore immediately. No page reload required.
 - Firestore migration helpers.
+
+### 5.8 Grading (Editor KPI Scorecard)
+Implements the Notion "Editing Team KPI Framework": every delivered video is graded across four pillars and each editor rolls up to one composite **/100** plus a rating band. Grade rows live in `STATE.grades` (one per asset); the scorecard aggregates them per editor. Editors graded: **Zidni, Sharm, Patty** (same set as the Daily Log; Elsa/Seller excluded). `renderGradingView()`.
+
+- **Header**: title, a scope subline (`campaign · month · type · week · N/M graded`), a **📘 How to grade** guide modal, and a **↗ Framework** link to the Notion rubric.
+- **Progress hero** — the "make it fun" surface:
+  - A **completion ring** for the current campaign+week list (graded / total) with an encouraging message that shifts with progress.
+  - A **shared grading streak** — 🔥 consecutive UK days on which grading happened (current + best); the flame is lit when today counts, dimmed as a nudge otherwise (`bumpGradingStreak`).
+  - A month-wide **Month N/M** mini-stat for the current filter.
+  - At 100% the hero turns green ("All caught up!") and fires a **confetti burst + toast** — once, on the false→true edge only (guarded by `GradingFx`), never on a plain re-render or when navigating to an already-complete list.
+- **Filters** (all per-user, not synced): **Month · Year · Campaign**, plus a **Paid/Organic segmented control** (All · Paid · Organic) and a **Week dropdown** (Whole month + one option per week that has videos in scope). Type and Week scope the campaign list, grade table, and scorecard. The Week filter also **narrows the Campaign dropdown** to campaigns with videos in the chosen week. Changing the Type filter clears the selected campaign so it re-resolves to the first match.
+- **Grade Videos table** (selected campaign's videos for the month/week): `Video | Editor | Type | Brand | QA | Rounds | Cap | Idea | Actions`.
+  - **Type** (Net New / Maintenance) is **auto-detected from the file name** via `detectContentType()`: the marker token `…_1N_…`/`…_2N_…` → **Net New**, `…_OP_…`/`…_IOP_…`/`…_2OP_…` → **Maintenance**. Shows an "auto" tag; overridable in the dropdown. This sets the revision cap.
+  - **Rounds** auto-fills live from the asset's `revisionRounds` (Needs-Revisions kickbacks); type to override (pins manual), ↺ reverts to auto.
+  - **Cap** pill ✓/✗ vs the content-type cap (Net New ≤ 4, Maintenance ≤ 2).
+  - **Brand / QA / Idea** are the three judgment-call checkboxes. Ticking any one lazily creates the grade (`ensureGradeForAsset`) with the auto-detected type. Owners: Brand (Avy), QA + Idea (Elsa).
+  - **Actions**: ▶ preview (opens the in-tracker video modal), ⊘ dismiss / ↩ restore (exclude/include from the scorecard), 🗑 clear grade.
+- **Editor Scorecard** (rolls up all in-scope grades): per editor — videos count, pillar points (**Brand 25 / QA 30 / Innovation 15 / Output 15 / Revisions 15**), Avg/Day + Target/Day inputs, composite **/100**, and a rating band (🟢 Excellent ≥90 · 🟡 Solid ≥75 · 🟠 Needs Work ≥60 · 🔴 At Risk <60).
+  - **Output** = `min(15, avgPerDay ÷ targetPerDay × 15)`. **Target/Day auto-fills from the Paid/Organic filter**: **Organic → 1** (a Net New is ~a day's work), **Paid → 3.5** (3–4/day for OP or N). Shown as an "auto" placeholder/pill; a typed value overrides it, clearing reverts to auto. `computeScorecard(editor, grades, suggestedTarget)`.
+- **Game feel** — a lightweight, dependency-free "juicy clicks" layer (`GameFx`), all disabled under `prefers-reduced-motion`: ticking a pass floats a colour-coded **reward label + sparkle burst** from the checkbox; grading several videos in quick succession chains a **Combo ×N** chip (🔥 at ×5+); the prominent buttons get a **click ripple** + **tactile depress**; the hero **lifts on hover**. All FX render into a fixed body-level `#fx-layer` so they survive the tab's `render()`.
+
+Bucketing: a grade's period = the video's delivery month (`estDelivery || dateApproved`); its week = `isoWeekStart` of that date. Helpers: `gradeRounds`, `gradeWithinCap`, `gradeRating`, `gradeCampaignType`, `suggestedTargetForType`.
 
 ---
 
@@ -484,6 +510,8 @@ A separate import modal handles Italy-specific CSV files, which use a different 
 ---
 
 ## 9.5 Bug Fixes Log
+
+- **Grading tab — filters, auto-detection, and game feel** (§5.8): (1) Added a **Paid/Organic** segmented filter (`gradingType`) and a **weekly** filter (`gradingWeek`) that scope the campaign dropdown, grade table, and scorecard; the week filter also narrows the Campaign dropdown to campaigns with videos in that week. (2) **Auto-detects content type** from the file name via `detectContentType()` — the `N` marker → Net New, the `OP`/`IOP` marker → Maintenance — used as the row default and when creating a grade; overridable, with an "auto" tag. (3) **Target/Day auto-fills** from the filter (Organic 1/day · Paid 3.5/day for OP or N) via `suggestedTargetForType()`, feeding the Output pillar; a manual value overrides, clearing reverts to auto. (4) A **progress hero** (completion ring + encouraging copy), a **shared grading streak** (`STATE.gradingStreak`, persisted), a month-wide mini-stat, and a **confetti + toast celebration** at 100% (fires only on the false→true edge, guarded by `GradingFx`). (5) A **game-feel layer** (`GameFx`) — reward pops + sparkle bursts on ticking a pass, a rapid-grade combo counter, button click ripples + tactile press, and a hero hover-lift — rendered into a body-level `#fx-layer` and fully gated behind `prefers-reduced-motion`. (6) A **▶ video-preview button** was added to each grading row (opens the in-tracker modal) and **removed** from the Campaigns asset-row actions.
 
 - **Category color crash on import**: Categories auto-created by CSV import were missing the `color` sub-object (`{ bg, fg }`) required by `categoryColor()` and `renderConfigView`. Fixed in three places: `findOrCreateCategory` now sets `color`, `categoryColor()` falls back to top-level `bg`/`fg`, and both `loadState` and `applySnapshot` (Firestore sync path) backfill `color` on any legacy categories that lack it.
 - **CSV video link not imported**: The `Video` column was parsed but silently ignored. Fixed by adding `getCol()` — a case-insensitive, prefix-matching column lookup helper — used for `Final Video`/`Video` and `Editing Brief`/`Brief` across all import paths. Prefix matching means `Final Video (Frame.io Link)` correctly resolves to `finalVideo`. Duplicate assets now also backfill `finalVideo` if the field was previously empty. Import preview now shows a green/amber indicator confirming whether a video link column was detected before the user clicks Import.
