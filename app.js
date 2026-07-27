@@ -4472,7 +4472,7 @@ function renderCampaignsView() {
             return '<div class="cat-head-cell">' + nameHtml + renderEditableCell(a, 'categoryHeadQc') + '</div>';
           })() + '</td>' +
           '<td>' + renderEditableCell(a, 'chDateApproved') + '</td>') +
-        '<td><div class="row-actions"><button class="action-btn action-btn-play" onclick="App.previewVideo(\'' + a.id + '\')" title="Preview video">▶</button><button class="action-btn" onclick="App.editAssetById(\'' + a.id + '\')" title="Open edit modal">Edit</button><button class="action-btn" onclick="App.duplicateAsset(\'' + a.id + '\')" title="Duplicate this row">Dup</button><button class="action-btn" onclick="App.openAdReport(\'' + a.id + '\')" title="Open ad report in ForceStaff">Report</button>' + (roleAtLeast('admin') ? '<button class="action-btn del-btn" onclick="App.deleteAsset(\'' + a.id + '\')" title="Delete this row">Del</button>' : '') + '</div></td>' +
+        '<td><div class="row-actions"><button class="action-btn" onclick="App.editAssetById(\'' + a.id + '\')" title="Open edit modal">Edit</button><button class="action-btn" onclick="App.duplicateAsset(\'' + a.id + '\')" title="Duplicate this row">Dup</button><button class="action-btn" onclick="App.openAdReport(\'' + a.id + '\')" title="Open ad report in ForceStaff">Report</button>' + (roleAtLeast('admin') ? '<button class="action-btn del-btn" onclick="App.deleteAsset(\'' + a.id + '\')" title="Delete this row">Del</button>' : '') + '</div></td>' +
       '</tr>';
   }
 
@@ -6112,10 +6112,11 @@ function renderGradingView() {
     return isoWeekStart(d) === week;
   }
 
-  // Campaigns with ≥1 video in the month AND matching the paid/organic filter. The campaign
-  // dropdown stays month+type scoped (not week) so switching weeks doesn't reshuffle it.
+  // Campaigns with ≥1 video matching the paid/organic filter in the selected month AND
+  // week. The week filter narrows the dropdown too, so it only offers campaigns that
+  // actually have gradable videos in the chosen week.
   var campsInMonth = (STATE.campaigns || []).filter(function(c) {
-    return campMatchesType(c) && (STATE.assets || []).some(function(a) { return a.campaignId === c.id && assetPeriodYM(a) === selYM; });
+    return campMatchesType(c) && (STATE.assets || []).some(function(a) { return a.campaignId === c.id && assetPeriodYM(a) === selYM && inWeek(a); });
   });
   // Resolve the selected campaign — must be one that has videos this month for this filter.
   var campId = STATE.gradingCampaignId;
@@ -6327,7 +6328,10 @@ function renderGradingView() {
     var roundsTag = isAuto
       ? '<span class="grading-rounds-tag is-auto" title="Auto from this video’s revision history (Needs Revisions kickbacks)">auto</span>'
       : '<button class="grading-rounds-revert" onclick="App.resetAssetGradeRoundsAuto(' + aid + ')" title="Revert to auto (live from revision history)">↺</button>';
-    var actions = dismissed
+    // ▶ preview opens the same in-tracker video modal used elsewhere, so you can watch
+    // the cut while grading without leaving the tab.
+    var actions = '<button class="grading-play-btn" onclick="App.previewVideo(' + aid + ')" title="Preview video">▶</button>';
+    actions += dismissed
       ? '<button class="grading-restore-btn" onclick="App.restoreAssetVideo(' + aid + ')" title="Restore — count it again">↩</button>'
       : '<button class="grading-dismiss-btn" onclick="App.dismissAssetVideo(' + aid + ')" title="Dismiss — exclude from the scorecard">⊘</button>';
     if (graded) actions += '<button class="grading-del-btn" onclick="App.deleteAssetGrade(' + aid + ')" title="Clear this video’s grade">🗑</button>';
