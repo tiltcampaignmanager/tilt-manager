@@ -1623,6 +1623,10 @@ var STATE = {
   // run, and the best run ever. Kept as data (persisted) so the "don't break the chain"
   // nudge survives reloads and is visible to whoever grades. See bumpGradingStreak.
   gradingStreak: { last: null, count: 0, best: 0 },
+  // Editor Stats tab: which editor's wrap card is being viewed. Editors see their own
+  // record by default (resolved via emailToEditor); PMs/admins/cat-heads pick from a
+  // list. Persisted so the choice survives reloads.
+  editorStatsSelected: null,
 
   countries: [
     { code: 'UK', name: 'United Kingdom' },
@@ -4055,9 +4059,10 @@ var TAB_DEFS = {
   automations:      { label: 'Automations' },
   reporting:        { label: 'Reporting' },
   content:          { label: 'Content' },
+  editorStats:      { label: 'Editor Stats' },
   config:           { label: 'Config' }
 };
-var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'log', 'editingCalendar', 'grading', 'automations', 'reporting', 'content', 'config'];
+var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'log', 'editingCalendar', 'grading', 'editorStats', 'automations', 'reporting', 'content', 'config'];
 
 // Role-based tab visibility. Editors and PMs share the same day-to-day set
 // (Campaigns → Reporting, plus Notifications). Cat Head and Content Lead can open
@@ -4065,10 +4070,10 @@ var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'lo
 // gated by roleAtLeast('admin') inside Config/Automations.
 // Tab visibility is also enforced server-side in Phase D via Firestore rules on
 // the documents these tabs touch (config/app and the users collection).
-var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'automations', 'reporting', 'content', 'config'];
+var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'editorStats', 'notifications', 'automations', 'reporting', 'content', 'config'];
 var ROLE_TAB_VISIBILITY = {
-  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
-  pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
+  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'editorStats', 'notifications', 'reporting', 'content'],
+  pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'editorStats', 'notifications', 'reporting', 'content'],
   catHead:     ALL_TABS.slice(),
   contentLead: ALL_TABS.slice(),
   admin:       ALL_TABS.slice()
@@ -6124,6 +6129,297 @@ function maybeFireCatQueueEmpty() {
     if (typeof fireGradingCelebration === 'function') fireGradingCelebration(prevCount);
     if (typeof toast === 'function') toast('🎉 Cat Heads Review — queue cleared', 'success');
   }
+}
+
+// ===================== EDITOR STATS (Strava-for-editors) =====================
+// Personal wrap card + leaderboard + badges — reuses countApprovedInRange (1850),
+// getThisWeekRange (1729), getEditorDailyTarget (1779), .gr-hero visual grammar
+// (styles.css:1536+). Slice 1 ships the wrap card only; leaderboard and badges
+// stack on top of these primitives.
+
+// Editors who show up in the tab. Same roster as Daily Log + Grading (the
+// full-time internal editors). Add Elsa here if she wants a wrap card too.
+var EDITOR_STATS_EDITORS = DAILY_LOG_EDITORS.slice();
+
+// Editor name → common email prefixes we accept. Auth exposes Google email
+// (e.g. patty@tilt.app) but STATE uses display names. Kept as a bidirectional
+// map so we can also render "yourself" chips. Extend when new editors join.
+var EDITOR_EMAILS = {
+  Zidni: ['zidni'],
+  Sharm: ['sharm'],
+  Patty: ['patty'],
+  Elsa:  ['elsa'],
+  Seller: []
+};
+function emailToEditor(email) {
+  if (!email) return null;
+  var local = String(email).toLowerCase().split('@')[0];
+  var found = null;
+  Object.keys(EDITOR_EMAILS).forEach(function(name) {
+    if (found) return;
+    var aliases = EDITOR_EMAILS[name] || [];
+    if (aliases.indexOf(local) >= 0) found = name;
+  });
+  return found;
+}
+
+// The editor the signed-in user "is" — for auto-selecting their wrap card.
+// Returns null for PMs/admins/cat-heads (they pick from the roster).
+function currentEditorFromAuth() {
+  if (typeof Auth === 'undefined' || !Auth.user) return null;
+  return emailToEditor(Auth.user.email);
+}
+
+// Sorted, deduped list of UK-date strings on which the editor had at least one
+// Approved video (uses asset.dateApproved). Feeds streak + Speed Demon + rank.
+function perEditorApprovalDates(editor) {
+  var set = Object.create(null);
+  STATE.assets.forEach(function(a) {
+    if (a.status !== 'Approved') return;
+    if (!a.dateApproved) return;
+    if (a.editor !== editor) return;
+    set[a.dateApproved] = true;
+  });
+  return Object.keys(set).sort();
+}
+
+// Per-editor "current + best" streak, mirroring bumpGradingStreak's shape:
+// { last, count, best, live }. A streak counts consecutive UK workdays (Mon–Fri)
+// where the editor had ≥1 approval. Weekends don't break a streak (they extend
+// it silently). Dormant if today isn't in the run (last activity was earlier).
+function computeEditorStreak(editor) {
+  var days = perEditorApprovalDates(editor);
+  if (!days.length) return { last: null, count: 0, best: 0, live: false };
+  // Walk backwards from today, counting consecutive workdays with an approval.
+  // A weekend day with no approval doesn't break the chain (workday gaps do).
+  var today = todayUK();
+  var count = 0;
+  var cursor = new Date(today + 'T12:00:00');
+  var live = false;
+  // If today has an approval, streak is live. Otherwise start from the most
+  // recent approval date and count from there (dormant streak).
+  var todayHasApproval = days.indexOf(today) >= 0;
+  if (todayHasApproval) {
+    live = true;
+  } else {
+    cursor = new Date(days[days.length - 1] + 'T12:00:00');
+  }
+  var set = Object.create(null);
+  days.forEach(function(d) { set[d] = true; });
+  while (true) {
+    var iso = cursor.toISOString().slice(0, 10);
+    var dow = cursor.getDay(); // 0=Sun..6=Sat
+    if (dow === 0 || dow === 6) {
+      // Weekend — skip without breaking.
+      cursor.setDate(cursor.getDate() - 1);
+      continue;
+    }
+    if (set[iso]) {
+      count++;
+      cursor.setDate(cursor.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+  // Best-ever run: single scan of days computing longest consecutive-workday run.
+  var best = 0, run = 0, prev = null;
+  days.forEach(function(d) {
+    if (prev === null) { run = 1; }
+    else {
+      // Count workday gap between prev and d
+      var g = workdayGap(prev, d);
+      if (g === 1) run++;
+      else run = 1;
+    }
+    if (run > best) best = run;
+    prev = d;
+  });
+  return { last: days[days.length - 1], count: count, best: best, live: live };
+}
+
+// Workday distance between two ISO dates (a < b). Returns the number of
+// weekdays strictly between them + 1 for the b endpoint. Used by streak best-ever.
+function workdayGap(aIso, bIso) {
+  var a = new Date(aIso + 'T12:00:00');
+  var b = new Date(bIso + 'T12:00:00');
+  var n = 0;
+  var cur = new Date(a);
+  cur.setDate(cur.getDate() + 1);
+  while (cur <= b) {
+    var dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) n++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return n;
+}
+
+// The wrap card's data payload — pure computation, safe to call every render.
+function computeEditorWrap(editor) {
+  var wk = getThisWeekRange();
+  var mn = getThisMonthRange();
+  var f = function(a) { return a.editor === editor; };
+  var thisWeek = countApprovedInRange(wk.start, wk.end, f);
+  // Previous ISO week (Mon–Sun immediately before this one).
+  var prevMon = new Date(wk.start + 'T12:00:00'); prevMon.setDate(prevMon.getDate() - 7);
+  var prevSun = new Date(wk.start + 'T12:00:00'); prevSun.setDate(prevSun.getDate() - 1);
+  function iso(d) {
+    var m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  }
+  var lastWeek = countApprovedInRange(iso(prevMon), iso(prevSun), f);
+  var streak = computeEditorStreak(editor);
+  // Best-ever week: scan all approval dates, bucket by isoWeekStart, find max.
+  var perWeek = Object.create(null);
+  STATE.assets.forEach(function(a) {
+    if (a.status !== 'Approved' || !a.dateApproved || a.editor !== editor) return;
+    var wkStart = isoWeekStart(a.dateApproved);
+    if (!wkStart) return;
+    perWeek[wkStart] = (perWeek[wkStart] || 0) + 1;
+  });
+  var bestWeek = 0, bestWeekStart = null;
+  Object.keys(perWeek).forEach(function(k) {
+    if (perWeek[k] > bestWeek) { bestWeek = perWeek[k]; bestWeekStart = k; }
+  });
+  // Month totals + pace vs. per-editor target × workdays elapsed.
+  var monthApprovals = countApprovedInRange(mn.start, mn.end, f);
+  var dailyTgt = getEditorDailyTarget(editor);
+  var todayUKStr = todayUK();
+  var endForPace = todayUKStr < mn.end ? todayUKStr : mn.end;
+  var workdaysSoFar = countWorkdays(mn.start, endForPace);
+  var monthExpected = Math.round(dailyTgt * workdaysSoFar);
+  var monthTarget = dailyTgt * countWorkdays(mn.start, mn.end);
+  // Peer counts + rank for this week.
+  var peerCounts = EDITOR_STATS_EDITORS.map(function(e) {
+    return { editor: e, count: countApprovedInRange(wk.start, wk.end, function(a) { return a.editor === e; }) };
+  });
+  var sorted = peerCounts.slice().sort(function(a, b) { return b.count - a.count; });
+  var rank = 1 + sorted.findIndex(function(x) { return x.editor === editor; });
+  return {
+    editor: editor,
+    thisWeek: thisWeek,
+    lastWeek: lastWeek,
+    delta: thisWeek - lastWeek,
+    streak: streak,
+    bestWeek: bestWeek,
+    bestWeekStart: bestWeekStart,
+    monthApprovals: monthApprovals,
+    monthExpected: monthExpected,
+    monthTarget: monthTarget,
+    dailyTarget: dailyTgt,
+    rank: rank,
+    peerCounts: peerCounts,
+    weekRange: wk,
+    monthLabel: mn.label
+  };
+}
+
+// Render the Editor Stats tab. Slice 1: wrap card only (no leaderboard, no
+// badges yet). Wrap card visual grammar reuses .gr-hero from Grading so it
+// feels native and the rest of the layer stacks in later.
+function renderEditorStatsView() {
+  var currentE = currentEditorFromAuth();
+  // Selected = persisted choice > signed-in editor > first in roster.
+  var selected = STATE.editorStatsSelected;
+  if (!selected || EDITOR_STATS_EDITORS.indexOf(selected) < 0) {
+    selected = currentE && EDITOR_STATS_EDITORS.indexOf(currentE) >= 0
+      ? currentE
+      : EDITOR_STATS_EDITORS[0];
+  }
+  var isSelf = selected === currentE;
+
+  // Picker for admins/PMs/cat-heads and for editors browsing peers. Editors
+  // signed in as themselves default to their own record but can still peek at
+  // teammates via this dropdown.
+  var pickerOptions = EDITOR_STATS_EDITORS.map(function(e) {
+    var sel = e === selected ? ' selected' : '';
+    var youTag = (e === currentE) ? ' (you)' : '';
+    return '<option value="' + escapeHtml(e) + '"' + sel + '>' + escapeHtml(e) + youTag + '</option>';
+  }).join('');
+  var picker =
+    '<div class="es-picker">' +
+      '<label class="es-picker-label">Viewing</label>' +
+      '<select class="es-picker-select" onchange="App.setEditorStatsSelected(this.value)">' + pickerOptions + '</select>' +
+      (!currentE && typeof Auth !== 'undefined' && Auth.user
+        ? '<span class="es-picker-hint" title="Sign-in email not mapped to an editor — pick manually.">no editor mapping</span>'
+        : '') +
+    '</div>';
+
+  var wrap = computeEditorWrap(selected);
+
+  // Big-number ring: show this-week count vs. a "personal pace" target — the
+  // higher of last-week and the editor's expected pace for this week (dailyTgt × 5).
+  var weekTarget = Math.max(wrap.lastWeek, wrap.dailyTarget * 5, 1);
+  var pct = Math.min(100, Math.round((wrap.thisWeek / weekTarget) * 100));
+  var C = 119.38; // matches .gr-ring geometry
+  var offset = (C * (1 - Math.min(1, wrap.thisWeek / weekTarget))).toFixed(2);
+  var tone = wrap.thisWeek >= weekTarget ? ' tone-done' : (wrap.thisWeek > 0 ? '' : ' tone-idle');
+
+  // Delta vs last week — arrow + delta count.
+  var deltaHtml;
+  if (wrap.delta > 0) deltaHtml = '<span class="es-delta es-delta-up">▲ ' + wrap.delta + ' vs last week</span>';
+  else if (wrap.delta < 0) deltaHtml = '<span class="es-delta es-delta-down">▼ ' + Math.abs(wrap.delta) + ' vs last week</span>';
+  else deltaHtml = '<span class="es-delta es-delta-flat">→ same as last week</span>';
+
+  // Streak block — identical language to Grading's shared streak but scoped
+  // to this editor. Live = today counts.
+  var s = wrap.streak;
+  var streakN = Number(s.count) || 0;
+  var streakBest = Number(s.best) || 0;
+  var streakHtml =
+    '<div class="gr-streak' + (s.live ? ' is-live' : '') + '" title="' +
+      (s.live ? 'Approved today — streak is alive' : (streakN > 0 ? 'Approve a video today to keep the streak alive' : 'Approve a video to start a streak')) + '">' +
+      '<span class="gr-streak-flame">🔥</span>' +
+      '<span class="gr-streak-n"><b>' + streakN + '</b> day' + (streakN === 1 ? '' : 's') + '</span>' +
+    '</div>' +
+    '<div class="gr-streak-best">' + (streakBest > 0 ? 'best ' + streakBest : (s.live ? '' : 'start your streak')) + '</div>';
+
+  // Rank chip — 1/3 of 3 peers, medal emoji for gold/silver/bronze.
+  var medal = wrap.rank === 1 ? '🥇' : wrap.rank === 2 ? '🥈' : wrap.rank === 3 ? '🥉' : '';
+  var rankHtml = '<div class="es-rank">' + medal + ' <b>' + wrap.rank + '</b>/<span>' + wrap.peerCounts.length + '</span> this week</div>';
+
+  // Best-ever week — subtle "PR" chip Strava-style.
+  var pr = wrap.bestWeek > 0
+    ? '<div class="es-pr">Personal best: <b>' + wrap.bestWeek + '</b> videos in a week' + (wrap.bestWeekStart ? ' <span class="es-pr-when">(' + weekRangeLabel(wrap.bestWeekStart) + ')</span>' : '') + '</div>'
+    : '<div class="es-pr">Personal best: <b>—</b> approve your first video to set one</div>';
+
+  // Month pace mini-line — same tone as Grading's gr-month-mini.
+  var monthMini = '<div class="gr-month-mini">' + wrap.monthLabel + ': <b>' + wrap.monthApprovals + '</b> / ' + wrap.monthTarget + ' target · pace <b>' + wrap.monthExpected + '</b></div>';
+
+  var greeting = isSelf ? "Here's your week" : escapeHtml(selected) + "'s week";
+  var subMsg = wrap.thisWeek > 0
+    ? '<b>' + wrap.thisWeek + '</b> approved · ' + weekRangeLabel(wrap.weekRange.start)
+    : 'No approvals yet this week · ' + weekRangeLabel(wrap.weekRange.start);
+
+  var hero =
+    '<div class="gr-hero es-hero' + tone + '">' +
+      '<div class="gr-ring-wrap">' +
+        '<svg class="gr-ring" viewBox="0 0 44 44">' +
+          '<circle class="gr-ring-bg" cx="22" cy="22" r="19"></circle>' +
+          '<circle class="gr-ring-fg" cx="22" cy="22" r="19" stroke-dasharray="' + C + '" stroke-dashoffset="' + offset + '"></circle>' +
+        '</svg>' +
+        '<div class="gr-ring-pct">' + pct + '<span>%</span></div>' +
+      '</div>' +
+      '<div class="gr-hero-main">' +
+        '<div class="gr-hero-msg">' + greeting + '</div>' +
+        '<div class="gr-hero-sub">' + subMsg + '</div>' +
+        '<div class="es-hero-row">' + deltaHtml + rankHtml + '</div>' +
+        pr +
+      '</div>' +
+      '<div class="gr-hero-side">' +
+        '<div class="gr-streak-block">' + streakHtml + '</div>' +
+        monthMini +
+      '</div>' +
+    '</div>';
+
+  // Slice 1 note — deliberately visible so the tab reads as "in-progress" until
+  // Slices 2 (leaderboard) and 3 (badges) land. Remove when Slice 3 ships.
+  var slicePlaceholder =
+    '<div class="es-placeholder">' +
+      '<b>Coming next:</b> top-3 leaderboard and auto-earned badges (streak milestones, ' +
+      'zero-revision weeks, perfect grades, on-target months). This card is Slice 1 of 3.' +
+    '</div>';
+
+  return '<div class="editor-stats-view">' + picker + hero + slicePlaceholder + '</div>';
 }
 
 // The effective revision-round count for a grade. When the grade is linked to a
@@ -11614,6 +11910,7 @@ function render() {
   else if (STATE.tab === 'editingCalendar') body = renderEditingCalendarView();
   else if (STATE.tab === 'log') body = renderDailyLogView();
   else if (STATE.tab === 'grading') body = renderGradingView();
+  else if (STATE.tab === 'editorStats') body = renderEditorStatsView();
   else if (STATE.tab === 'notifications') body = renderNotificationsView();
   else if (STATE.tab === 'automations') body = renderAutomationsView();
   else if (STATE.tab === 'reporting') body = renderReportingView();
@@ -11727,6 +12024,14 @@ function restoreScrollPositions(snap) {
 // ===================== EVENTS =====================
 var App = {
   setTab: function(t) { STATE.tab = t; Presence.update(); render(); },
+
+  // ===== Editor Stats (Strava-for-editors) =====
+  setEditorStatsSelected: function(name) {
+    STATE.editorStatsSelected = name || null;
+    saveState();
+    render();
+  },
+  getCurrentEditor: currentEditorFromAuth,
 
   // ===== Grading (Editor KPI Scorecard) =====
   setGradingPeriod: function(p) { STATE.gradingPeriod = p; saveState(); render(); },
