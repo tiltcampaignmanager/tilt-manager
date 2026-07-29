@@ -6411,15 +6411,61 @@ function renderEditorStatsView() {
       '</div>' +
     '</div>';
 
-  // Slice 1 note — deliberately visible so the tab reads as "in-progress" until
-  // Slices 2 (leaderboard) and 3 (badges) land. Remove when Slice 3 ships.
+  // Leaderboard — one card per editor, sorted by this-week approvals (tie-break:
+  // bestWeek then monthApprovals). Clicking a card swaps the wrap card selection
+  // above. Reuses computeEditorWrap so nothing new to maintain.
+  var lbRows = EDITOR_STATS_EDITORS.map(function(e) { return computeEditorWrap(e); });
+  lbRows.sort(function(a, b) {
+    if (b.thisWeek !== a.thisWeek) return b.thisWeek - a.thisWeek;
+    if (b.bestWeek !== a.bestWeek) return b.bestWeek - a.bestWeek;
+    return b.monthApprovals - a.monthApprovals;
+  });
+  var maxWeek = Math.max.apply(null, lbRows.map(function(r) { return r.thisWeek; }).concat([1]));
+  var lbCards = lbRows.map(function(r, i) {
+    var rank = i + 1;
+    var medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
+    var isSel = r.editor === selected;
+    var isYou = r.editor === currentE;
+    var bar = Math.round((r.thisWeek / maxWeek) * 100);
+    var delta;
+    if (r.delta > 0) delta = '<span class="es-lb-delta es-delta-up">▲ ' + r.delta + '</span>';
+    else if (r.delta < 0) delta = '<span class="es-lb-delta es-delta-down">▼ ' + Math.abs(r.delta) + '</span>';
+    else delta = '<span class="es-lb-delta es-delta-flat">→</span>';
+    var streakLive = r.streak.live ? ' is-live' : '';
+    var streakN = Number(r.streak.count) || 0;
+    var initials = escapeHtml(editorInitials(r.editor));
+    var safeName = escapeHtml(String(r.editor).replace(/'/g, "\\'"));
+    return '<div class="es-lb-card' + (isSel ? ' is-selected' : '') + '"' +
+        ' role="button" tabindex="0"' +
+        ' onclick="App.setEditorStatsSelected(\'' + safeName + '\')"' +
+        ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();App.setEditorStatsSelected(\'' + safeName + '\')}">' +
+        '<div class="es-lb-head">' +
+          '<span class="es-lb-medal">' + (medal || ('#' + rank)) + '</span>' +
+          '<span class="es-lb-avatar">' + initials + '</span>' +
+          '<span class="es-lb-name">' + escapeHtml(r.editor) + (isYou ? ' <span class="es-lb-you">(you)</span>' : '') + '</span>' +
+          delta +
+        '</div>' +
+        '<div class="es-lb-big">' + r.thisWeek + '<span> this week</span></div>' +
+        '<div class="es-lb-bar-wrap"><div class="es-lb-bar" style="width:' + bar + '%"></div></div>' +
+        '<div class="es-lb-meta">' +
+          '<span class="es-lb-meta-item"><b>' + r.monthApprovals + '</b> this month</span>' +
+          '<span class="es-lb-meta-sep">·</span>' +
+          '<span class="es-lb-meta-item es-lb-streak' + streakLive + '"><span class="gr-streak-flame">🔥</span><b>' + streakN + '</b>d streak</span>' +
+        '</div>' +
+      '</div>';
+  }).join('');
+  var leaderboard =
+    '<div class="es-section-title">Leaderboard · ' + weekRangeLabel(wrap.weekRange.start) + '</div>' +
+    '<div class="es-lb-grid">' + lbCards + '</div>';
+
+  // Slice 1+2 note — remove when Slice 3 (badges) lands.
   var slicePlaceholder =
     '<div class="es-placeholder">' +
-      '<b>Coming next:</b> top-3 leaderboard and auto-earned badges (streak milestones, ' +
-      'zero-revision weeks, perfect grades, on-target months). This card is Slice 1 of 3.' +
+      '<b>Coming next:</b> auto-earned badges (streak milestones, zero-revision ' +
+      'weeks, perfect grades, on-target months, category variety). Slices 1 + 2 of 3 shipped.' +
     '</div>';
 
-  return '<div class="editor-stats-view">' + picker + hero + slicePlaceholder + '</div>';
+  return '<div class="editor-stats-view">' + picker + hero + leaderboard + slicePlaceholder + '</div>';
 }
 
 // The effective revision-round count for a grade. When the grade is linked to a
