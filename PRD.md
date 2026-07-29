@@ -709,15 +709,17 @@ The Editor Stats wrap card (see §5.9) and the Grading progress hero (§5.8) bot
 
 ### 11.4b Editor Stats badges
 
-19 badges across 5 groups. All auto-computed from `STATE.assets` + `STATE.grades`; no persistence, no migration when the roster changes.
+28 badges across 5 groups. All auto-computed from `STATE.assets` + `STATE.grades`; no persistence, no migration when the roster changes. Stretch tiers (Iron, GOAT, Untouchable, Flawless Fortnight, 30-Day Grind, Machine, All-Rounder, Globetrotter, Quarterly Champion) added 2026-07-30 after editors cleared most of the original set within a week.
 
 | Group | Badge | Criterion |
 |---|---|---|
-| Milestones | First Cut · In the Rhythm · Half-Century · Century · Legend | 1 · 10 · 50 · 100 · 250 lifetime approvals |
-| Craft | No Notes · On a Roll · Flawless Week · Perfect Grade · Excellent Month | 0-rev approval · 5 consecutive 0-rev in date order · full ISO week with 0-rev only · brand+qa+idea+within-cap grade · month with composite ≥ 90 |
-| Momentum | 3-Day Streak · Working Week · Fortnight · Marathoner | 3 · 5 · 10 · 20 consecutive workdays with ≥1 approval |
-| Range | Same-Day Ship · Speed Demon · Category Sampler · World Tour | `assignedAt === dateApproved` · 5+ approvals in one UK day · 3+ categories in one ISO week · 3+ countries lifetime |
-| Consistency | On Target | Current-month approvals ≥ `dailyTarget × workdays` |
+| Milestones (7) | First Cut · In the Rhythm · Half-Century · Century · Legend · Iron · GOAT | 1 · 10 · 50 · 100 · 250 · 500 · 1000 lifetime approvals |
+| Craft (7) | No Notes · On a Roll · Untouchable · Flawless Week · Flawless Fortnight · Perfect Grade · Excellent Month | 0-rev approval · 5 consecutive 0-rev · 10 consecutive 0-rev · full ISO week with 0-rev only · two consecutive 0-rev weeks · brand+qa+idea+within-cap grade · month with composite ≥ 90 |
+| Momentum (5) | 3-Day Streak · Working Week · Fortnight · Marathoner · 30-Day Grind | 3 · 5 · 10 · 20 · 30 consecutive workdays with ≥1 approval |
+| Range (7) | Same-Day Ship · Speed Demon · Machine · Category Sampler · All-Rounder · World Tour · Globetrotter | `assignedAt === dateApproved` · 5+ approvals in one UK day · 10+ approvals in one UK day · 3+ categories in one week · 5+ categories in one week · 3+ countries lifetime · 5 countries lifetime |
+| Consistency (2) | On Target · Quarterly Champion | Current-month approvals ≥ `dailyTarget × workdays` · 3 consecutive months hitting that target |
+
+Descriptions are written in the app in a conversational voice (contractions, punchy), not clinical spec-speak, so the shelf reads like a coach, not a KPI sheet.
 
 ### 11.5 Role → Slack route map
 

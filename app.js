@@ -6408,15 +6408,34 @@ function computeEditorBadges(editor) {
   });
   var flawlessWeek = false;
   var sampledWeek = false;
+  var allRounder = false;
+  // Flawless Fortnight — 2 consecutive Mon-anchored ISO weeks that each had
+  // approvals AND every approval landed with 0 revisions. Walk the sorted week
+  // list and check whether week N+1 sits exactly 7 days after week N.
+  var flawlessWeekKeys = [];
   Object.keys(byWeek).forEach(function(k) {
     var week = byWeek[k];
-    if (week.length && week.every(function(a) { return (Number(a.revisionRounds) || 0) === 0; })) flawlessWeek = true;
+    var wkFlawless = week.length && week.every(function(a) { return (Number(a.revisionRounds) || 0) === 0; });
+    if (wkFlawless) { flawlessWeek = true; flawlessWeekKeys.push(k); }
     var cats = Object.create(null);
     week.forEach(function(a) { if (a.category) cats[a.category] = true; });
-    if (Object.keys(cats).length >= 3) sampledWeek = true;
+    var catCount = Object.keys(cats).length;
+    if (catCount >= 3) sampledWeek = true;
+    if (catCount >= 5) allRounder = true;
   });
+  var flawlessFortnight = false;
+  flawlessWeekKeys.sort();
+  for (var fi = 1; fi < flawlessWeekKeys.length; fi++) {
+    var prev = new Date(flawlessWeekKeys[fi - 1] + 'T12:00:00');
+    var curr = new Date(flawlessWeekKeys[fi] + 'T12:00:00');
+    if ((curr - prev) === 7 * 24 * 3600 * 1000) { flawlessFortnight = true; break; }
+  }
   var speedDemonDay = null;
-  Object.keys(byDay).forEach(function(d) { if (byDay[d] >= 5 && !speedDemonDay) speedDemonDay = d; });
+  var machineDay = null;
+  Object.keys(byDay).forEach(function(d) {
+    if (byDay[d] >= 5  && !speedDemonDay) speedDemonDay = d;
+    if (byDay[d] >= 10 && !machineDay)    machineDay    = d;
+  });
 
   // No Notes — any single approval with 0 revision rounds. First-earned = the
   // earliest such approval, so the tooltip can tell the story.
@@ -6427,12 +6446,16 @@ function computeEditorBadges(editor) {
     zeroRevInOrder.push(zero);
     if (zero && !noNotesFirst) noNotesFirst = a.dateApproved;
   });
-  // On a Roll — 5 consecutive approvals (by date order) each with 0 revisions.
-  var onRoll = false, run = 0;
+  // On a Roll (5) + Untouchable (10) — longest run of consecutive 0-revision
+  // approvals in date order. We track BEST run so badges above the current
+  // threshold still show a proper progress bar (e.g. 7/10 for Untouchable).
+  var bestZeroRun = 0, curRun = 0;
   for (var i = 0; i < zeroRevInOrder.length; i++) {
-    if (zeroRevInOrder[i]) { run++; if (run >= 5) { onRoll = true; break; } }
-    else run = 0;
+    if (zeroRevInOrder[i]) { curRun++; if (curRun > bestZeroRun) bestZeroRun = curRun; }
+    else curRun = 0;
   }
+  var onRoll = bestZeroRun >= 5;
+  var untouchable = bestZeroRun >= 10;
 
   // Same-Day Ship — assigned + approved on the same UK date.
   var sameDayFirst = null;
@@ -6455,6 +6478,38 @@ function computeEditorBadges(editor) {
   var monthApprovals = countApprovedInRange(mn.start, mn.end, function(a) { return a.editor === editor; });
   var monthTarget = getEditorDailyTarget(editor) * countWorkdays(mn.start, mn.end);
   var onTargetMonth = monthTarget > 0 && monthApprovals >= monthTarget;
+
+  // Quarterly Champion — 3 months in a row hitting the daily-target × workdays
+  // pace. Walk from the earliest approval month to the current month; a gap
+  // month (no approvals) breaks the run. Uses full-month targets, not
+  // to-date, so the current unfinished month only counts once it's finished.
+  var quarterlyChampion = false;
+  (function() {
+    if (!assets.length) return;
+    var earliest = sortedByDate[0].dateApproved;
+    var startY = parseInt(earliest.slice(0, 4), 10);
+    var startM = parseInt(earliest.slice(5, 7), 10) - 1;
+    var nowY = parseInt(mn.start.slice(0, 4), 10);
+    var nowM = parseInt(mn.start.slice(5, 7), 10) - 1;
+    var run = 0;
+    var y = startY, m = startM;
+    while (y < nowY || (y === nowY && m < nowM)) {
+      var mr = (typeof getMonthRange === 'function') ? getMonthRange(y, m)
+                                                     : { start: y + '-' + String(m + 1).padStart(2,'0') + '-01', end: '' };
+      var mDaily = getEditorDailyTarget(editor);
+      var mWork = countWorkdays(mr.start, mr.end);
+      var mTarget = mDaily * mWork;
+      var mApproved = countApprovedInRange(mr.start, mr.end, function(a) { return a.editor === editor; });
+      if (mTarget > 0 && mApproved >= mTarget) {
+        run++;
+        if (run >= 3) { quarterlyChampion = true; break; }
+      } else {
+        run = 0;
+      }
+      m++;
+      if (m > 11) { m = 0; y++; }
+    }
+  })();
 
   // Perfect Grade — any grade with brand+qa+idea and within revision cap.
   var perfectGrade = (STATE.grades || []).some(function(g) {
@@ -6505,37 +6560,55 @@ function computeEditorBadges(editor) {
     };
   }
 
+  // Helper for "consecutive 0-rev run" badges (On a Roll, Untouchable) so the
+  // shelf progress bar reflects the best streak against each threshold.
+  function zeroRunBadge(id, label, emoji, description, target, group) {
+    return {
+      id: id, label: label, emoji: emoji, description: description, group: group,
+      target: target, progress: Math.min(bestZeroRun, target),
+      earned: bestZeroRun >= target, earnedAt: null
+    };
+  }
+
   return [
-    // MILESTONES — the "how far I've come" story. Kept tier-count-based, renamed
-    // to have more character. Iron/500 removed — 250 is a career-length badge
-    // that stays motivating; 500 was too far off for anyone.
-    tierBadge('first-cut',   'First Cut',       '🎬', 'Approve your first video.',              1,   'milestones'),
-    tierBadge('rhythm',      'In the Rhythm',   '🎼', '10 approved videos — you\'re in it now.', 10,  'milestones'),
-    tierBadge('half-cent',   'Half-Century',    '🏅', '50 approved videos — real portfolio.',   50,  'milestones'),
-    tierBadge('century',     'Century',         '💯', '100 approved videos — triple digits.',   100, 'milestones'),
-    tierBadge('legend',      'Legend',          '👑', '250 approved videos — the wall.',         250, 'milestones'),
+    // MILESTONES. Lifetime approval tiers. Iron (500) and GOAT (1000) are
+    // stretch goals for editors who've already crossed Legend.
+    tierBadge('first-cut',   'First Cut',       '🎬', 'Your first approval. Welcome to the board.',              1,    'milestones'),
+    tierBadge('rhythm',      'In the Rhythm',   '🎼', '10 approvals in the bag. You\'ve got a workflow.',        10,   'milestones'),
+    tierBadge('half-cent',   'Half-Century',    '🏅', '50 approvals. Real portfolio depth.',                     50,   'milestones'),
+    tierBadge('century',     'Century',         '💯', '100 approvals. Triple digits.',                           100,  'milestones'),
+    tierBadge('legend',      'Legend',          '👑', '250 approvals. Career-length badge.',                     250,  'milestones'),
+    tierBadge('iron',        'Iron',            '🚀', '500 approvals. Not many editors get here.',               500,  'milestones'),
+    tierBadge('goat',        'GOAT',            '🐐', '1000 approvals. You built this place.',                   1000, 'milestones'),
 
-    // CRAFT — the moments editors screenshot for their group chat.
-    flagBadge('no-notes',       'No Notes',      '🎯', 'A video approved on the first submit (0 revision rounds).', !!noNotesFirst, 'craft', noNotesFirst),
-    flagBadge('on-a-roll',      'On a Roll',     '🔒', '5 approvals in a row, every one with 0 revisions.', onRoll, 'craft'),
-    flagBadge('flawless-week',  'Flawless Week', '✨', 'A full week where every approval had 0 revisions.', flawlessWeek, 'craft'),
-    flagBadge('perfect-grade',  'Perfect Grade', '💎', 'A grade with brand pass + QA clean + new idea, within cap.', perfectGrade, 'craft'),
-    flagBadge('excellent-month','Excellent Month','🏆', 'Grading composite ≥ 90 for a whole month.', excellentMonth, 'craft'),
+    // CRAFT. The moments editors screenshot for the group chat.
+    flagBadge('no-notes',        'No Notes',           '🎯', 'One approval landed with zero revision rounds. PM had nothing to say.', !!noNotesFirst, 'craft', noNotesFirst),
+    zeroRunBadge('on-a-roll',    'On a Roll',          '🔒', '5 approvals in a row, every one with zero revisions.',                  5,  'craft'),
+    zeroRunBadge('untouchable',  'Untouchable',        '🛡️', '10 approvals in a row without a single revision round.',                10, 'craft'),
+    flagBadge('flawless-week',   'Flawless Week',      '✨', 'Every approval in one week landed with zero revisions.',                flawlessWeek,      'craft'),
+    flagBadge('flawless-fort',   'Flawless Fortnight', '💫', 'Two straight weeks where nothing came back for revisions.',             flawlessFortnight, 'craft'),
+    flagBadge('perfect-grade',   'Perfect Grade',      '💎', 'One grade with brand pass, QA clean, and new idea, all within cap.',    perfectGrade,      'craft'),
+    flagBadge('excellent-month', 'Excellent Month',    '🏆', 'Grading composite of 90 or higher for a whole month.',                  excellentMonth,    'craft'),
 
-    // MOMENTUM — streaks. Punchier names than the old generic tiers.
-    streakBadge('streak-3',  '3-Day Streak',   '🔥', '3 workdays in a row with ≥1 approval.',           3,  'momentum'),
-    streakBadge('streak-5',  'Working Week',   '📅', '5 workdays in a row — a full working week.',      5,  'momentum'),
-    streakBadge('streak-10', 'Fortnight',      '🌗', '10-workday streak — you\'re living in the tab.',   10, 'momentum'),
-    streakBadge('streak-20', 'Marathoner',     '🌕', '20-workday streak — a full month of shipping.',    20, 'momentum'),
+    // MOMENTUM. Workday-consecutive streaks. Weekend gaps don't break the run.
+    streakBadge('streak-3',  '3-Day Streak',   '🔥', '3 workdays in a row with at least one approval.',              3,  'momentum'),
+    streakBadge('streak-5',  'Working Week',   '📅', '5 workdays in a row. That\'s a proper week.',                  5,  'momentum'),
+    streakBadge('streak-10', 'Fortnight',      '🌗', '10 workdays without missing a beat.',                          10, 'momentum'),
+    streakBadge('streak-20', 'Marathoner',     '🌕', '20 workday streak. A full month of shipping.',                 20, 'momentum'),
+    streakBadge('streak-30', '30-Day Grind',   '🌋', '30 workdays in a row. You\'re just built different.',          30, 'momentum'),
 
-    // RANGE — flexes that show breadth, not just volume.
-    flagBadge('same-day',    'Same-Day Ship',   '🚀', 'Assigned and approved on the same UK day.',         !!sameDayFirst,     'range', sameDayFirst),
-    flagBadge('speed-demon', 'Speed Demon',     '⚡', '5+ approvals in a single UK day.',                   !!speedDemonDay,   'range', speedDemonDay),
-    flagBadge('sampler',     'Category Sampler','🎨', 'Approvals across 3+ different categories in one week.', sampledWeek,   'range'),
-    progressBadge('world-tour', 'World Tour',   '🌍', 'Approvals across 3+ different countries.',           countryCount, 3, countryCount >= 3, 'range'),
+    // RANGE. Breadth flexes, not volume.
+    flagBadge('same-day',       'Same-Day Ship',    '🚀', 'Assigned and approved on the same day.',                      !!sameDayFirst,   'range', sameDayFirst),
+    flagBadge('speed-demon',    'Speed Demon',      '⚡', '5+ approvals in a single day.',                                !!speedDemonDay, 'range', speedDemonDay),
+    flagBadge('machine',        'Machine',          '🤖', '10+ approvals in a single day. Nobody else did that.',        !!machineDay,    'range', machineDay),
+    flagBadge('sampler',        'Category Sampler', '🎨', 'Approvals in 3+ different categories in one week.',           sampledWeek,     'range'),
+    flagBadge('all-rounder',    'All-Rounder',      '🎭', 'Approvals in 5+ different categories in one week.',           allRounder,      'range'),
+    progressBadge('world-tour', 'World Tour',       '🌍', 'Approvals in 3+ countries.',                                  countryCount, 3, countryCount >= 3, 'range'),
+    progressBadge('globetrotter','Globetrotter',    '✈️', 'Approvals in 5 countries. The whole map.',                    countryCount, 5, countryCount >= 5, 'range'),
 
-    // CONSISTENCY — hitting the pace month after month.
-    flagBadge('on-target',   'On Target',       '🎯', 'This month\'s approvals ≥ your daily target × workdays.', onTargetMonth, 'consistency')
+    // CONSISTENCY. Hitting the pace month after month.
+    flagBadge('on-target',        'On Target',           '🎯', 'This month\'s approvals cleared your daily target times workdays.', onTargetMonth,     'consistency'),
+    flagBadge('quarterly-champ',  'Quarterly Champion',  '🏅', '3 months in a row hitting or beating target.',                      quarterlyChampion, 'consistency')
   ];
 }
 
