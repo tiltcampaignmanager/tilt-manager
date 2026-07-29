@@ -6486,31 +6486,22 @@ function computeEditorBadges(editor) {
 // feels native and the rest of the layer stacks in later.
 function renderEditorStatsView() {
   var currentE = currentEditorFromAuth();
-  // Selected = persisted choice > signed-in editor > first in roster.
-  var selected = STATE.editorStatsSelected;
-  if (!selected || EDITOR_STATS_EDITORS.indexOf(selected) < 0) {
-    selected = currentE && EDITOR_STATS_EDITORS.indexOf(currentE) >= 0
-      ? currentE
-      : EDITOR_STATS_EDITORS[0];
+  // Personal-only view: the tab is editors-only (see ROLE_TAB_VISIBILITY) and
+  // there is deliberately no peer picker or leaderboard — this is each editor's
+  // own page, not a competitive board. If the signed-in email doesn't map to a
+  // known editor name, tell them and stop; don't fall back to someone else's
+  // record.
+  if (!currentE || EDITOR_STATS_EDITORS.indexOf(currentE) < 0) {
+    return '<div class="editor-stats-view">' +
+        '<div class="es-empty">' +
+          '<div class="es-empty-title">Editor Stats</div>' +
+          '<div class="es-empty-msg">Your sign-in email isn\'t linked to an editor profile yet. ' +
+            'Ask an admin to add your email prefix to <code>EDITOR_EMAILS</code> so this page can show your stats.</div>' +
+        '</div>' +
+      '</div>';
   }
-  var isSelf = selected === currentE;
-
-  // Picker for admins/PMs/cat-heads and for editors browsing peers. Editors
-  // signed in as themselves default to their own record but can still peek at
-  // teammates via this dropdown.
-  var pickerOptions = EDITOR_STATS_EDITORS.map(function(e) {
-    var sel = e === selected ? ' selected' : '';
-    var youTag = (e === currentE) ? ' (you)' : '';
-    return '<option value="' + escapeHtml(e) + '"' + sel + '>' + escapeHtml(e) + youTag + '</option>';
-  }).join('');
-  var picker =
-    '<div class="es-picker">' +
-      '<label class="es-picker-label">Viewing</label>' +
-      '<select class="es-picker-select" onchange="App.setEditorStatsSelected(this.value)">' + pickerOptions + '</select>' +
-      (!currentE && typeof Auth !== 'undefined' && Auth.user
-        ? '<span class="es-picker-hint" title="Sign-in email not mapped to an editor — pick manually.">no editor mapping</span>'
-        : '') +
-    '</div>';
+  var selected = currentE;
+  var isSelf = true;
 
   var wrap = computeEditorWrap(selected);
 
@@ -6541,9 +6532,8 @@ function renderEditorStatsView() {
     '</div>' +
     '<div class="gr-streak-best">' + (streakBest > 0 ? 'best ' + streakBest : (s.live ? '' : 'start your streak')) + '</div>';
 
-  // Rank chip — 1/3 of 3 peers, medal emoji for gold/silver/bronze.
-  var medal = wrap.rank === 1 ? '🥇' : wrap.rank === 2 ? '🥈' : wrap.rank === 3 ? '🥉' : '';
-  var rankHtml = '<div class="es-rank">' + medal + ' <b>' + wrap.rank + '</b>/<span>' + wrap.peerCounts.length + '</span> this week</div>';
+  // Rank chip removed — personal-only view, no peer comparison shown.
+  var rankHtml = '';
 
   // Best-ever week — subtle "PR" chip Strava-style.
   var pr = wrap.bestWeek > 0
@@ -6579,52 +6569,7 @@ function renderEditorStatsView() {
       '</div>' +
     '</div>';
 
-  // Leaderboard — one card per editor, sorted by this-week approvals (tie-break:
-  // bestWeek then monthApprovals). Clicking a card swaps the wrap card selection
-  // above. Reuses computeEditorWrap so nothing new to maintain.
-  var lbRows = EDITOR_STATS_EDITORS.map(function(e) { return computeEditorWrap(e); });
-  lbRows.sort(function(a, b) {
-    if (b.thisWeek !== a.thisWeek) return b.thisWeek - a.thisWeek;
-    if (b.bestWeek !== a.bestWeek) return b.bestWeek - a.bestWeek;
-    return b.monthApprovals - a.monthApprovals;
-  });
-  var maxWeek = Math.max.apply(null, lbRows.map(function(r) { return r.thisWeek; }).concat([1]));
-  var lbCards = lbRows.map(function(r, i) {
-    var rank = i + 1;
-    var medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
-    var isSel = r.editor === selected;
-    var isYou = r.editor === currentE;
-    var bar = Math.round((r.thisWeek / maxWeek) * 100);
-    var delta;
-    if (r.delta > 0) delta = '<span class="es-lb-delta es-delta-up">▲ ' + r.delta + '</span>';
-    else if (r.delta < 0) delta = '<span class="es-lb-delta es-delta-down">▼ ' + Math.abs(r.delta) + '</span>';
-    else delta = '<span class="es-lb-delta es-delta-flat">→</span>';
-    var streakLive = r.streak.live ? ' is-live' : '';
-    var streakN = Number(r.streak.count) || 0;
-    var initials = escapeHtml(editorInitials(r.editor));
-    var safeName = escapeHtml(String(r.editor).replace(/'/g, "\\'"));
-    return '<div class="es-lb-card' + (isSel ? ' is-selected' : '') + '"' +
-        ' role="button" tabindex="0"' +
-        ' onclick="App.setEditorStatsSelected(\'' + safeName + '\')"' +
-        ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();App.setEditorStatsSelected(\'' + safeName + '\')}">' +
-        '<div class="es-lb-head">' +
-          '<span class="es-lb-medal">' + (medal || ('#' + rank)) + '</span>' +
-          '<span class="es-lb-avatar">' + initials + '</span>' +
-          '<span class="es-lb-name">' + escapeHtml(r.editor) + (isYou ? ' <span class="es-lb-you">(you)</span>' : '') + '</span>' +
-          delta +
-        '</div>' +
-        '<div class="es-lb-big">' + r.thisWeek + '<span> this week</span></div>' +
-        '<div class="es-lb-bar-wrap"><div class="es-lb-bar" style="width:' + bar + '%"></div></div>' +
-        '<div class="es-lb-meta">' +
-          '<span class="es-lb-meta-item"><b>' + r.monthApprovals + '</b> this month</span>' +
-          '<span class="es-lb-meta-sep">·</span>' +
-          '<span class="es-lb-meta-item es-lb-streak' + streakLive + '"><span class="gr-streak-flame">🔥</span><b>' + streakN + '</b>d streak</span>' +
-        '</div>' +
-      '</div>';
-  }).join('');
-  var leaderboard =
-    '<div class="es-section-title">Leaderboard · ' + weekRangeLabel(wrap.weekRange.start) + '</div>' +
-    '<div class="es-lb-grid">' + lbCards + '</div>';
+  // Leaderboard removed — personal-only view, no peer cards.
 
   // Badges shelf — grouped into pursuits (Milestones / Craft / Momentum /
   // Range / Consistency) so each editor sees which "story" they're closest to
@@ -6707,7 +6652,7 @@ function renderEditorStatsView() {
     '</div>' +
     (badgesOpen ? '<div class="es-badges-body">' + groupsHtml + '</div>' : '');
 
-  return '<div class="editor-stats-view">' + picker + hero + leaderboard + badgesShelf + '</div>';
+  return '<div class="editor-stats-view">' + hero + badgesShelf + '</div>';
 }
 
 // The effective revision-round count for a grade. When the grade is linked to a
