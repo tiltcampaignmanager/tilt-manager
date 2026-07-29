@@ -4072,17 +4072,17 @@ var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'lo
 // gated by roleAtLeast('admin') inside Config/Automations.
 // Tab visibility is also enforced server-side in Phase D via Firestore rules on
 // the documents these tabs touch (config/app and the users collection).
-// editorStats is deliberately admin-only right now (Elsa is watching editor
-// output; team-visible view can be turned on later by adding 'editorStats'
-// back to the other role arrays). It stays out of ALL_TABS so catHead and
-// contentLead — which inherit ALL_TABS.slice() — don't get it either.
+// editorStats is deliberately editors-only right now — it's the editors' own
+// "Strava" page. Kept out of ALL_TABS so catHead / contentLead (which inherit
+// ALL_TABS.slice()) don't get it either. Admin doesn't include it by default;
+// re-add 'editorStats' to any role array to expose it there.
 var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'automations', 'reporting', 'content', 'config'];
 var ROLE_TAB_VISIBILITY = {
-  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
+  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'editorStats', 'notifications', 'reporting', 'content'],
   pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
   catHead:     ALL_TABS.slice(),
   contentLead: ALL_TABS.slice(),
-  admin:       ALL_TABS.concat(['editorStats'])
+  admin:       ALL_TABS.slice()
 };
 
 // Human-readable role labels (role keys are camelCase / short; these are what the
