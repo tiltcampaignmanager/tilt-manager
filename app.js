@@ -6313,6 +6313,110 @@ function computeEditorWrap(editor) {
   };
 }
 
+// Auto-computed badge shelf. Each badge is a pure function over STATE.assets +
+// STATE.grades — no persistence, no drift. Progress-locked badges show the
+// current count vs. the target so unearned ones still tell a story.
+// Shape: { id, label, emoji, description, tier, earned, progress, target, earnedAt? }
+function computeEditorBadges(editor) {
+  var assets = STATE.assets.filter(function(a) {
+    return a.editor === editor && a.status === 'Approved' && a.dateApproved;
+  });
+  var lifetime = assets.length;
+  // First-earned date for a countable milestone = the Nth-earliest dateApproved.
+  var sortedDates = assets.map(function(a) { return a.dateApproved; }).sort();
+  function nthDate(n) { return sortedDates.length >= n ? sortedDates[n - 1] : null; }
+
+  // Longest workday streak run ever (reuses computeEditorStreak).best.
+  var bestStreak = computeEditorStreak(editor).best;
+
+  // Weekly bucketing for Zero-Revision Week + Category Sampler + Best Week.
+  var byWeek = Object.create(null);   // weekStartISO → array of assets approved that week
+  var byDay  = Object.create(null);   // ISO date → count (Speed Demon)
+  assets.forEach(function(a) {
+    var wk = isoWeekStart(a.dateApproved);
+    if (wk) { (byWeek[wk] = byWeek[wk] || []).push(a); }
+    byDay[a.dateApproved] = (byDay[a.dateApproved] || 0) + 1;
+  });
+  var zeroRevisionWeek = false;
+  var sampledWeek = false;
+  Object.keys(byWeek).forEach(function(k) {
+    var week = byWeek[k];
+    if (week.length && week.every(function(a) { return (Number(a.revisionRounds) || 0) === 0; })) zeroRevisionWeek = true;
+    var cats = Object.create(null);
+    week.forEach(function(a) { if (a.category) cats[a.category] = true; });
+    if (Object.keys(cats).length >= 3) sampledWeek = true;
+  });
+  var speedDemonDay = null;
+  Object.keys(byDay).forEach(function(d) { if (byDay[d] >= 5 && !speedDemonDay) speedDemonDay = d; });
+
+  // On Target for the current month.
+  var mn = getThisMonthRange();
+  var monthApprovals = countApprovedInRange(mn.start, mn.end, function(a) { return a.editor === editor; });
+  var monthTarget = getEditorDailyTarget(editor) * countWorkdays(mn.start, mn.end);
+  var onTargetMonth = monthTarget > 0 && monthApprovals >= monthTarget;
+
+  // Perfect Grade — any grade with brand+qa+idea and within revision cap.
+  var perfectGrade = (STATE.grades || []).some(function(g) {
+    return g.editor === editor && !g.dismissed && g.brandPass && g.qaClean && g.newIdea && (typeof gradeWithinCap === 'function' ? gradeWithinCap(g) : true);
+  });
+
+  // Excellent month — any month where the editor's grading composite ≥ 90.
+  var excellentMonth = false;
+  if (typeof computeScorecard === 'function' && Array.isArray(STATE.grades)) {
+    var byMonth = Object.create(null);
+    STATE.grades.forEach(function(g) {
+      if (g.editor !== editor || g.dismissed) return;
+      var d = (typeof assetPeriodDate === 'function' && g.assetId) ? assetPeriodDate(g) : g.date;
+      if (!d) return;
+      var k = String(d).slice(0, 7);
+      (byMonth[k] = byMonth[k] || []).push(g);
+    });
+    Object.keys(byMonth).forEach(function(k) {
+      var sc = computeScorecard(editor, byMonth[k]);
+      if (sc && sc.composite >= 90) excellentMonth = true;
+    });
+  }
+
+  function tierBadge(id, label, emoji, description, target) {
+    return {
+      id: id, label: label, emoji: emoji, description: description,
+      target: target, progress: Math.min(lifetime, target),
+      earned: lifetime >= target,
+      earnedAt: lifetime >= target ? nthDate(target) : null
+    };
+  }
+  function streakBadge(id, label, emoji, description, target) {
+    return {
+      id: id, label: label, emoji: emoji, description: description,
+      target: target, progress: Math.min(bestStreak, target),
+      earned: bestStreak >= target,
+      earnedAt: null
+    };
+  }
+  function flagBadge(id, label, emoji, description, earned, earnedAt) {
+    return { id: id, label: label, emoji: emoji, description: description, earned: !!earned, earnedAt: earnedAt || null };
+  }
+
+  return [
+    tierBadge('first-cut',   'First Cut',      '🎬', 'Approve your first video.', 1),
+    tierBadge('deca',        'Deca',           '🔟', '10 approved videos, lifetime.', 10),
+    tierBadge('half-cent',   'Half-Century',   '🏅', '50 approved videos, lifetime.', 50),
+    tierBadge('century',     'Century',        '💯', '100 approved videos, lifetime.', 100),
+    tierBadge('marathon',    'Marathon',       '🏃', '250 approved videos, lifetime.', 250),
+    tierBadge('iron',        'Iron',           '⚙️', '500 approved videos, lifetime.', 500),
+    streakBadge('streak-3',  '3-Day Streak',   '🔥', '3 workdays in a row with ≥1 approval.', 3),
+    streakBadge('streak-5',  'Week Streak',    '📅', '5 workdays in a row (a full working week).', 5),
+    streakBadge('streak-10', 'Fortnight',      '🌗', '10-workday streak.', 10),
+    streakBadge('streak-20', 'Month Streak',   '🌕', '20-workday streak.', 20),
+    flagBadge('zero-rev-week',  'Zero-Revision Week', '✨', 'Every approval in one week had 0 revision rounds.', zeroRevisionWeek),
+    flagBadge('perfect-grade',  'Perfect Grade',      '💎', 'Grade with brand pass + QA clean + new idea, within revision cap.', perfectGrade),
+    flagBadge('excellent-month','Excellent Month',    '🏆', 'Grading composite score ≥ 90 for a month.', excellentMonth),
+    flagBadge('on-target',      'On Target',          '🎯', 'Monthly approvals hit or beat your daily-target × workdays.', onTargetMonth),
+    flagBadge('sampler',        'Category Sampler',   '🎨', 'Approved videos across 3+ categories in one week.', sampledWeek),
+    flagBadge('speed-demon',    'Speed Demon',        '⚡', '5+ approvals in a single UK day.', !!speedDemonDay, speedDemonDay)
+  ];
+}
+
 // Render the Editor Stats tab. Slice 1: wrap card only (no leaderboard, no
 // badges yet). Wrap card visual grammar reuses .gr-hero from Grading so it
 // feels native and the rest of the layer stacks in later.
@@ -6458,14 +6562,32 @@ function renderEditorStatsView() {
     '<div class="es-section-title">Leaderboard · ' + weekRangeLabel(wrap.weekRange.start) + '</div>' +
     '<div class="es-lb-grid">' + lbCards + '</div>';
 
-  // Slice 1+2 note — remove when Slice 3 (badges) lands.
-  var slicePlaceholder =
-    '<div class="es-placeholder">' +
-      '<b>Coming next:</b> auto-earned badges (streak milestones, zero-revision ' +
-      'weeks, perfect grades, on-target months, category variety). Slices 1 + 2 of 3 shipped.' +
-    '</div>';
+  // Badges shelf — filtered by wrap-card selection. Locked badges show progress
+  // for the countable ones so unearned tiers still tell a story.
+  var badges = computeEditorBadges(selected);
+  var earnedN = badges.filter(function(b) { return b.earned; }).length;
+  var badgeChips = badges.map(function(b) {
+    var progressText = '';
+    if (b.target && !b.earned) progressText = '<div class="es-badge-progress"><b>' + b.progress + '</b> / ' + b.target + '</div>';
+    else if (b.target && b.earned) progressText = '<div class="es-badge-progress es-badge-progress-done">' + b.progress + ' / ' + b.target + '</div>';
+    else if (b.earned) progressText = '<div class="es-badge-progress es-badge-progress-done">Earned</div>';
+    else progressText = '<div class="es-badge-progress">Locked</div>';
+    var barPct = b.target ? Math.round((b.progress / b.target) * 100) : (b.earned ? 100 : 0);
+    var bar = '<div class="es-badge-bar-wrap"><div class="es-badge-bar" style="width:' + barPct + '%"></div></div>';
+    var whenTip = b.earnedAt ? ' — first earned ' + formatDate(b.earnedAt) : '';
+    var title = escapeHtml(b.description + whenTip);
+    return '<div class="es-badge' + (b.earned ? ' is-earned' : ' is-locked') + '" title="' + title + '">' +
+        '<div class="es-badge-emoji">' + b.emoji + '</div>' +
+        '<div class="es-badge-label">' + escapeHtml(b.label) + '</div>' +
+        progressText +
+        bar +
+      '</div>';
+  }).join('');
+  var badgesShelf =
+    '<div class="es-section-title">Badges · <span class="es-badge-summary">' + earnedN + ' / ' + badges.length + ' earned by ' + escapeHtml(selected) + '</span></div>' +
+    '<div class="es-badge-grid">' + badgeChips + '</div>';
 
-  return '<div class="editor-stats-view">' + picker + hero + leaderboard + slicePlaceholder + '</div>';
+  return '<div class="editor-stats-view">' + picker + hero + leaderboard + badgesShelf + '</div>';
 }
 
 // The effective revision-round count for a grade. When the grade is linked to a

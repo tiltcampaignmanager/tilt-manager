@@ -1648,6 +1648,20 @@
   .es-lb-streak .gr-streak-flame { font-size: 12px; filter: grayscale(1); opacity: 0.45; }
   .es-lb-streak.is-live .gr-streak-flame { filter: none; opacity: 1; }
   .es-lb-streak.is-live b { color: var(--amber-text); }
+  .es-badge-summary { font-weight: 500; color: var(--text3); letter-spacing: 0; text-transform: none; font-size: 11px; }
+  .es-badge-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .es-badge { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 10px; display: flex; flex-direction: column; align-items: center; text-align: center; cursor: default; transition: transform 0.14s ease, border-color 0.18s, box-shadow 0.18s, background 0.18s; }
+  .es-badge.is-locked { filter: grayscale(1); opacity: 0.55; }
+  .es-badge.is-earned { border-color: var(--border2); }
+  .es-badge.is-earned:hover { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 8px 20px rgba(127,119,221,0.22); background: linear-gradient(180deg, var(--accent-dim) 0%, var(--bg2) 55%); }
+  .es-badge-emoji { font-size: 26px; line-height: 1; margin-bottom: 6px; }
+  .es-badge-label { font-size: 12.5px; font-weight: 700; color: var(--text1); letter-spacing: -0.01em; margin-bottom: 5px; }
+  .es-badge-progress { font-size: 10.5px; color: var(--text3); font-family: 'JetBrains Mono', monospace; margin-bottom: 6px; }
+  .es-badge-progress b { color: var(--text2); }
+  .es-badge-progress-done { color: var(--green-text); }
+  .es-badge-bar-wrap { width: 100%; height: 3px; background: var(--bg4); border-radius: 2px; overflow: hidden; }
+  .es-badge-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 2px; transition: width 0.5s cubic-bezier(0.4,0,0.2,1); }
+  .es-badge.is-earned .es-badge-bar { background: linear-gradient(90deg, var(--green), var(--accent2)); }
 
   @media (prefers-reduced-motion: reduce) {
     .gr-ring-fg { transition: none; }
