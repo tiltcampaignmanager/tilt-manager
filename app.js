@@ -397,6 +397,8 @@ var Fb = {
       grades: Array.isArray(STATE.grades) ? STATE.grades : [],
       scorecardMeta: STATE.scorecardMeta || {},
       gradingStreak: STATE.gradingStreak || { last: null, count: 0, best: 0 },
+      editorStatsSelected: STATE.editorStatsSelected || null,
+      editorStatsBadgesCollapsed: !!STATE.editorStatsBadgesCollapsed,
       _lastEditedBy: Auth.user ? Auth.user.uid : null,
       _lastEditedByName: Auth.user ? Auth.user.displayName : null,
       _lastEditedAt: Date.now()
@@ -6120,6 +6122,11 @@ var GameFx = {
 // status change, and celebrate. Called from setAssetStatus AFTER the state
 // mutation. Sig-guarded so re-renders don't re-fire; only the false→true edge
 // per campaign counts.
+// Sig-guarded so re-renders don't re-fire. Tracks the CURRENT completion state
+// per campaign; only false→true transitions trigger a celebration. First encounter
+// (undefined) just seeds the map — that way a fresh session opening the app to a
+// campaign that was already 100% before the session started doesn't false-fire
+// the next time somebody un-approves and re-approves an asset in it.
 var CampaignFx = { done: {} };
 function maybeFireCampaignComplete(campaignId) {
   if (!campaignId) return;
@@ -6130,7 +6137,8 @@ function maybeFireCampaignComplete(campaignId) {
   });
   if (!live.length) return;
   var allApproved = live.every(function(a) { return a.status === 'Approved'; });
-  var wasDone = !!CampaignFx.done[camp.id];
+  var priorKnown = Object.prototype.hasOwnProperty.call(CampaignFx.done, camp.id);
+  var wasDone = priorKnown ? CampaignFx.done[camp.id] : allApproved;
   CampaignFx.done[camp.id] = allApproved;
   if (allApproved && !wasDone) {
     if (typeof fireGradingCelebration === 'function') fireGradingCelebration(live.length);
@@ -6172,7 +6180,12 @@ var EDITOR_STATS_EDITORS = DAILY_LOG_EDITORS.slice();
 var EDITOR_STATS_VIEWERS = ['elsa'];
 function isEditorStatsViewer() {
   if (typeof Auth === 'undefined' || !Auth.user || !Auth.user.email) return false;
-  var local = String(Auth.user.email).toLowerCase().split('@')[0];
+  var lower = String(Auth.user.email).toLowerCase();
+  var at = lower.indexOf('@');
+  if (at < 0) return false;
+  var local = lower.slice(0, at);
+  var domain = lower.slice(at + 1);
+  if (domain !== EDITOR_EMAIL_DOMAIN) return false;
   return EDITOR_STATS_VIEWERS.indexOf(local) >= 0;
 }
 
@@ -6186,9 +6199,18 @@ var EDITOR_EMAILS = {
   Elsa:  ['elsa'],
   Seller: []
 };
+// Only @tilt.app emails resolve to an editor. Any other domain — even if the
+// local part happens to be 'patty' — gets null, so an outside sign-in can't
+// impersonate an editor's Editor Stats view.
+var EDITOR_EMAIL_DOMAIN = 'tilt.app';
 function emailToEditor(email) {
   if (!email) return null;
-  var local = String(email).toLowerCase().split('@')[0];
+  var lower = String(email).toLowerCase();
+  var at = lower.indexOf('@');
+  if (at < 0) return null;
+  var local = lower.slice(0, at);
+  var domain = lower.slice(at + 1);
+  if (domain !== EDITOR_EMAIL_DOMAIN) return null;
   var found = null;
   Object.keys(EDITOR_EMAILS).forEach(function(name) {
     if (found) return;
@@ -6364,7 +6386,14 @@ function computeEditorBadges(editor) {
     return a.editor === editor && a.status === 'Approved' && a.dateApproved;
   });
   var lifetime = assets.length;
-  var sortedByDate = assets.slice().sort(function(a, b) { return String(a.dateApproved).localeCompare(b.dateApproved); });
+  // Sort by (dateApproved, id) so same-day approvals have a deterministic order —
+  // otherwise "On a Roll" (5 zero-rev in a row) can flip earned/locked depending
+  // on how Firestore returned the docs. Secondary key is asset id as string.
+  var sortedByDate = assets.slice().sort(function(a, b) {
+    var d = String(a.dateApproved).localeCompare(b.dateApproved);
+    if (d !== 0) return d;
+    return String(a.id).localeCompare(String(b.id));
+  });
   function nthDate(n) { return sortedByDate.length >= n ? sortedByDate[n - 1].dateApproved : null; }
 
   var bestStreak = computeEditorStreak(editor).best;
@@ -10743,7 +10772,7 @@ function renderConfigView() {
     teamSection =
       '<div class="section-title">Team \u00B7 ' + users.length + (users.length === 1 ? ' member' : ' members') + '</div>' +
       '<div class="auto-card">' +
-        '<div class="auto-desc" style="margin-bottom:14px;">Everyone who\'s signed in at least once with their @tilt.app account. Change roles below \u2014 the dropdown saves immediately and the affected person sees their tabs update on their next render (no refresh needed). <strong>Viewer</strong> = new-user default; broad read access (Campaigns, Board, Cat Heads Review, Calendar, Daily Log, Notifications, Reporting, Content) minus Grading, Automations, Config, and Editor Stats. <strong>Editor</strong> = Zidni/Sharm/Patty; same tab set as PM plus their personal Editor Stats page, with admin-level edit permissions across the app. <strong>PM</strong> = day-to-day tabs plus Grading (no Automations / Config). <strong>Cat Head</strong> and <strong>Content Lead</strong> = every tab except Editor Stats (view access; destructive controls stay admin-only). <strong>Admin</strong> = everything, including Editor Stats with a peer picker. The founding admin cannot be demoted.</div>' +
+        '<div class="auto-desc" style="margin-bottom:14px;">Everyone who\'s signed in at least once with their @tilt.app account. Change roles below \u2014 the dropdown saves immediately and the affected person sees their tabs update on their next render (no refresh needed). <strong>Viewer</strong> = new-user default; broad read access (Campaigns, Board, Cat Heads Review, Calendar, Daily Log, Notifications, Reporting, Content) minus Grading, Automations, Config, and Editor Stats. <strong>Editor</strong> = the internal video editors; same tab set as PM plus their personal Editor Stats page (only editors whose sign-in email is in <code>EDITOR_EMAILS</code> actually see the Editor Stats tab). Admin-level edit permissions across the app. <strong>PM</strong> = day-to-day tabs plus Grading (no Automations / Config). <strong>Cat Head</strong> and <strong>Content Lead</strong> = every tab except Editor Stats (view access; destructive controls stay admin-only). <strong>Admin</strong> = everything, including Editor Stats with a peer picker. The founding admin cannot be demoted.</div>' +
         teamRows +
       '</div>';
   }
@@ -12952,10 +12981,14 @@ var App = {
     // when the change came from the inline <select> onchange or a drag-drop.
     if (newStatus === 'Approved' && oldStatus !== 'Approved') {
       GameFx.trigger('Approved \u2713', 'approved');
-      maybeFireCampaignComplete(a.campaignId);
     } else if (newStatus === 'Delivered' && oldStatus !== 'Delivered') {
       GameFx.trigger('Delivered', 'brand');
     }
+    // Track campaign completion state on EVERY status change so drops below
+    // 100% properly reset the "already done" flag. Fires confetti only on the
+    // false \u2192 true edge (a real completion moment, whether first-ever or after
+    // a demote / re-approve within this session).
+    maybeFireCampaignComplete(a.campaignId);
     // NOTE: the editor status (asset.status) and the Category Head QC status
     // (asset.categoryHeadQc) are intentionally independent tracks. Changing the editor
     // status must NOT touch categoryHeadQc \u2014 the Cat Head owns that column and moves it

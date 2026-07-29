@@ -73,16 +73,42 @@ Campaign and asset IDs are heterogeneous: seed records use plain integers, while
 
 ## 3. User Roles
 
-Auth is gated to `@tilt.app` emails. Within that, roles are inferred by name/identity, not by ACL — every signed-in user technically sees the full UI, but the workflow is designed around these roles:
+Auth is gated to `@tilt.app` emails. Each user's role lives in Firestore at `users/<uid>.role` and is enforced client-side by `roleAtLeast()` (destructive controls) and `tabsForRole()` (which tabs render in the nav). Firestore rules re-enforce it server-side.
 
-| Role | Members | Primary surfaces |
-|---|---|---|
-| Editors | **Zidni, Sharm, Patty, Elsa** | Campaigns tab, Today Kanban, their notification batch |
-| Category Heads | **Anand** (Sneakers), **Hanyan** (TCG), **Nazy** (Stone Island, Vintage, Bags and Accessories, Y2K, Jewellery, Health and Beauty), **Cristian** (Luxury) | Category Head QC column, CHQ Slack route |
-| PMs | One per country (UK, IT, ES, US, PL) | PM Slack route for "For Review" videos |
-| Admin | Owner of the data | Config tab, Automations tab, all CRUD |
+### 3.1 Role matrix
+
+| Role | Chip colour | Rank | Sees these tabs | Purpose |
+|---|---|---|---|---|
+| **Viewer** | Neutral grey | 1 | Campaigns, Board, Cat Heads Review, Editing Calendar, Daily Log, Notifications, Reporting, Content | Default for first sign-ins. Read-mostly. Excluded from Grading, Automations, Config, Editor Stats. An admin promotes them from the Config → Team panel. |
+| **Editor** | Green | 3 | Viewer tabs + Grading + **Editor Stats** (personal view only, gated by email) | The internal video editors (Zidni, Sharm, Patty). Bumped to rank 3 so `roleAtLeast('admin')` passes — they can edit anything on the tabs they see, no admin-only gates block them. |
+| **PM** | Amber | 2 | Editor tabs minus Editor Stats | Project managers per country. |
+| **Cat Head** | Accent purple | 2 | Every tab except Editor Stats | Category heads reviewing videos through the CH QC column. |
+| **Content Lead** | Blue | 2 | Every tab except Editor Stats | Cross-category content lead (view-heavy). |
+| **Admin** | Accent purple | 3 | Every tab including Editor Stats (with peer picker, when their email is in `EDITOR_STATS_VIEWERS`) | Founding admin owns Config / Automations / destructive controls. The bootstrap admin (`elsa@tilt.app`) can never be demoted. |
+
+### 3.2 People currently in each role
+
+| Role | People |
+|---|---|
+| Editors | **Zidni, Sharm, Patty** (Elsa is admin) |
+| Category Heads | **Anand** (Sneakers), **Hanyan** (TCG), **Nazy** (Stone Island, Vintage, Bags and Accessories, Y2K, Jewellery, Health and Beauty), **Cristian** (Luxury) |
+| PMs | One per country (UK, IT, ES, US, PL) |
+| Admin | **Elsa** (bootstrap admin; auto-promoted on sign-in via `Fb.BOOTSTRAP_ADMIN_EMAILS`) |
 
 Auto-scheduling (the 3pm scheduler) treats **Zidni, Sharm, Patty** as auto-assigned and **Elsa** as manual-only (she receives reactive pings, not scheduled drops).
+
+### 3.3 First-sign-in default
+
+New profiles land as **Viewer** (was `editor` until 2026-07-30). `Fb.ensureUserDoc` writes `role: 'viewer'` on first upsert unless the email is in `BOOTSTRAP_ADMIN_EMAILS`. Admins promote from Config → Team panel — the dropdown saves immediately and the affected user's tabs update on their next render (no refresh needed).
+
+### 3.4 Editor Stats access model (special-cased)
+
+Two orthogonal lists gate the Editor Stats tab, on top of role visibility:
+
+- `EDITOR_STATS_EDITORS` — names in the roster (currently `DAILY_LOG_EDITORS`: Zidni, Sharm, Patty). If your sign-in email maps here via `emailToEditor`, you see the tab with your own personal wrap card + badges, no picker, no peers.
+- `EDITOR_STATS_VIEWERS` — email prefixes (currently `['elsa']`). Peer viewers get the tab with a picker to flip between rostered editors' cards. Non-viewer admins don't see the tab at all.
+
+Both lookups require the `@tilt.app` domain (see `EDITOR_EMAIL_DOMAIN` guard); a same-prefix email from another domain won't slip through the impersonation gate.
 
 ---
 
@@ -275,6 +301,38 @@ Implements the Notion "Editing Team KPI Framework": every delivered video is gra
 - **Game feel** — a lightweight, dependency-free "juicy clicks" layer (`GameFx`), all disabled under `prefers-reduced-motion`: ticking a pass floats a colour-coded **reward label + sparkle burst** from the checkbox; grading several videos in quick succession chains a **Combo ×N** chip (🔥 at ×5+); the prominent buttons get a **click ripple** + **tactile depress**; the hero **lifts on hover**. All FX render into a fixed body-level `#fx-layer` so they survive the tab's `render()`.
 
 Bucketing: a grade's period = the video's delivery month (`estDelivery || dateApproved`); its week = `isoWeekStart` of that date. Helpers: `gradeRounds`, `gradeWithinCap`, `gradeRating`, `gradeCampaignType`, `suggestedTargetForType`.
+
+### 5.9 Editor Stats
+
+Strava-style personal page per editor. Added 2026-07-30. Access is doubly gated (see §3.4): role must be `editor` (or `admin` for Elsa), AND the sign-in email must resolve via `emailToEditor` to a name in `EDITOR_STATS_EDITORS`, OR the email prefix must be in `EDITOR_STATS_VIEWERS`. Both lookups require the `@tilt.app` domain.
+
+Two access lanes:
+
+- **Editor** (Zidni / Sharm / Patty) — personal-only view. No picker, no leaderboard, no rank chip, no peer data visible. The tab computes stats over the signed-in editor's own approvals only.
+- **Viewer** (Elsa) — peer picker at the top listing the three editors (defaults to persisted `STATE.editorStatsSelected`, else the first roster editor). A purple `VIEWER` chip next to the picker signals read-only peer access. Selection persists across sessions via the state snap.
+
+Sections (top to bottom):
+
+- **Wrap card** (`renderEditorStatsView` → hero block, reuses `.gr-hero` classes from Grading):
+  - Big ring: this-week approvals vs. a personal-pace target (`max(lastWeek, dailyTarget × 5, 1)`).
+  - Delta chip vs. last week (▲ N · ▼ N · → same).
+  - Streak block: 🔥 workday-consecutive approvals with weekend-skip (`computeEditorStreak`), current + best. Lit when today counts; dim when dormant.
+  - Personal best week (highest one-week approval count ever, with the Mon–Sun range).
+  - Month pace mini-stat: `monthApprovals / (dailyTarget × workdays) · pace <expected>`.
+
+- **Badges shelf** (`computeEditorBadges`) — 19 auto-computed badges grouped into five pursuits so each editor sees which "story" they're closest to completing. All pure functions over `STATE.assets` + `STATE.grades` — no persistence, no drift, no migration when the roster changes.
+  - **Milestones** (5) — lifetime tier badges: First Cut (1), In the Rhythm (10), Half-Century (50), Century (100), Legend (250).
+  - **Craft** (5) — 🎯 **No Notes** (a single approval with 0 revision rounds) · 🔒 **On a Roll** (5 consecutive 0-revision approvals in chronological order, tiebroken by asset id for determinism across Firestore load ordering) · ✨ **Flawless Week** (every approval in an ISO week had 0 rounds) · 💎 Perfect Grade · 🏆 Excellent Month.
+  - **Momentum** (4) — 3-Day Streak · Working Week (5) · Fortnight (10) · Marathoner (20). Workday-anchored, weekend-skip.
+  - **Range** (4) — 🚀 **Same-Day Ship** (`assignedAt === dateApproved`) · ⚡ Speed Demon (5+ approvals in one UK day) · 🎨 Category Sampler (3+ categories in one week) · 🌍 **World Tour** (3+ countries lifetime, resolved via each asset's campaign).
+  - **Consistency** (1) — 🎯 On Target (month-to-date ≥ daily-target × workdays).
+  - Locked badges show current progress vs. target (e.g., `10 / 50`) — Strava's "keep me going" pattern. Earned badges show an `Earned` pill; earnable-date is derived from the earliest satisfying record (Nth-earliest `dateApproved` for tier badges) and shown in the tooltip.
+
+- **Collapsible shelf** — the badges section header is a click/keyboard toggle (`STATE.editorStatsBadgesCollapsed`, persisted). Header always shows per-group tally chips (`Milestones 3/5 · Craft 2/5 · …`) even when collapsed, so the tab stays informative in its folded state. Hovering (or focusing) any group chip reveals a right-anchored **CSS-only tooltip** listing every badge in that group with earned/locked state, emoji, one-line criterion, and progress bar.
+
+Game-feel plumbing (see §11) already fires reward pops + confetti on Approved transitions across every tab — so an editor's numbers update AND their badge shelf lights up in real time as they approve videos.
+
+Wrap-card `.gr-hero` visual grammar and `.confetti-burst` / `.fx-*` animation layer are shared with the Grading hero — reused verbatim, not forked.
 
 ---
 
@@ -539,6 +597,8 @@ A separate import modal handles Italy-specific CSV files, which use a different 
 
 - **Random data wipes / reset to old test campaign (localStorage race conditions)**: Three related bugs caused the app to occasionally reset to a blank state or to a very old state (e.g. the first test campaign ever created). (1) Firebase Firestore fires `onSnapshot` twice on page load — first with a stale copy from its own IndexedDB browser cache (`fromCache: true`), then with fresh server data. The code treated the first snapshot as authoritative, so stale cache data was applied to STATE and written to localStorage before the real data arrived. Fixed by checking `snap.metadata.fromCache` in both the first-snapshot and subsequent-snapshot handlers and returning early when true — only server-confirmed data is ever applied. (2) The assets subcollection listener (`subscribeAssets`) called `render()` → `saveState()` before the main Firestore doc had arrived, writing `campaigns: []` to localStorage during the boot window. Fixed by adding `&& Fb._ready` to the render guard so the assets listener never triggers a save before the main doc is loaded. (3) `loadState()` (reading localStorage back into STATE) was called in two places — the boot path when Firestore was empty, and the Firestore error fallback. Both calls removed; localStorage is now write-only. Firestore is always the source of truth and the app never bootstraps from localStorage.
 
+- **Editor Stats — six-fix roll-up post-launch review**: (1) `maybeFireCampaignComplete` false-fired a "🎉 all approved" toast + confetti on a fresh session's first status change against an already-completed campaign, because `CampaignFx.done` was in-memory only. Fixed by seeding `wasDone := allApproved` on the first encounter with a campaign (instead of defaulting to `false`), and by calling `maybeFireCampaignComplete` on EVERY status transition (not just Approved) so drops below 100% correctly reset the flag — real re-completions still fire, phantom completions don't. (2) `STATE.editorStatsSelected` and `STATE.editorStatsBadgesCollapsed` mutated with `saveState()` but were absent from the Firestore snap object at `Fb.buildSnapshot()`, so the peer picker choice and the shelf collapse state never survived a refresh. Both added to the snap. (3) `emailToEditor` and `isEditorStatsViewer` matched on email local-part alone — any Google-auth user whose prefix matched `zidni`/`sharm`/`patty`/`elsa`, regardless of domain, would have been treated as that identity. Both now require `@tilt.app` (see `EDITOR_EMAIL_DOMAIN`), case-insensitive. (4) Badge "On a Roll" (5 consecutive 0-revision approvals) was order-dependent for same-day approvals — Firestore load order changed which pattern the walk saw and could flip the badge earned/locked. Fixed with a stable secondary sort on asset id inside `computeEditorBadges`. (5) 22 dead `.es-lb-*` CSS selectors from the removed leaderboard were still in `styles.css`; removed. (6) The Config → Team panel role description hard-coded "Editor = Zidni/Sharm/Patty"; softened to "the internal video editors" with an inline note that the Editor Stats tab is gated by `EDITOR_EMAILS`.
+
 - **localStorage fully removed**: All `localStorage.setItem`, `getItem`, and `removeItem` calls were removed. `saveState()` now only triggers `Fb.scheduleUpload()`. `loadState()` is a no-op stub. `exportLocalBackup()` serialises live `STATE` directly. `importLocalBackup()` applies the parsed JSON to `STATE` and calls `Fb.uploadNow()` — no page reload. Tally date coordination uses Firestore only; `claimTallyLocalOnly()` returns `false` when Firestore is unavailable. All UI text referencing "local storage" updated to reflect Firestore-only persistence. Config "not signed in" banner updated to say changes will not be saved rather than implying localStorage fallback.
 
 - **Offline detection and indicators**: `window._isOffline` is initialised from `navigator.onLine` on load. `window` `offline`/`online` events set `_isOffline` and `_isBackOnline` flags. A persistent amber **⚡ Offline** chip appears in the topbar on disconnect and clears on reconnect. A green **✓ Back Online** chip appears for 3 seconds (0.5s CSS fade-out) when reconnected. On reconnect `scheduleUpload()` is called immediately to flush pending changes. Upload failure while offline shows a **"Upload failed: Offline"** toast instead of the generic retry message.
@@ -608,9 +668,24 @@ These are flagged so future work can address them — they are **not** broken, t
 - No server-side scheduled jobs — the 3pm scheduler runs in the open browser.
 - Slack-only notifications — no email, no in-app inbox.
 - Categories are flat; no sub-categories.
-- No role-based UI gating at the cell level (everyone signed in sees everything).
+- ~~No role-based UI gating at the cell level (everyone signed in sees everything).~~ **Resolved 2026-07-30**: Roles now gate tab visibility (`ROLE_TAB_VISIBILITY`), destructive mutations (`roleAtLeast()`), and first-sign-in defaults (new users land as Viewer). See §3.
 - Weekend toggle is per-run, not a recurring rule.
 - CSV import is one-way (Google Sheets → app); no automated two-way sync.
+
+---
+
+## 10a. Game-feel layer (`GameFx`)
+
+Cross-tab "juicy clicks" system, dependency-free, rendered into a body-level `#fx-layer` so effects survive the tab's `render()`. Everything is disabled under `prefers-reduced-motion: reduce`.
+
+- **Reward pops + sparkle bursts** — floating labels (colour-coded to `brand` / `qa` / `idea` / `approved`) with a radial dot burst. Fired on grading-pass checkboxes AND on status transitions to Approved / Delivered (in `setAssetStatus`), and on Category Head QC transitions to Approved / Needs Revisions (in `setAssetCategoryHeadQc`).
+- **Combo counter** — chains while you keep triggering rewards within a 2.6s window; renders `Combo ×N` (🔥 at ×5+). Cross-tab: grading a video + approving another on the Board keeps the same chain going.
+- **Ripple + tactile press** — Material-style ripple + a 1px depress on `.run-btn`, `.submit-btn`, `.gr-seg-btn`, `.grading-play-btn`, `.action-btn`, `.edit-btn`, `.batch-*-btn` — the small buttons across every tab.
+- **Pointer position tracking** — `GameFx.trigger(label, kind)` reads the last `pointerdown`/`pointermove` position so setters (inline `<select>` `onchange`, deferred CH-card slide-out, drag-drop reorders) can fire a reward at the user's finger without threading events through.
+- **Campaign 100% confetti** (`maybeFireCampaignComplete`) — fires the shared `.confetti-burst` animation + a "🎉 all approved" toast on the false→true edge of a campaign's completion. Called after every status transition (not just Approved), so demotes correctly reset the flag and re-completions fire cleanly. Seeds on first encounter to avoid false-firing on a fresh session viewing an already-completed campaign.
+- **CH queue empty confetti** (`maybeFireCatQueueEmpty`) — same treatment when `catReviewPendingCount()` transitions from >0 to 0, plus a big burst on the bulk `✓ All CH QC Approved` button in the Campaigns toolbar.
+
+The Editor Stats wrap card (see §5.9) and the Grading progress hero (§5.8) both hook into these effects — reward pops fire on approvals AND update the numbers those cards show, so an editor can watch their streak / rank / badge progress advance in real time as they work.
 
 ---
 
@@ -627,6 +702,22 @@ These are flagged so future work can address them — they are **not** broken, t
 
 ### 11.4 Difficulty values
 `Low, Moderate, High, Max`
+
+### 11.4a Roles
+
+`viewer, editor, pm, catHead, contentLead, admin` — see §3 for the rank matrix, tab visibility, and Editor Stats access gates.
+
+### 11.4b Editor Stats badges
+
+19 badges across 5 groups. All auto-computed from `STATE.assets` + `STATE.grades`; no persistence, no migration when the roster changes.
+
+| Group | Badge | Criterion |
+|---|---|---|
+| Milestones | First Cut · In the Rhythm · Half-Century · Century · Legend | 1 · 10 · 50 · 100 · 250 lifetime approvals |
+| Craft | No Notes · On a Roll · Flawless Week · Perfect Grade · Excellent Month | 0-rev approval · 5 consecutive 0-rev in date order · full ISO week with 0-rev only · brand+qa+idea+within-cap grade · month with composite ≥ 90 |
+| Momentum | 3-Day Streak · Working Week · Fortnight · Marathoner | 3 · 5 · 10 · 20 consecutive workdays with ≥1 approval |
+| Range | Same-Day Ship · Speed Demon · Category Sampler · World Tour | `assignedAt === dateApproved` · 5+ approvals in one UK day · 3+ categories in one ISO week · 3+ countries lifetime |
+| Consistency | On Target | Current-month approvals ≥ `dailyTarget × workdays` |
 
 ### 11.5 Role → Slack route map
 
