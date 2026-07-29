@@ -1627,6 +1627,8 @@ var STATE = {
   // record by default (resolved via emailToEditor); PMs/admins/cat-heads pick from a
   // list. Persisted so the choice survives reloads.
   editorStatsSelected: null,
+  // Editor Stats: collapsed sections (per-user persisted). Keys: 'badges'.
+  editorStatsBadgesCollapsed: false,
 
   countries: [
     { code: 'UK', name: 'United Kingdom' },
@@ -6316,32 +6318,37 @@ function computeEditorWrap(editor) {
 // Auto-computed badge shelf. Each badge is a pure function over STATE.assets +
 // STATE.grades — no persistence, no drift. Progress-locked badges show the
 // current count vs. the target so unearned ones still tell a story.
-// Shape: { id, label, emoji, description, tier, earned, progress, target, earnedAt? }
+//
+// Badges are framed around what an editor actually takes pride in: nailing a
+// first-pass approval ("No Notes"), stringing them together ("On a Roll"),
+// shipping the same day they were assigned ("Same-Day Ship"), etc. — not just
+// generic volume tiers. Grouped into MILESTONES / CRAFT / MOMENTUM / RANGE so
+// the shelf reads as a set of pursuits, each with its own next step.
+//
+// Shape: { id, label, emoji, description, group, tier?, earned, progress?, target?, earnedAt? }
 function computeEditorBadges(editor) {
   var assets = STATE.assets.filter(function(a) {
     return a.editor === editor && a.status === 'Approved' && a.dateApproved;
   });
   var lifetime = assets.length;
-  // First-earned date for a countable milestone = the Nth-earliest dateApproved.
-  var sortedDates = assets.map(function(a) { return a.dateApproved; }).sort();
-  function nthDate(n) { return sortedDates.length >= n ? sortedDates[n - 1] : null; }
+  var sortedByDate = assets.slice().sort(function(a, b) { return String(a.dateApproved).localeCompare(b.dateApproved); });
+  function nthDate(n) { return sortedByDate.length >= n ? sortedByDate[n - 1].dateApproved : null; }
 
-  // Longest workday streak run ever (reuses computeEditorStreak).best.
   var bestStreak = computeEditorStreak(editor).best;
 
-  // Weekly bucketing for Zero-Revision Week + Category Sampler + Best Week.
-  var byWeek = Object.create(null);   // weekStartISO → array of assets approved that week
-  var byDay  = Object.create(null);   // ISO date → count (Speed Demon)
+  // Weekly + daily bucketing (Flawless Week / Category Sampler / Speed Demon).
+  var byWeek = Object.create(null);
+  var byDay  = Object.create(null);
   assets.forEach(function(a) {
     var wk = isoWeekStart(a.dateApproved);
     if (wk) { (byWeek[wk] = byWeek[wk] || []).push(a); }
     byDay[a.dateApproved] = (byDay[a.dateApproved] || 0) + 1;
   });
-  var zeroRevisionWeek = false;
+  var flawlessWeek = false;
   var sampledWeek = false;
   Object.keys(byWeek).forEach(function(k) {
     var week = byWeek[k];
-    if (week.length && week.every(function(a) { return (Number(a.revisionRounds) || 0) === 0; })) zeroRevisionWeek = true;
+    if (week.length && week.every(function(a) { return (Number(a.revisionRounds) || 0) === 0; })) flawlessWeek = true;
     var cats = Object.create(null);
     week.forEach(function(a) { if (a.category) cats[a.category] = true; });
     if (Object.keys(cats).length >= 3) sampledWeek = true;
@@ -6349,7 +6356,39 @@ function computeEditorBadges(editor) {
   var speedDemonDay = null;
   Object.keys(byDay).forEach(function(d) { if (byDay[d] >= 5 && !speedDemonDay) speedDemonDay = d; });
 
-  // On Target for the current month.
+  // No Notes — any single approval with 0 revision rounds. First-earned = the
+  // earliest such approval, so the tooltip can tell the story.
+  var noNotesFirst = null;
+  var zeroRevInOrder = [];
+  sortedByDate.forEach(function(a) {
+    var zero = (Number(a.revisionRounds) || 0) === 0;
+    zeroRevInOrder.push(zero);
+    if (zero && !noNotesFirst) noNotesFirst = a.dateApproved;
+  });
+  // On a Roll — 5 consecutive approvals (by date order) each with 0 revisions.
+  var onRoll = false, run = 0;
+  for (var i = 0; i < zeroRevInOrder.length; i++) {
+    if (zeroRevInOrder[i]) { run++; if (run >= 5) { onRoll = true; break; } }
+    else run = 0;
+  }
+
+  // Same-Day Ship — assigned + approved on the same UK date.
+  var sameDayFirst = null;
+  sortedByDate.forEach(function(a) {
+    if (!sameDayFirst && a.assignedAt && a.dateApproved && a.assignedAt === a.dateApproved) {
+      sameDayFirst = a.dateApproved;
+    }
+  });
+
+  // World Tour — lifetime approvals span 3+ countries (via each asset's campaign).
+  var countries = Object.create(null);
+  assets.forEach(function(a) {
+    var camp = findCampaignById(a.campaignId);
+    if (camp && camp.country) countries[camp.country] = true;
+  });
+  var countryCount = Object.keys(countries).length;
+
+  // On Target — current-month approvals ≥ (daily target × workdays elapsed).
   var mn = getThisMonthRange();
   var monthApprovals = countApprovedInRange(mn.start, mn.end, function(a) { return a.editor === editor; });
   var monthTarget = getEditorDailyTarget(editor) * countWorkdays(mn.start, mn.end);
@@ -6360,7 +6399,7 @@ function computeEditorBadges(editor) {
     return g.editor === editor && !g.dismissed && g.brandPass && g.qaClean && g.newIdea && (typeof gradeWithinCap === 'function' ? gradeWithinCap(g) : true);
   });
 
-  // Excellent month — any month where the editor's grading composite ≥ 90.
+  // Excellent Month — grading composite ≥ 90 in any month.
   var excellentMonth = false;
   if (typeof computeScorecard === 'function' && Array.isArray(STATE.grades)) {
     var byMonth = Object.create(null);
@@ -6377,43 +6416,64 @@ function computeEditorBadges(editor) {
     });
   }
 
-  function tierBadge(id, label, emoji, description, target) {
+  function tierBadge(id, label, emoji, description, target, group) {
     return {
-      id: id, label: label, emoji: emoji, description: description,
+      id: id, label: label, emoji: emoji, description: description, group: group,
       target: target, progress: Math.min(lifetime, target),
       earned: lifetime >= target,
       earnedAt: lifetime >= target ? nthDate(target) : null
     };
   }
-  function streakBadge(id, label, emoji, description, target) {
+  function streakBadge(id, label, emoji, description, target, group) {
     return {
-      id: id, label: label, emoji: emoji, description: description,
+      id: id, label: label, emoji: emoji, description: description, group: group,
       target: target, progress: Math.min(bestStreak, target),
       earned: bestStreak >= target,
       earnedAt: null
     };
   }
-  function flagBadge(id, label, emoji, description, earned, earnedAt) {
-    return { id: id, label: label, emoji: emoji, description: description, earned: !!earned, earnedAt: earnedAt || null };
+  function flagBadge(id, label, emoji, description, earned, group, earnedAt) {
+    return { id: id, label: label, emoji: emoji, description: description, group: group, earned: !!earned, earnedAt: earnedAt || null };
+  }
+  function progressBadge(id, label, emoji, description, current, target, earned, group, earnedAt) {
+    return {
+      id: id, label: label, emoji: emoji, description: description, group: group,
+      target: target, progress: Math.min(current, target),
+      earned: !!earned, earnedAt: earnedAt || null
+    };
   }
 
   return [
-    tierBadge('first-cut',   'First Cut',      '🎬', 'Approve your first video.', 1),
-    tierBadge('deca',        'Deca',           '🔟', '10 approved videos, lifetime.', 10),
-    tierBadge('half-cent',   'Half-Century',   '🏅', '50 approved videos, lifetime.', 50),
-    tierBadge('century',     'Century',        '💯', '100 approved videos, lifetime.', 100),
-    tierBadge('marathon',    'Marathon',       '🏃', '250 approved videos, lifetime.', 250),
-    tierBadge('iron',        'Iron',           '⚙️', '500 approved videos, lifetime.', 500),
-    streakBadge('streak-3',  '3-Day Streak',   '🔥', '3 workdays in a row with ≥1 approval.', 3),
-    streakBadge('streak-5',  'Week Streak',    '📅', '5 workdays in a row (a full working week).', 5),
-    streakBadge('streak-10', 'Fortnight',      '🌗', '10-workday streak.', 10),
-    streakBadge('streak-20', 'Month Streak',   '🌕', '20-workday streak.', 20),
-    flagBadge('zero-rev-week',  'Zero-Revision Week', '✨', 'Every approval in one week had 0 revision rounds.', zeroRevisionWeek),
-    flagBadge('perfect-grade',  'Perfect Grade',      '💎', 'Grade with brand pass + QA clean + new idea, within revision cap.', perfectGrade),
-    flagBadge('excellent-month','Excellent Month',    '🏆', 'Grading composite score ≥ 90 for a month.', excellentMonth),
-    flagBadge('on-target',      'On Target',          '🎯', 'Monthly approvals hit or beat your daily-target × workdays.', onTargetMonth),
-    flagBadge('sampler',        'Category Sampler',   '🎨', 'Approved videos across 3+ categories in one week.', sampledWeek),
-    flagBadge('speed-demon',    'Speed Demon',        '⚡', '5+ approvals in a single UK day.', !!speedDemonDay, speedDemonDay)
+    // MILESTONES — the "how far I've come" story. Kept tier-count-based, renamed
+    // to have more character. Iron/500 removed — 250 is a career-length badge
+    // that stays motivating; 500 was too far off for anyone.
+    tierBadge('first-cut',   'First Cut',       '🎬', 'Approve your first video.',              1,   'milestones'),
+    tierBadge('rhythm',      'In the Rhythm',   '🎼', '10 approved videos — you\'re in it now.', 10,  'milestones'),
+    tierBadge('half-cent',   'Half-Century',    '🏅', '50 approved videos — real portfolio.',   50,  'milestones'),
+    tierBadge('century',     'Century',         '💯', '100 approved videos — triple digits.',   100, 'milestones'),
+    tierBadge('legend',      'Legend',          '👑', '250 approved videos — the wall.',         250, 'milestones'),
+
+    // CRAFT — the moments editors screenshot for their group chat.
+    flagBadge('no-notes',       'No Notes',      '🎯', 'A video approved on the first submit (0 revision rounds).', !!noNotesFirst, 'craft', noNotesFirst),
+    flagBadge('on-a-roll',      'On a Roll',     '🔒', '5 approvals in a row, every one with 0 revisions.', onRoll, 'craft'),
+    flagBadge('flawless-week',  'Flawless Week', '✨', 'A full week where every approval had 0 revisions.', flawlessWeek, 'craft'),
+    flagBadge('perfect-grade',  'Perfect Grade', '💎', 'A grade with brand pass + QA clean + new idea, within cap.', perfectGrade, 'craft'),
+    flagBadge('excellent-month','Excellent Month','🏆', 'Grading composite ≥ 90 for a whole month.', excellentMonth, 'craft'),
+
+    // MOMENTUM — streaks. Punchier names than the old generic tiers.
+    streakBadge('streak-3',  '3-Day Streak',   '🔥', '3 workdays in a row with ≥1 approval.',           3,  'momentum'),
+    streakBadge('streak-5',  'Working Week',   '📅', '5 workdays in a row — a full working week.',      5,  'momentum'),
+    streakBadge('streak-10', 'Fortnight',      '🌗', '10-workday streak — you\'re living in the tab.',   10, 'momentum'),
+    streakBadge('streak-20', 'Marathoner',     '🌕', '20-workday streak — a full month of shipping.',    20, 'momentum'),
+
+    // RANGE — flexes that show breadth, not just volume.
+    flagBadge('same-day',    'Same-Day Ship',   '🚀', 'Assigned and approved on the same UK day.',         !!sameDayFirst,     'range', sameDayFirst),
+    flagBadge('speed-demon', 'Speed Demon',     '⚡', '5+ approvals in a single UK day.',                   !!speedDemonDay,   'range', speedDemonDay),
+    flagBadge('sampler',     'Category Sampler','🎨', 'Approvals across 3+ different categories in one week.', sampledWeek,   'range'),
+    progressBadge('world-tour', 'World Tour',   '🌍', 'Approvals across 3+ different countries.',           countryCount, 3, countryCount >= 3, 'range'),
+
+    // CONSISTENCY — hitting the pace month after month.
+    flagBadge('on-target',   'On Target',       '🎯', 'This month\'s approvals ≥ your daily target × workdays.', onTargetMonth, 'consistency')
   ];
 }
 
@@ -6562,12 +6622,21 @@ function renderEditorStatsView() {
     '<div class="es-section-title">Leaderboard · ' + weekRangeLabel(wrap.weekRange.start) + '</div>' +
     '<div class="es-lb-grid">' + lbCards + '</div>';
 
-  // Badges shelf — filtered by wrap-card selection. Locked badges show progress
-  // for the countable ones so unearned tiers still tell a story.
+  // Badges shelf — grouped into pursuits (Milestones / Craft / Momentum /
+  // Range / Consistency) so each editor sees which "story" they're closest to
+  // completing. Collapsible: the header always shows per-group tallies, so
+  // even collapsed it teases what's within reach.
   var badges = computeEditorBadges(selected);
   var earnedN = badges.filter(function(b) { return b.earned; }).length;
-  var badgeChips = badges.map(function(b) {
-    var progressText = '';
+  var GROUPS = [
+    { key: 'milestones',  label: 'Milestones' },
+    { key: 'craft',       label: 'Craft' },
+    { key: 'momentum',    label: 'Momentum' },
+    { key: 'range',       label: 'Range' },
+    { key: 'consistency', label: 'Consistency' }
+  ];
+  function renderChip(b) {
+    var progressText;
     if (b.target && !b.earned) progressText = '<div class="es-badge-progress"><b>' + b.progress + '</b> / ' + b.target + '</div>';
     else if (b.target && b.earned) progressText = '<div class="es-badge-progress es-badge-progress-done">' + b.progress + ' / ' + b.target + '</div>';
     else if (b.earned) progressText = '<div class="es-badge-progress es-badge-progress-done">Earned</div>';
@@ -6582,10 +6651,37 @@ function renderEditorStatsView() {
         progressText +
         bar +
       '</div>';
+  }
+  var groupMetas = GROUPS.map(function(g) {
+    var list = badges.filter(function(b) { return b.group === g.key; });
+    var e = list.filter(function(x) { return x.earned; }).length;
+    return { key: g.key, label: g.label, list: list, earned: e, total: list.length };
+  }).filter(function(g) { return g.total > 0; });
+  var groupChips = groupMetas.map(function(g) {
+    var full = g.total > 0 && g.earned === g.total;
+    return '<span class="es-badge-group-chip' + (full ? ' is-full' : '') + '" title="' + escapeHtml(g.label) + ': ' + g.earned + ' of ' + g.total + ' earned">' +
+        escapeHtml(g.label) + ' <b>' + g.earned + '</b>/' + g.total +
+      '</span>';
+  }).join('');
+  var badgesOpen = !STATE.editorStatsBadgesCollapsed;
+  var groupsHtml = groupMetas.map(function(g) {
+    return '<div class="es-badge-group">' +
+        '<div class="es-badge-group-title">' + escapeHtml(g.label) +
+          ' <span class="es-badge-group-count">' + g.earned + ' / ' + g.total + '</span></div>' +
+        '<div class="es-badge-grid">' + g.list.map(renderChip).join('') + '</div>' +
+      '</div>';
   }).join('');
   var badgesShelf =
-    '<div class="es-section-title">Badges · <span class="es-badge-summary">' + earnedN + ' / ' + badges.length + ' earned by ' + escapeHtml(selected) + '</span></div>' +
-    '<div class="es-badge-grid">' + badgeChips + '</div>';
+    '<div class="es-section-title es-section-toggle' + (badgesOpen ? ' is-open' : '') + '"' +
+      ' role="button" tabindex="0" aria-expanded="' + badgesOpen + '"' +
+      ' onclick="App.toggleEditorStatsBadges()"' +
+      ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();App.toggleEditorStatsBadges()}">' +
+      '<span class="es-section-chev">' + (badgesOpen ? '▼' : '▶') + '</span>' +
+      '<span class="es-section-heading">Badges</span>' +
+      '<span class="es-badge-summary"><b>' + earnedN + '</b> / ' + badges.length + ' earned by ' + escapeHtml(selected) + '</span>' +
+      '<span class="es-badge-group-chips">' + groupChips + '</span>' +
+    '</div>' +
+    (badgesOpen ? '<div class="es-badges-body">' + groupsHtml + '</div>' : '');
 
   return '<div class="editor-stats-view">' + picker + hero + leaderboard + badgesShelf + '</div>';
 }
@@ -12196,6 +12292,11 @@ var App = {
   // ===== Editor Stats (Strava-for-editors) =====
   setEditorStatsSelected: function(name) {
     STATE.editorStatsSelected = name || null;
+    saveState();
+    render();
+  },
+  toggleEditorStatsBadges: function() {
+    STATE.editorStatsBadgesCollapsed = !STATE.editorStatsBadgesCollapsed;
     saveState();
     render();
   },
