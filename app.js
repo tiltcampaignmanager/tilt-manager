@@ -4144,6 +4144,15 @@ function renderTopbar() {
   var role = (Auth && Auth.user && Auth.user.role) ? Auth.user.role : 'editor';
   var allowedTabs = tabsForRole(role);
   order = order.filter(function(k) { return allowedTabs.indexOf(k) >= 0; });
+  // Extra gate for editorStats: role alone isn't enough — this tab is
+  // Zidni/Sharm/Patty only, identified by their signed-in email via emailToEditor.
+  // A new editor added to the `editor` role won't see it until their prefix is
+  // added to EDITOR_EMAILS AND their name is in EDITOR_STATS_EDITORS.
+  order = order.filter(function(k) {
+    if (k !== 'editorStats') return true;
+    var who = (typeof currentEditorFromAuth === 'function') ? currentEditorFromAuth() : null;
+    return !!(who && typeof EDITOR_STATS_EDITORS !== 'undefined' && EDITOR_STATS_EDITORS.indexOf(who) >= 0);
+  });
   // If the active tab got hidden by the role filter (e.g. an editor whose last
   // active tab was Config), bounce them to the first visible tab so the page
   // doesn't render an empty body.
