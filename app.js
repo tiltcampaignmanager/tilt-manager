@@ -5979,6 +5979,10 @@ var GradingFx = { sig: null, wasComplete: false };
 var GameFx = {
   _combo: 0,
   _comboTs: 0,
+  // Last pointer position (viewport coords). Kept fresh via a global listener
+  // so any code path — inline onchange, deferred setter, drag drop — can fire
+  // a reward at the user's finger without having to plumb the event through.
+  _lastX: null, _lastY: null, _lastAt: 0,
   _reduce: function() { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); },
   _layer: function() {
     var el = document.getElementById('fx-layer');
@@ -6025,6 +6029,18 @@ var GameFx = {
     t.style.left = x + 'px'; t.style.top = (y - 26) + 'px';
     this._pop(t, 900);
   },
+  // Universal "fire a reward at the user's finger" — used from setters that
+  // don't have an event handy (inline onchange, deferred callbacks, drag drops).
+  // Falls back to the viewport centre if we've never seen a pointer event.
+  trigger: function(label, kind, opts) {
+    if (this._reduce()) return;
+    opts = opts || {};
+    var stale = !this._lastAt || (Date.now() - this._lastAt > 4000);
+    var x = stale ? Math.round((window.innerWidth || 800) / 2) : this._lastX;
+    var y = stale ? Math.round((window.innerHeight || 600) / 3) : this._lastY;
+    this.reward(x, y, label, kind);
+    if (opts.combo !== false) this.bumpCombo(x, y);
+  },
   // Material-style ripple from the click point inside a button.
   ripple: function(btn, ev) {
     if (this._reduce()) return;
@@ -6042,6 +6058,15 @@ var GameFx = {
     if (this._inited || typeof document === 'undefined') return;
     this._inited = true;
     var self = this;
+    // Track the pointer so trigger() can fire a reward at the user's finger even
+    // when the mutation happens far from the original event (deferred setters,
+    // drag drops, inline onchange). Both mouse and touch land here.
+    var track = function(e) {
+      if (e.clientX == null) return;
+      self._lastX = e.clientX; self._lastY = e.clientY; self._lastAt = Date.now();
+    };
+    document.addEventListener('pointerdown', track, true);
+    document.addEventListener('pointermove', track, true);
     // Reward + combo when a grading pass checkbox is turned ON. Capture phase so we read
     // the checkbox's on-screen position BEFORE its inline onchange triggers a re-render.
     document.addEventListener('change', function(e) {
@@ -6052,13 +6077,54 @@ var GameFx = {
       self.reward(x, y, t.getAttribute('data-reward') || '✓', t.getAttribute('data-kind') || 'pts');
       self.bumpCombo(x, y);
     }, true);
-    // Ripple on the prominent buttons.
+    // Ripple on the prominent buttons. The universal .action-btn / .edit-btn /
+    // .batch-* selectors mean every tab (Board, Today, CH Review, Log) gets the
+    // same tactile feedback that Grading already has.
     document.addEventListener('click', function(e) {
-      var btn = e.target && e.target.closest && e.target.closest('.run-btn, .submit-btn, .gr-seg-btn, .grading-play-btn');
+      var btn = e.target && e.target.closest && e.target.closest('.run-btn, .submit-btn, .gr-seg-btn, .grading-play-btn, .action-btn, .edit-btn, .batch-flush-btn, .batch-copy-btn, .batch-clear-btn');
       if (btn && !btn.disabled) self.ripple(btn, e);
     }, true);
   }
 };
+
+// Detect a campaign flipping to "everything Approved" as a side-effect of a
+// status change, and celebrate. Called from setAssetStatus AFTER the state
+// mutation. Sig-guarded so re-renders don't re-fire; only the false→true edge
+// per campaign counts.
+var CampaignFx = { done: {} };
+function maybeFireCampaignComplete(campaignId) {
+  if (!campaignId) return;
+  var camp = findCampaignById(campaignId);
+  if (!camp) return;
+  var live = STATE.assets.filter(function(a) {
+    return String(a.campaignId) === String(camp.id) && a.status !== 'Cancelled';
+  });
+  if (!live.length) return;
+  var allApproved = live.every(function(a) { return a.status === 'Approved'; });
+  var wasDone = !!CampaignFx.done[camp.id];
+  CampaignFx.done[camp.id] = allApproved;
+  if (allApproved && !wasDone) {
+    if (typeof fireGradingCelebration === 'function') fireGradingCelebration(live.length);
+    if (typeof toast === 'function') toast('🎉 ' + (camp.name || 'Campaign') + ' — all ' + live.length + ' videos approved', 'success');
+  }
+}
+
+// Same pattern for the Cat Heads Review queue: fire a confetti burst the first
+// time the pending list empties (per current filter). Called after any CH-QC
+// status change.
+var CatQueueFx = { wasEmpty: false, wasCount: 0 };
+function maybeFireCatQueueEmpty() {
+  if (typeof catReviewPendingCount !== 'function') return;
+  var n = catReviewPendingCount();
+  var wasEmpty = CatQueueFx.wasEmpty;
+  var prevCount = CatQueueFx.wasCount;
+  CatQueueFx.wasEmpty = (n === 0);
+  CatQueueFx.wasCount = n;
+  if (n === 0 && !wasEmpty && prevCount > 0) {
+    if (typeof fireGradingCelebration === 'function') fireGradingCelebration(prevCount);
+    if (typeof toast === 'function') toast('🎉 Cat Heads Review — queue cleared', 'success');
+  }
+}
 
 // The effective revision-round count for a grade. When the grade is linked to a
 // tracked campaign video (assetId) and hasn't been manually overridden, this reads
@@ -12238,6 +12304,9 @@ var App = {
     saveState();
     render();
     toast(targets.length + ' asset' + (targets.length === 1 ? '' : 's') + ' marked CH QC Approved', 'success');
+    // Game feel: bulk approvals earn the big confetti moment on top of the toast.
+    if (typeof fireGradingCelebration === 'function') fireGradingCelebration(targets.length);
+    maybeFireCatQueueEmpty();
   },
 
   setAssetStatus: function(id, newStatus) {
@@ -12279,6 +12348,16 @@ var App = {
     }
     logAction('updated', 'Asset "' + a.name + '" status: ' + oldStatus + ' \u2192 ' + newStatus);
     emitAssetChangeNotifications(a, { oldEditor: a.editor, oldStatus: oldStatus });
+    // Game feel: reward pop + combo chain on the moments editors/PMs care about
+    // (Approved is the big win, Delivered is the "handed off" checkpoint). Fires
+    // at the last known pointer position so it appears at the user's finger even
+    // when the change came from the inline <select> onchange or a drag-drop.
+    if (newStatus === 'Approved' && oldStatus !== 'Approved') {
+      GameFx.trigger('Approved \u2713', 'approved');
+      maybeFireCampaignComplete(a.campaignId);
+    } else if (newStatus === 'Delivered' && oldStatus !== 'Delivered') {
+      GameFx.trigger('Delivered', 'brand');
+    }
     // NOTE: the editor status (asset.status) and the Category Head QC status
     // (asset.categoryHeadQc) are intentionally independent tracks. Changing the editor
     // status must NOT touch categoryHeadQc \u2014 the Cat Head owns that column and moves it
@@ -13104,6 +13183,15 @@ var App = {
         }
       }
     }
+    // Game feel: reward + combo on the Cat Head's own moment of truth (approving
+    // or sending back). Skip on suppressed contexts. Then re-check whether the
+    // pending queue just emptied for a big confetti moment.
+    if (newVal === 'Approved' && old !== 'Approved') {
+      GameFx.trigger('Approved ✓', 'approved');
+    } else if (newVal === 'Needs Revisions' && old !== 'Needs Revisions') {
+      GameFx.trigger('Revisions', 'idea');
+    }
+    maybeFireCatQueueEmpty();
     render();
   },
 

@@ -1571,12 +1571,16 @@
   @keyframes gr-confetti { 0% { opacity: 0; transform: translateY(-8vh) rotate(0deg); } 10% { opacity: 1; } 100% { opacity: 0; transform: translateY(104vh) rotate(var(--rot, 360deg)); } }
 
   /* ── Game feel: tactile clicks, ripples, reward pops, combo (inspired by web games) ── */
-  /* Tactile press — buttons physically depress on click. */
-  .run-btn, .submit-btn, .gr-seg-btn, .grading-play-btn, .grading-dismiss-btn, .grading-restore-btn, .grading-del-btn, .grading-rounds-revert { transition: transform 0.08s ease, background 0.12s, color 0.12s, opacity 0.12s, border-color 0.12s; }
-  .run-btn:active:not(:disabled), .submit-btn:active:not(:disabled), .action-btn:active:not(:disabled), .gr-seg-btn:active, .grading-play-btn:active, .grading-dismiss-btn:active, .grading-restore-btn:active, .grading-del-btn:active, .grading-rounds-revert:active, .batch-flush-btn:active:not(:disabled), .batch-copy-btn:active:not(:disabled), .batch-clear-btn:active:not(:disabled) { transform: translateY(1px) scale(0.97); }
+  /* Tactile press — buttons physically depress on click. Applies universally to
+     the small action/edit/batch buttons so every tab feels the same. */
+  .run-btn, .submit-btn, .gr-seg-btn, .grading-play-btn, .grading-dismiss-btn, .grading-restore-btn, .grading-del-btn, .grading-rounds-revert,
+  .action-btn, .edit-btn, .batch-flush-btn, .batch-copy-btn, .batch-clear-btn { transition: transform 0.08s ease, background 0.12s, color 0.12s, opacity 0.12s, border-color 0.12s; }
+  .run-btn:active:not(:disabled), .submit-btn:active:not(:disabled), .action-btn:active:not(:disabled), .edit-btn:active:not(:disabled), .gr-seg-btn:active, .grading-play-btn:active, .grading-dismiss-btn:active, .grading-restore-btn:active, .grading-del-btn:active, .grading-rounds-revert:active, .batch-flush-btn:active:not(:disabled), .batch-copy-btn:active:not(:disabled), .batch-clear-btn:active:not(:disabled) { transform: translateY(1px) scale(0.97); }
 
-  /* Ripple host — clip the ripple to the button shape. */
-  .run-btn, .submit-btn, .gr-seg-btn, .grading-play-btn { position: relative; overflow: hidden; }
+  /* Ripple host — clip the ripple to the button shape. Extended to every tab's
+     prominent buttons so approvals/deliveries feel as tactile as grading does. */
+  .run-btn, .submit-btn, .gr-seg-btn, .grading-play-btn,
+  .action-btn, .edit-btn, .batch-flush-btn, .batch-copy-btn, .batch-clear-btn { position: relative; overflow: hidden; }
   .fx-ripple { position: absolute; border-radius: 50%; background: currentColor; opacity: 0.22; transform: scale(0); animation: fx-ripple 0.6s ease-out forwards; pointer-events: none; }
   @keyframes fx-ripple { to { transform: scale(1); opacity: 0; } }
 
@@ -1590,10 +1594,12 @@
   .fx-reward-brand { color: var(--accent2); }
   .fx-reward-qa { color: var(--green-text); }
   .fx-reward-idea { color: var(--amber-text); }
+  .fx-reward-approved { color: var(--green-text); }
   @keyframes fx-rise { 0% { opacity: 0; transform: translate(-50%, -30%) scale(0.6); } 15% { opacity: 1; } 30% { transform: translate(-50%, -75%) scale(1.12); } 100% { opacity: 0; transform: translate(-50%, -165%) scale(1); } }
   .fx-spark { position: fixed; width: 6px; height: 6px; border-radius: 50%; background: var(--accent2); animation: fx-spark 0.72s ease-out forwards; }
   .fx-spark-qa { background: var(--green-text); }
   .fx-spark-idea { background: var(--amber-text); }
+  .fx-spark-approved { background: var(--green-text); }
   @keyframes fx-spark { 0% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 100% { opacity: 0; transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(0.2); } }
   .fx-combo { position: fixed; transform: translate(-50%, -50%); font-size: 13px; font-weight: 800; color: #fff; background: linear-gradient(90deg, var(--accent), var(--accent2)); padding: 3px 11px; border-radius: 20px; box-shadow: 0 4px 16px rgba(127,119,221,0.5); animation: fx-combo 0.9s cubic-bezier(0.2,0.8,0.3,1) forwards; }
   @keyframes fx-combo { 0% { opacity: 0; transform: translate(-50%, -50%) scale(0.4) rotate(-8deg); } 20% { opacity: 1; transform: translate(-50%, -50%) scale(1.18) rotate(3deg); } 45% { transform: translate(-50%, -50%) scale(1) rotate(0deg); } 100% { opacity: 0; transform: translate(-50%, -120%) scale(1); } }
@@ -1603,6 +1609,6 @@
     .gr-streak.is-live .gr-streak-flame { animation: none; }
     .grading-log-check input:active { transform: none; }
     .confetti-burst, .fx-layer { display: none; }
-    .run-btn:active, .submit-btn:active, .action-btn:active, .gr-seg-btn:active, .grading-play-btn:active, .grading-dismiss-btn:active, .grading-restore-btn:active, .grading-del-btn:active, .batch-flush-btn:active { transform: none; }
+    .run-btn:active, .submit-btn:active, .action-btn:active, .edit-btn:active, .gr-seg-btn:active, .grading-play-btn:active, .grading-dismiss-btn:active, .grading-restore-btn:active, .grading-del-btn:active, .batch-flush-btn:active, .batch-copy-btn:active, .batch-clear-btn:active { transform: none; }
     .gr-hero:hover { transform: none; box-shadow: none; }
   }
