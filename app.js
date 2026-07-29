@@ -1003,9 +1003,10 @@ var Fb = {
     return fbDb.doc(Fb.STATE_DOC).set(snap);
   },
 
-  // Upsert the user's profile doc on first sign-in. Bootstrap admins listed below
-  // are auto-promoted to role 'admin' (also covers existing docs that landed as
-  // 'editor' before role bootstrap was wired up). Everyone else lands as 'editor'.
+  // Upsert the user's profile doc on first sign-in. Bootstrap admins listed
+  // below are auto-promoted to 'admin'. Everyone else lands as 'viewer' — the
+  // safe read-mostly default. An admin promotes them to editor / pm / etc. from
+  // Config. Existing docs are left alone; the promotion path is manual.
   BOOTSTRAP_ADMIN_EMAILS: ['elsa@tilt.app'],
 
   ensureUserDoc: function() {
@@ -1018,7 +1019,7 @@ var Fb = {
           email: Auth.user.email,
           displayName: Auth.user.displayName,
           photoURL: Auth.user.photoURL || null,
-          role: isBootstrapAdmin ? 'admin' : 'editor',
+          role: isBootstrapAdmin ? 'admin' : 'viewer',
           createdAt: firebase.firestore.FieldValue.serverTimestamp()
         });
       }
@@ -4072,38 +4073,43 @@ var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'lo
 // gated by roleAtLeast('admin') inside Config/Automations.
 // Tab visibility is also enforced server-side in Phase D via Firestore rules on
 // the documents these tabs touch (config/app and the users collection).
-// editorStats is deliberately editors-only right now — it's the editors' own
-// "Strava" page. Kept out of ALL_TABS so catHead / contentLead (which inherit
-// ALL_TABS.slice()) don't get it either. Admin doesn't include it by default;
-// re-add 'editorStats' to any role array to expose it there.
+// Role-based tab visibility. editorStats is gated at two levels: role visibility
+// (must be in the array) AND an additional email check inside the topbar filter
+// so only Zidni/Sharm/Patty (own view) or the viewer list (Elsa, peer picker)
+// actually see the tab in the nav. Viewers land here on first sign-in — a broad
+// read-mostly set that excludes internal-ops tabs and the Strava page.
 var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'automations', 'reporting', 'content', 'config'];
+var VIEWER_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'];
 var ROLE_TAB_VISIBILITY = {
+  viewer:      VIEWER_TABS.slice(),
   editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'editorStats', 'notifications', 'reporting', 'content'],
   pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
   catHead:     ALL_TABS.slice(),
   contentLead: ALL_TABS.slice(),
-  admin:       ALL_TABS.slice()
+  admin:       ALL_TABS.concat(['editorStats'])
 };
 
 // Human-readable role labels (role keys are camelCase / short; these are what the
 // UI shows in chips, dropdowns, and titles).
-var ROLE_LABELS = { editor: 'Editor', pm: 'PM', catHead: 'Cat Head', contentLead: 'Content Lead', admin: 'Admin' };
+var ROLE_LABELS = { viewer: 'Viewer', editor: 'Editor', pm: 'PM', catHead: 'Cat Head', contentLead: 'Content Lead', admin: 'Admin' };
 function roleLabelFor(role) { return ROLE_LABELS[role] || (role || '').toUpperCase(); }
 
 // Returns the list of tab IDs the given role is allowed to see. Unknown roles
-// (including null while a profile is still loading) get the editor set as a
-// safe default \u2014 better to under-show than over-show.
+// (including null while a profile is still loading) get the viewer set \u2014 the
+// safest default: broad read access without editor-only surfaces.
 function tabsForRole(role) {
-  return ROLE_TAB_VISIBILITY[role] || ROLE_TAB_VISIBILITY.editor;
+  return ROLE_TAB_VISIBILITY[role] || ROLE_TAB_VISIBILITY.viewer;
 }
 
-// True if the current signed-in user has the given role (or higher). Role hierarchy:
-// admin > pm > editor. Used to gate destructive actions client-side; Firestore rules
-// re-enforce server-side in Phase D.
-var ROLE_RANK = { editor: 1, pm: 2, catHead: 2, contentLead: 2, admin: 3 };
+// True if the current signed-in user has the given role (or higher). Hierarchy:
+// admin/editor (3) > pm/catHead/contentLead (2) > viewer (1). Editors are treated
+// as admin-level (Elsa promoted them so they can edit anything freely) — the only
+// difference from admin is the badge colour. Viewers are read-mostly and land here
+// as the first-sign-in default; an admin promotes them from Config.
+var ROLE_RANK = { viewer: 1, editor: 3, pm: 2, catHead: 2, contentLead: 2, admin: 3 };
 function roleAtLeast(required) {
   var u = (typeof Auth !== 'undefined' && Auth.user) ? Auth.user : null;
-  var have = (u && u.role) ? u.role : 'editor';
+  var have = (u && u.role) ? u.role : 'viewer';
   return (ROLE_RANK[have] || 0) >= (ROLE_RANK[required] || 0);
 }
 
@@ -4141,17 +4147,20 @@ function renderTopbar() {
   })();
   // Role gate: keep only the tabs the current user's role is allowed to see.
   // (See ROLE_TAB_VISIBILITY for the matrix.)
-  var role = (Auth && Auth.user && Auth.user.role) ? Auth.user.role : 'editor';
+  var role = (Auth && Auth.user && Auth.user.role) ? Auth.user.role : 'viewer';
   var allowedTabs = tabsForRole(role);
   order = order.filter(function(k) { return allowedTabs.indexOf(k) >= 0; });
-  // Extra gate for editorStats: role alone isn't enough — this tab is
-  // Zidni/Sharm/Patty only, identified by their signed-in email via emailToEditor.
-  // A new editor added to the `editor` role won't see it until their prefix is
-  // added to EDITOR_EMAILS AND their name is in EDITOR_STATS_EDITORS.
+  // Extra gate for editorStats: role alone isn't enough. Access is granted to
+  // (a) editors whose sign-in email maps to one of the three (own personal view),
+  // or (b) named viewers (EDITOR_STATS_VIEWERS — Elsa) who get a peer picker.
+  // A new editor hired into the 'editor' role won't see the tab until their
+  // prefix is added to EDITOR_EMAILS and their name to EDITOR_STATS_EDITORS.
   order = order.filter(function(k) {
     if (k !== 'editorStats') return true;
     var who = (typeof currentEditorFromAuth === 'function') ? currentEditorFromAuth() : null;
-    return !!(who && typeof EDITOR_STATS_EDITORS !== 'undefined' && EDITOR_STATS_EDITORS.indexOf(who) >= 0);
+    var isEditor = !!(who && typeof EDITOR_STATS_EDITORS !== 'undefined' && EDITOR_STATS_EDITORS.indexOf(who) >= 0);
+    var isViewer = (typeof isEditorStatsViewer === 'function') && isEditorStatsViewer();
+    return isEditor || isViewer;
   });
   // If the active tab got hidden by the role filter (e.g. an editor whose last
   // active tab was Config), bounce them to the first visible tab so the page
@@ -6156,6 +6165,17 @@ function maybeFireCatQueueEmpty() {
 // full-time internal editors). Add Elsa here if she wants a wrap card too.
 var EDITOR_STATS_EDITORS = DAILY_LOG_EDITORS.slice();
 
+// Email prefixes allowed to VIEW everyone's Editor Stats (peer picker). Distinct
+// from EDITOR_STATS_EDITORS — a viewer doesn't appear in the roster themselves;
+// they just get read-only access to peek at each editor's card. Keep tight —
+// this is a leaderboard-adjacent surface and editors were promised privacy.
+var EDITOR_STATS_VIEWERS = ['elsa'];
+function isEditorStatsViewer() {
+  if (typeof Auth === 'undefined' || !Auth.user || !Auth.user.email) return false;
+  var local = String(Auth.user.email).toLowerCase().split('@')[0];
+  return EDITOR_STATS_VIEWERS.indexOf(local) >= 0;
+}
+
 // Editor name → common email prefixes we accept. Auth exposes Google email
 // (e.g. patty@tilt.app) but STATE uses display names. Kept as a bidirectional
 // map so we can also render "yourself" chips. Extend when new editors join.
@@ -6495,12 +6515,14 @@ function computeEditorBadges(editor) {
 // feels native and the rest of the layer stacks in later.
 function renderEditorStatsView() {
   var currentE = currentEditorFromAuth();
-  // Personal-only view: the tab is editors-only (see ROLE_TAB_VISIBILITY) and
-  // there is deliberately no peer picker or leaderboard — this is each editor's
-  // own page, not a competitive board. If the signed-in email doesn't map to a
-  // known editor name, tell them and stop; don't fall back to someone else's
-  // record.
-  if (!currentE || EDITOR_STATS_EDITORS.indexOf(currentE) < 0) {
+  var isMappedEditor = !!(currentE && EDITOR_STATS_EDITORS.indexOf(currentE) >= 0);
+  var isViewer = isEditorStatsViewer();
+  // Two access lanes:
+  //  · Editors (Zidni/Sharm/Patty) → personal-only view, no picker, no peers.
+  //  · Viewer (Elsa, admin) → peer picker so she can flip between editors.
+  //  · Everyone else who reached this render → shouldn't happen (filtered
+  //    upstream in the topbar), but return a friendly empty state just in case.
+  if (!isMappedEditor && !isViewer) {
     return '<div class="editor-stats-view">' +
         '<div class="es-empty">' +
           '<div class="es-empty-title">Editor Stats</div>' +
@@ -6509,8 +6531,31 @@ function renderEditorStatsView() {
         '</div>' +
       '</div>';
   }
-  var selected = currentE;
-  var isSelf = true;
+  // Selected editor whose card is shown. Editors are locked to themselves;
+  // viewers can pick from the roster (defaulting to the persisted choice, then
+  // the first editor). Guard the persisted value so a stale name doesn't crash.
+  var selected;
+  if (isMappedEditor) {
+    selected = currentE;
+  } else {
+    var persisted = STATE.editorStatsSelected;
+    selected = (persisted && EDITOR_STATS_EDITORS.indexOf(persisted) >= 0) ? persisted : EDITOR_STATS_EDITORS[0];
+  }
+  var isSelf = selected === currentE;
+  // Picker: only rendered for viewers, not for the editors themselves.
+  var picker = '';
+  if (isViewer) {
+    var pickerOptions = EDITOR_STATS_EDITORS.map(function(e) {
+      var sel = e === selected ? ' selected' : '';
+      return '<option value="' + escapeHtml(e) + '"' + sel + '>' + escapeHtml(e) + '</option>';
+    }).join('');
+    picker =
+      '<div class="es-picker">' +
+        '<label class="es-picker-label">Viewing</label>' +
+        '<select class="es-picker-select" onchange="App.setEditorStatsSelected(this.value)">' + pickerOptions + '</select>' +
+        '<span class="es-picker-hint es-picker-hint-viewer" title="You have viewer access to every editor\'s stats.">viewer</span>' +
+      '</div>';
+  }
 
   var wrap = computeEditorWrap(selected);
 
@@ -6661,7 +6706,7 @@ function renderEditorStatsView() {
     '</div>' +
     (badgesOpen ? '<div class="es-badges-body">' + groupsHtml + '</div>' : '');
 
-  return '<div class="editor-stats-view">' + hero + badgesShelf + '</div>';
+  return '<div class="editor-stats-view">' + picker + hero + badgesShelf + '</div>';
 }
 
 // The effective revision-round count for a grade. When the grade is linked to a
@@ -10669,11 +10714,12 @@ function renderConfigView() {
         var disabled = isSelf || isBootstrapAdmin;
         var disabledReason = isSelf ? 'You can\'t change your own role' :
                              isBootstrapAdmin ? 'Founding admin role is locked' : '';
-        var role = usr.role || 'editor';
+        var role = usr.role || 'viewer';
         var roleSelect =
           '<select class="team-role-select" ' +
             (disabled ? 'disabled title="' + escapeHtml(disabledReason) + '"' : '') + ' ' +
             'onchange="App.setUserRole(\'' + escapeHtml(usr.uid) + '\', this.value, \'' + escapeHtml(displayName) + '\')">' +
+            '<option value="viewer"'      + (role === 'viewer'      ? ' selected' : '') + '>Viewer</option>' +
             '<option value="editor"'      + (role === 'editor'      ? ' selected' : '') + '>Editor</option>' +
             '<option value="pm"'          + (role === 'pm'          ? ' selected' : '') + '>PM</option>' +
             '<option value="catHead"'     + (role === 'catHead'     ? ' selected' : '') + '>Cat Head</option>' +
@@ -10697,7 +10743,7 @@ function renderConfigView() {
     teamSection =
       '<div class="section-title">Team \u00B7 ' + users.length + (users.length === 1 ? ' member' : ' members') + '</div>' +
       '<div class="auto-card">' +
-        '<div class="auto-desc" style="margin-bottom:14px;">Everyone who\'s signed in at least once with their @tilt.app account. Change roles below \u2014 the dropdown saves immediately and the affected person sees their tabs update on their next render (no refresh needed). <strong>Editor</strong> and <strong>PM</strong> = the day-to-day tabs (Campaigns, Board, Cat Heads Review, Calendar, Daily Log, Notifications, Reporting, Content). <strong>Cat Head</strong> and <strong>Content Lead</strong> = every tab, including Automations and Config (view access; destructive controls stay admin-only). <strong>Admin</strong> = everything plus this Team panel and the destructive controls. The founding admin cannot be demoted.</div>' +
+        '<div class="auto-desc" style="margin-bottom:14px;">Everyone who\'s signed in at least once with their @tilt.app account. Change roles below \u2014 the dropdown saves immediately and the affected person sees their tabs update on their next render (no refresh needed). <strong>Viewer</strong> = new-user default; broad read access (Campaigns, Board, Cat Heads Review, Calendar, Daily Log, Notifications, Reporting, Content) minus Grading, Automations, Config, and Editor Stats. <strong>Editor</strong> = Zidni/Sharm/Patty; same tab set as PM plus their personal Editor Stats page, with admin-level edit permissions across the app. <strong>PM</strong> = day-to-day tabs plus Grading (no Automations / Config). <strong>Cat Head</strong> and <strong>Content Lead</strong> = every tab except Editor Stats (view access; destructive controls stay admin-only). <strong>Admin</strong> = everything, including Editor Stats with a peer picker. The founding admin cannot be demoted.</div>' +
         teamRows +
       '</div>';
   }

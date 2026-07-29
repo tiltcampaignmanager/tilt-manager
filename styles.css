@@ -1189,9 +1189,12 @@
   }
   .role-chip-admin  { background: var(--accent-dim); color: var(--accent2); border-color: rgba(126,99,250,0.35); }
   .role-chip-pm     { background: rgba(250,199,117,0.15); color: var(--amber-text); border-color: rgba(250,199,117,0.35); }
-  .role-chip-editor { background: var(--bg2); color: var(--text3); border-color: var(--border); }
+  /* Editor chip = green so Zidni/Sharm/Patty stand out. */
+  .role-chip-editor { background: var(--green-bg); color: var(--green-text); border-color: rgba(93,202,165,0.35); }
   .role-chip-catHead     { background: rgba(127,119,221,0.14); color: var(--accent2); border-color: rgba(127,119,221,0.3); }
   .role-chip-contentLead { background: rgba(111,168,220,0.15); color: #6FA8DC; border-color: rgba(111,168,220,0.35); }
+  /* Viewer = neutral / low-key so it reads as "unpromoted default". */
+  .role-chip-viewer { background: var(--bg2); color: var(--text3); border-color: var(--border); }
 
   /* Team management rows in Config */
   .team-row { display: grid; grid-template-columns: 32px 1fr 200px 140px 28px; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
@@ -1616,6 +1619,7 @@
   .es-picker-select { background: var(--bg2); border: 1px solid var(--border); color: var(--text1); border-radius: 6px; padding: 6px 10px; font-size: 13px; font-family: inherit; cursor: pointer; }
   .es-picker-select:hover { border-color: var(--border2); }
   .es-picker-hint { font-size: 11px; color: var(--amber-text); background: var(--amber-bg); padding: 2px 8px; border-radius: 10px; }
+  .es-picker-hint-viewer { color: var(--accent2); background: var(--accent-dim); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; font-size: 10px; }
   .es-hero .gr-hero-main { display: flex; flex-direction: column; gap: 6px; }
   .es-hero-row { display: flex; gap: 12px; align-items: center; margin-top: 2px; flex-wrap: wrap; }
   .es-delta { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 10px; letter-spacing: -0.01em; }
