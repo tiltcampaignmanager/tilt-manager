@@ -6659,8 +6659,28 @@ function renderEditorStatsView() {
   }).filter(function(g) { return g.total > 0; });
   var groupChips = groupMetas.map(function(g) {
     var full = g.total > 0 && g.earned === g.total;
-    return '<span class="es-badge-group-chip' + (full ? ' is-full' : '') + '" title="' + escapeHtml(g.label) + ': ' + g.earned + ' of ' + g.total + ' earned">' +
+    // Hover tooltip lists every badge in the group with earned/locked state
+    // and a short blurb — so the editor can see WHY the group is 3/5 without
+    // scrolling to the shelf. Pure CSS reveal on chip hover.
+    var ttRows = g.list.map(function(b) {
+      var meta = '';
+      if (b.target && !b.earned) meta = '<span class="es-tt-meta">' + b.progress + ' / ' + b.target + '</span>';
+      else if (b.earned) meta = '<span class="es-tt-meta es-tt-meta-done">Earned</span>';
+      else meta = '<span class="es-tt-meta">Locked</span>';
+      return '<div class="es-tt-row' + (b.earned ? ' is-earned' : ' is-locked') + '">' +
+          '<span class="es-tt-emoji">' + b.emoji + '</span>' +
+          '<span class="es-tt-body">' +
+            '<span class="es-tt-label">' + escapeHtml(b.label) + '</span>' +
+            '<span class="es-tt-desc">' + escapeHtml(b.description) + '</span>' +
+          '</span>' +
+          meta +
+        '</div>';
+    }).join('');
+    var ttHeader = '<div class="es-tt-header">' + escapeHtml(g.label) +
+      ' <span class="es-tt-count">' + g.earned + ' of ' + g.total + ' earned</span></div>';
+    return '<span class="es-badge-group-chip' + (full ? ' is-full' : '') + '" tabindex="0">' +
         escapeHtml(g.label) + ' <b>' + g.earned + '</b>/' + g.total +
+        '<span class="es-tt" role="tooltip">' + ttHeader + ttRows + '</span>' +
       '</span>';
   }).join('');
   var badgesOpen = !STATE.editorStatsBadgesCollapsed;

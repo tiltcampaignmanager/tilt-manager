@@ -1657,10 +1657,33 @@
   .es-section-chev { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text3); transition: transform 0.15s ease; width: 12px; text-align: center; }
   .es-section-heading { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text3); font-weight: 700; transition: color 0.12s; }
   .es-badge-group-chips { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
-  .es-badge-group-chip { font-size: 10.5px; font-weight: 600; color: var(--text3); background: var(--bg3); border: 1px solid var(--border); padding: 2px 8px; border-radius: 10px; letter-spacing: 0; text-transform: none; }
+  .es-badge-group-chip { position: relative; font-size: 10.5px; font-weight: 600; color: var(--text3); background: var(--bg3); border: 1px solid var(--border); padding: 2px 8px; border-radius: 10px; letter-spacing: 0; text-transform: none; cursor: help; transition: border-color 0.15s, color 0.15s; }
+  .es-badge-group-chip:hover, .es-badge-group-chip:focus-visible { color: var(--text1); border-color: var(--border2); outline: none; }
   .es-badge-group-chip b { color: var(--text1); font-family: 'JetBrains Mono', monospace; }
   .es-badge-group-chip.is-full { color: var(--green-text); background: var(--green-bg); border-color: transparent; }
   .es-badge-group-chip.is-full b { color: var(--green-text); }
+  /* Hover tooltip — lists every badge in the group so the editor can see WHY
+     the group is 2/5 without scrolling to the shelf. Right-anchored to keep it
+     on-screen since the summary chips live in the top-right of the header. */
+  .es-tt { position: absolute; top: calc(100% + 6px); right: 0; z-index: 50; min-width: 280px; max-width: 340px; background: var(--bg); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 12px; box-shadow: 0 12px 32px rgba(0,0,0,0.4); opacity: 0; visibility: hidden; transform: translateY(-4px); transition: opacity 0.14s ease, transform 0.14s ease, visibility 0s linear 0.14s; text-align: left; letter-spacing: 0; text-transform: none; font-weight: 500; cursor: default; pointer-events: none; }
+  .es-badge-group-chip:hover .es-tt, .es-badge-group-chip:focus-visible .es-tt { opacity: 1; visibility: visible; transform: translateY(0); transition-delay: 0s; }
+  .es-tt-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text3); font-weight: 700; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .es-tt-count { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text2); font-weight: 500; letter-spacing: 0; text-transform: none; margin-left: 6px; }
+  .es-tt-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; }
+  .es-tt-row + .es-tt-row { border-top: 1px dashed var(--border); }
+  .es-tt-row.is-locked { opacity: 0.55; filter: grayscale(1); }
+  .es-tt-emoji { font-size: 16px; line-height: 1.1; flex-shrink: 0; width: 20px; text-align: center; }
+  .es-tt-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .es-tt-label { font-size: 12px; font-weight: 700; color: var(--text1); letter-spacing: -0.01em; }
+  .es-tt-desc { font-size: 11px; color: var(--text3); line-height: 1.35; }
+  .es-tt-meta { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text3); flex-shrink: 0; align-self: center; padding: 2px 6px; background: var(--bg3); border-radius: 8px; }
+  .es-tt-meta-done { color: var(--green-text); background: var(--green-bg); }
+  /* Prevent header row from clipping tooltips vertically. */
+  .es-section-toggle { position: relative; }
+  .es-badge-group-chips { position: relative; }
+  @media (prefers-reduced-motion: reduce) {
+    .es-tt { transition: none; transform: none; }
+  }
   /* Body wrapper for the (open) shelf — groups stacked with clear breaks. */
   .es-badges-body { display: flex; flex-direction: column; gap: 18px; }
   .es-badge-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text2); font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
