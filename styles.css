@@ -1675,6 +1675,13 @@
   .es-badges-body { display: flex; flex-direction: column; gap: 18px; }
   .es-badge-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text2); font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
   .es-badge-group-count { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text3); font-weight: 500; letter-spacing: 0; }
+  /* Per-group collapse: chevron + label + count row that's clickable. Hover lifts
+     the label so the header reads as an actionable target, not decoration. */
+  .es-badge-group-toggle { cursor: pointer; user-select: none; padding: 4px 0; margin-bottom: 6px; transition: color 0.12s; }
+  .es-badge-group-toggle:hover .es-badge-group-label { color: var(--text1); }
+  .es-badge-group-toggle:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 4px; border-radius: 4px; }
+  .es-badge-group-chev { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text3); width: 12px; text-align: center; }
+  .es-badge-group-label { transition: color 0.12s; }
   .es-badge-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .es-badge { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 10px; display: flex; flex-direction: column; align-items: center; text-align: center; cursor: default; transition: transform 0.14s ease, border-color 0.18s, box-shadow 0.18s, background 0.18s; }
   .es-badge.is-locked { filter: grayscale(1); opacity: 0.55; }

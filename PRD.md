@@ -328,7 +328,10 @@ Sections (top to bottom):
   - **Consistency** (1) — 🎯 On Target (month-to-date ≥ daily-target × workdays).
   - Locked badges show current progress vs. target (e.g., `10 / 50`) — Strava's "keep me going" pattern. Earned badges show an `Earned` pill; earnable-date is derived from the earliest satisfying record (Nth-earliest `dateApproved` for tier badges) and shown in the tooltip.
 
-- **Collapsible shelf** — the badges section header is a click/keyboard toggle (`STATE.editorStatsBadgesCollapsed`, persisted). Header always shows per-group tally chips (`Milestones 3/5 · Craft 2/5 · …`) even when collapsed, so the tab stays informative in its folded state. Hovering (or focusing) any group chip reveals a right-anchored **CSS-only tooltip** listing every badge in that group with earned/locked state, emoji, one-line criterion, and progress bar.
+- **Collapsible shelf, two levels**:
+  - The whole shelf toggles via the `▼ BADGES` header (`STATE.editorStatsBadgesCollapsed`, persisted). Per-group tally chips (`Milestones 3/7 · Craft 4/7 · …`) stay visible even when folded, so the tab stays informative in its collapsed state.
+  - Each group inside (Milestones · Craft · Momentum · Range · Consistency) has its own click/keyboard chevron header (`STATE.editorStatsGroupCollapsed[<key>]`, persisted). Group counts (`4 / 7`) stay in the header when folded, so an editor can hide the groups they've already cleared and focus on the ones still in progress.
+  - Hovering (or focusing) any of the header's group tally chips reveals a right-anchored **CSS-only tooltip** listing every badge in that group with earned/locked state, emoji, one-line criterion, and progress bar.
 
 Game-feel plumbing (see §11) already fires reward pops + confetti on Approved transitions across every tab — so an editor's numbers update AND their badge shelf lights up in real time as they approve videos.
 

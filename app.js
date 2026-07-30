@@ -399,6 +399,7 @@ var Fb = {
       gradingStreak: STATE.gradingStreak || { last: null, count: 0, best: 0 },
       editorStatsSelected: STATE.editorStatsSelected || null,
       editorStatsBadgesCollapsed: !!STATE.editorStatsBadgesCollapsed,
+      editorStatsGroupCollapsed: STATE.editorStatsGroupCollapsed || {},
       _lastEditedBy: Auth.user ? Auth.user.uid : null,
       _lastEditedByName: Auth.user ? Auth.user.displayName : null,
       _lastEditedAt: Date.now()
@@ -1630,8 +1631,11 @@ var STATE = {
   // record by default (resolved via emailToEditor); PMs/admins/cat-heads pick from a
   // list. Persisted so the choice survives reloads.
   editorStatsSelected: null,
-  // Editor Stats: collapsed sections (per-user persisted). Keys: 'badges'.
+  // Editor Stats: collapsed sections (per-user persisted). The shelf-level flag
+  // collapses everything; the per-group map lets you hide individual groups
+  // (Milestones, Craft, Momentum, Range, Consistency) one at a time.
   editorStatsBadgesCollapsed: false,
+  editorStatsGroupCollapsed: {},
 
   countries: [
     { code: 'UK', name: 'United Kingdom' },
@@ -6789,11 +6793,21 @@ function renderEditorStatsView() {
       '</span>';
   }).join('');
   var badgesOpen = !STATE.editorStatsBadgesCollapsed;
+  var groupCollapsedMap = STATE.editorStatsGroupCollapsed || {};
   var groupsHtml = groupMetas.map(function(g) {
+    var groupOpen = !groupCollapsedMap[g.key];
+    var chev = groupOpen ? '▼' : '▶';
+    var safeKey = escapeHtml(String(g.key).replace(/'/g, "\\'"));
     return '<div class="es-badge-group">' +
-        '<div class="es-badge-group-title">' + escapeHtml(g.label) +
-          ' <span class="es-badge-group-count">' + g.earned + ' / ' + g.total + '</span></div>' +
-        '<div class="es-badge-grid">' + g.list.map(renderChip).join('') + '</div>' +
+        '<div class="es-badge-group-title es-badge-group-toggle' + (groupOpen ? ' is-open' : '') + '"' +
+            ' role="button" tabindex="0" aria-expanded="' + groupOpen + '"' +
+            ' onclick="App.toggleEditorStatsGroup(\'' + safeKey + '\')"' +
+            ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();App.toggleEditorStatsGroup(\'' + safeKey + '\')}">' +
+          '<span class="es-badge-group-chev">' + chev + '</span>' +
+          '<span class="es-badge-group-label">' + escapeHtml(g.label) + '</span>' +
+          '<span class="es-badge-group-count">' + g.earned + ' / ' + g.total + '</span>' +
+        '</div>' +
+        (groupOpen ? '<div class="es-badge-grid">' + g.list.map(renderChip).join('') + '</div>' : '') +
       '</div>';
   }).join('');
   var badgesShelf =
@@ -12423,6 +12437,13 @@ var App = {
   },
   toggleEditorStatsBadges: function() {
     STATE.editorStatsBadgesCollapsed = !STATE.editorStatsBadgesCollapsed;
+    saveState();
+    render();
+  },
+  toggleEditorStatsGroup: function(key) {
+    if (!key) return;
+    if (!STATE.editorStatsGroupCollapsed) STATE.editorStatsGroupCollapsed = {};
+    STATE.editorStatsGroupCollapsed[key] = !STATE.editorStatsGroupCollapsed[key];
     saveState();
     render();
   },
