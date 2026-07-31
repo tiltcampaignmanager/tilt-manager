@@ -6937,6 +6937,49 @@ function computeScorecard(editor, grades, suggestedTarget) {
   };
 }
 
+// Team-wide composite = one composite /100 pooled across every editor's grades
+// for a period, so the Grading tab can surface a single "how did the whole team do
+// this week / this month" number on top of the per-editor rows. Same pillar formula
+// as computeScorecard, applied to POOLED counts (brand pass, qa clean, ideas, within
+// cap) — so Zidni's 10 vids and Sharm's 2 vids weight naturally by video count. The
+// Output pillar is tricky (it relies on per-editor manual Avg/Day + Target/Day), so
+// it's the video-weighted average of the per-editor ptsOut values that already exist
+// on the passed-in scorecard objects. Feeding it the same weekByEditor / monthByEditor
+// arrays the scorecard uses guarantees the team number stays consistent with the row
+// numbers. Returns null when there's nothing graded.
+function computeTeamComposite(scorecards) {
+  var cards = (scorecards || []).filter(function(c) { return c && c.total > 0; });
+  var total = cards.reduce(function(s, c) { return s + c.total; }, 0);
+  if (total === 0) return null;
+  // Pooled pillar counts back-computed from per-editor rates × video count.
+  var brandN = cards.reduce(function(s, c) { return s + (c.brandRate / 100) * c.total; }, 0);
+  var qaN    = cards.reduce(function(s, c) { return s + (c.qaRate    / 100) * c.total; }, 0);
+  var capN   = cards.reduce(function(s, c) { return s + (c.capRate   / 100) * c.total; }, 0);
+  var ideas  = cards.reduce(function(s, c) { return s + (c.ideas || 0); }, 0);
+  var brandRate = brandN / total * 100;
+  var qaRate    = qaN    / total * 100;
+  var capRate   = capN   / total * 100;
+  var ptsBrand = brandRate / 100 * GRADE_POINTS.brand;
+  var ptsQa    = qaRate    / 100 * GRADE_POINTS.qa;
+  var ptsInnov = ideas >= 1 ? GRADE_POINTS.innovation : 0;
+  var ptsRev   = capRate   / 100 * GRADE_POINTS.speedRevisions;
+  // Output: video-weighted average of per-editor ptsOut for editors with an
+  // Avg/Day set. Editors without Avg/Day drop out of the denominator so a missing
+  // input doesn't crater the team's Output. If NO editor has Avg/Day set, ptsOut
+  // is 0 (matches per-editor behaviour).
+  var outNum = cards.reduce(function(s, c) { return s + (c.hasOutput ? c.ptsOut * c.total : 0); }, 0);
+  var outDen = cards.reduce(function(s, c) { return s + (c.hasOutput ? c.total : 0); }, 0);
+  var ptsOut = outDen ? outNum / outDen : 0;
+  var composite = ptsBrand + ptsQa + ptsInnov + ptsOut + ptsRev;
+  return {
+    total: total, editorsWithData: cards.length,
+    brandRate: brandRate, qaRate: qaRate, capRate: capRate, ideas: ideas,
+    ptsBrand: ptsBrand, ptsQa: ptsQa, ptsInnov: ptsInnov, ptsOut: ptsOut, ptsRev: ptsRev,
+    hasOutputData: outDen > 0,
+    composite: composite, rating: gradeRating(composite)
+  };
+}
+
 // A video's "period" for grading = the month it's delivered/approved in. Uses
 // estDelivery (the planned/actual delivery date), falling back to dateApproved.
 function assetPeriodDate(a) { return (a && (a.estDelivery || a.dateApproved)) || ''; }
@@ -7324,6 +7367,42 @@ function renderGradingView() {
       : '<span class="grading-composite-num grading-rollup-empty">—</span><span class="grading-rollup-sub">0 vids</span>';
     return '<td class="grading-sc-rollup" title="' + escapeHtml(title) + '">' + body + '</td>';
   }
+  // Team-wide composite for This Week / This Month — a single number per period
+  // pooled across every editor's grades (all campaigns, respecting Paid/Organic).
+  // Rendered as a strip ABOVE the per-editor scorecard so you get "how did the whole
+  // team do this week?" at a glance without eyeballing individual rows.
+  var teamWeek  = computeTeamComposite(GRADING_EDITORS.map(function(e) { return weekByEditor[e]; }));
+  var teamMonth = computeTeamComposite(GRADING_EDITORS.map(function(e) { return monthByEditor[e]; }));
+  function teamCard(tc, label, when) {
+    if (!tc) {
+      return '<div class="grading-team-card is-empty" title="' + escapeHtml(label + ' (' + when + ') — no graded videos yet') + '">' +
+          '<div class="grading-team-label">' + escapeHtml(label) + '</div>' +
+          '<div class="grading-team-num">—<span class="grading-team-max">/100</span></div>' +
+          '<div class="grading-team-sub">no graded videos yet · ' + escapeHtml(when) + '</div>' +
+        '</div>';
+    }
+    var rr = tc.rating;
+    var pillar = 'Brand ' + fmt1(tc.ptsBrand) + '/25 · QA ' + fmt1(tc.ptsQa) + '/30 · Innov ' + fmt1(tc.ptsInnov) + '/15 · Out ' + fmt1(tc.ptsOut) + '/15' + (tc.hasOutputData ? '' : ' (no Avg/Day set)') + ' · Rev ' + fmt1(tc.ptsRev) + '/15';
+    var title = label + ' (' + when + ') — ' + fmt1(tc.composite) + '/100 · ' + tc.total + ' video' + (tc.total === 1 ? '' : 's') + ' across ' + tc.editorsWithData + ' editor' + (tc.editorsWithData === 1 ? '' : 's') + ' · ' + rr.label + '\n' + pillar;
+    return '<div class="grading-team-card" title="' + escapeHtml(title) + '">' +
+        '<div class="grading-team-label">' + escapeHtml(label) + '<span class="grading-team-when">' + escapeHtml(when) + '</span></div>' +
+        '<div class="grading-team-num"><b>' + fmt1(tc.composite) + '</b><span class="grading-team-max">/100</span></div>' +
+        '<div class="grading-team-sub">' +
+          '<span class="grading-rating grading-rating-' + rr.key + '">' + rr.dot + ' ' + escapeHtml(rr.label) + '</span>' +
+          ' · ' + tc.total + ' video' + (tc.total === 1 ? '' : 's') +
+          ' · ' + tc.editorsWithData + ' editor' + (tc.editorsWithData === 1 ? '' : 's') +
+        '</div>' +
+      '</div>';
+  }
+  var teamStrip =
+    '<div class="grading-team-strip" title="Team composite = one composite /100 pooled across every editor for the period. Same pillar formula as per-editor, applied to pooled counts. Respects the Paid/Organic filter; ignores the Month/Year/Week selectors so the team snapshot stays stable.">' +
+      '<div class="grading-team-title">Team composite <span class="grading-team-title-note">all editors · all campaigns · Paid/Organic filter respected</span></div>' +
+      '<div class="grading-team-row">' +
+        teamCard(teamWeek,  'This week',  _thisWeekLabel) +
+        teamCard(teamMonth, 'This month', _thisMonthLabel) +
+      '</div>' +
+    '</div>';
+
   var scoreRows = cards.map(function(c) {
     var e = c.editor;
     var meta = (STATE.scorecardMeta && STATE.scorecardMeta[e]) || {};
@@ -7361,6 +7440,7 @@ function renderGradingView() {
   var scorecard =
     '<div class="grading-section">' +
       '<div class="grading-section-title">Editor Scorecard <span class="grading-section-note">' + scopeNote + (gradingType === 'all' && !week ? ' · all campaigns' : '') + '</span></div>' +
+      teamStrip +
       '<div class="grading-table-scroll grading-scroll-scorecard">' +
       '<table class="grading-scorecard">' +
         '<thead><tr>' +
