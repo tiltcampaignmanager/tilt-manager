@@ -6924,14 +6924,20 @@ function gradeRecommendation(primaryCard, fallbackCard) {
   var wPct = Math.round(weakest.pct);
   var missingOutputData = !card.hasOutput;
 
-  // Targeted actions per pillar. Physical verbs, no em dashes, concrete next step.
+  // Targeted actions per pillar. Physical verbs, concrete next step. Innovation
+  // routes to production rather than the editor: editors don't originate Net-New
+  // concepts, they cut what production briefs them, so a low-innov score is
+  // usually a signal about the brief pipeline (see the innov-is-brief-driven memo).
   var pillarAction = {
     brand:  'Sit with Avy, walk 3 recent misses, get the brand rules crisp in their head.',
     qa:     'QA-pair their next 3 cuts with Elsa before For Review, same-day feedback loop.',
     rev:    'Get the brief crystal-clear with PM before they start cutting. Log why every revision came back.',
-    innov:  'Set a target: 1 Net-New concept per cycle, minimum. Track it on the scorecard.',
+    innov:  "Check what production is queuing for them. Editors cut what they're briefed, so this is a signal about the brief pipeline, not the editor.",
     output: 'Trim scope on the next cut and post a morning ETA per video in Slack.'
   };
+  // Innovation is brief-driven, so the framing shifts: "dragged by" (which reads as
+  // the editor's fault) becomes "brief-driven" copy that routes the fix to production.
+  var weakestIsInnov = weakest.key === 'innov';
 
   var tone = rating, body;
   if (rating === 'excellent') {
@@ -6944,6 +6950,8 @@ function gradeRecommendation(primaryCard, fallbackCard) {
     } else if (weakest.key === 'output' || (missingOutputData && weakest.fill >= 0.9)) {
       // Output the drag (or purely missing meta). Logic: masked. Evidence: score + blank field. Utility: set Avg/Day.
       body = "Composite " + comp + "/100 but pace isn't scoring because Avg/Day is blank. Set it so the real number can show.";
+    } else if (weakestIsInnov) {
+      body = "Composite " + comp + "/100. New ideas is the outlier at " + wPct + "%, and that pillar is brief-driven. Push production for more Net-New briefs in their queue rather than nudging the editor.";
     } else {
       // Solid but one pillar off. Logic: outlier. Evidence: score + pillar %. Utility: fix that one thing.
       body = "Composite " + comp + "/100. " + capitalize(weakest.label) + " is the outlier at " + wPct + "%. " + pillarAction[weakest.key] + " Fix that one thing and they're Excellent by next cycle.";
@@ -6951,13 +6959,19 @@ function gradeRecommendation(primaryCard, fallbackCard) {
   } else if (rating === 'needswork') {
     if (missingOutputData && weakest.fill >= 0.7) {
       body = "Composite " + comp + "/100. Pillars look OK, but pace isn't scoring because Avg/Day is blank. Set it so the score reflects real output.";
+    } else if (weakestIsInnov) {
+      body = "Composite " + comp + "/100. New ideas at " + wPct + "% is dragging, but that's brief-driven. " + pillarAction.innov;
     } else {
       // Logic: dragged by one pillar. Evidence: score + pillar %. Utility: action + "one-fix" reassurance.
       body = "Composite " + comp + "/100, dragged by " + weakest.label + " at " + wPct + "%. " + pillarAction[weakest.key] + " Everything else scores, so this is a one-fix issue.";
     }
   } else {
     // At Risk. Logic: fundamentals cracking. Evidence: sub-60 score + weak pillar. Utility: protect + fix biggest crack.
-    body = "Composite " + comp + "/100. " + capitalize(weakest.label) + " is the biggest crack at " + wPct + "%. Cap their load, pair them with a mentor, start on " + weakest.label + ". " + pillarAction[weakest.key];
+    if (weakestIsInnov) {
+      body = "Composite " + comp + "/100. New ideas at " + wPct + "% is the biggest drag, but that's brief-driven. Check what production is queuing before capping the editor's load. Fundamentals to watch on their side: whichever pillar's next weakest.";
+    } else {
+      body = "Composite " + comp + "/100. " + capitalize(weakest.label) + " is the biggest crack at " + wPct + "%. Cap their load, pair them with a mentor, start on " + weakest.label + ". " + pillarAction[weakest.key];
+    }
   }
   return {
     tone: tone,
