@@ -1489,7 +1489,8 @@
   .grading-rollup-dot { display: inline-block; margin-right: 4px; font-size: 10px; vertical-align: baseline; }
 
   /* Graded-videos log */
-  .grading-log-video { font-weight: 500; color: var(--text1); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grading-log-video { font-weight: 500; color: var(--text1); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grading-log-camp { display: block; margin-top: 2px; font-size: 10.5px; font-weight: 400; color: var(--text3); letter-spacing: 0; text-transform: none; overflow: hidden; text-overflow: ellipsis; }
   .grading-log-date { color: var(--text2); white-space: nowrap; font-size: 12px; }
   .grading-log-editor .editor-avatar { width: 24px; height: 24px; font-size: 10px; }
   .grading-log-type { padding: 4px 6px; background: var(--bg3); color: var(--text1); border: 1px solid var(--border); border-radius: 5px; font-family: inherit; font-size: 12px; cursor: pointer; }

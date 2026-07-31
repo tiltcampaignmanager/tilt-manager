@@ -7056,18 +7056,36 @@ function renderGradingView() {
   var campsInMonth = (STATE.campaigns || []).filter(function(c) {
     return campMatchesType(c) && (STATE.assets || []).some(function(a) { return a.campaignId === c.id && assetPeriodYM(a) === selYM && inWeek(a); });
   });
-  // Resolve the selected campaign — must be one that has videos this month for this filter.
+  // Resolve the selected campaign — either the sentinel 'all' (every campaign in scope)
+  // or a specific campaign id. Falls back to the first campaign in scope if the persisted
+  // selection has aged out (e.g. an old campaign no longer has videos this month).
   var campId = STATE.gradingCampaignId;
-  if (!campsInMonth.some(function(c) { return String(c.id) === String(campId); })) {
+  var allCampaigns = campId === 'all' || campId === '__all__';
+  if (!allCampaigns && !campsInMonth.some(function(c) { return String(c.id) === String(campId); })) {
     campId = campsInMonth.length ? campsInMonth[0].id : null;
   }
-  var campSel = campId != null ? findCampaignById(campId) : null;
-
-  // The selected campaign's videos for the month, scoped to the week filter (drives the
-  // grade table). Grades in month+type+week (all campaigns) drive the scorecard.
-  var monthCampAssets = campSel ? (STATE.assets || []).filter(function(a) {
-    return a.campaignId === campSel.id && assetPeriodYM(a) === selYM && inWeek(a);
-  }).slice().sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); }) : [];
+  var campSel = (!allCampaigns && campId != null) ? findCampaignById(campId) : null;
+  // Grade Videos table drivers: the ONE campaign selected, OR every campaign in the
+  // month+type+week scope when All Campaigns is picked. Sort by campaign name → video
+  // name in all-campaigns mode so grouped videos read cleanly. Same-campaign mode keeps
+  // the original name-only sort.
+  var monthCampAssets;
+  if (allCampaigns) {
+    monthCampAssets = (STATE.assets || []).filter(function(a) {
+      return assetInMonthType(a) && inWeek(a);
+    }).slice().sort(function(a, b) {
+      var ca = findCampaignById(a.campaignId), cb = findCampaignById(b.campaignId);
+      var la = (ca && ca.name) || '', lb = (cb && cb.name) || '';
+      var byCamp = la.localeCompare(lb);
+      return byCamp !== 0 ? byCamp : (a.name || '').localeCompare(b.name || '');
+    });
+  } else if (campSel) {
+    monthCampAssets = (STATE.assets || []).filter(function(a) {
+      return a.campaignId === campSel.id && assetPeriodYM(a) === selYM && inWeek(a);
+    }).slice().sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
+  } else {
+    monthCampAssets = [];
+  }
   var scopedGrades = gradesInYM(selYM).filter(function(g) {
     if (g.dismissed) return false;
     if (gradingType !== 'all' && gradeCampaignType(g) !== gradingType) return false;
@@ -7100,10 +7118,10 @@ function renderGradingView() {
       '<div class="grading-top-left">' +
         '<h2 class="grading-title">Grading</h2>' +
         '<div class="grading-sub">' +
-          (campSel ? escapeHtml(campSel.country + ' · ' + campSel.name) + ' · ' : '') +
+          (campSel ? escapeHtml(campSel.country + ' · ' + campSel.name) + ' · ' : (allCampaigns ? 'All campaigns · ' : '')) +
           '<b>' + escapeHtml(sel.label) + '</b>' + ' · ' + escapeHtml(typeLabel) +
           (week ? ' · ' + escapeHtml(weekLabel) : '') +
-          (campSel ? ' · ' + gradedThisCamp + '/' + primary.total + ' graded' : '') +
+          ((campSel || allCampaigns) ? ' · ' + gradedThisCamp + '/' + primary.total + ' graded' : '') +
         '</div>' +
       '</div>' +
       '<div class="grading-top-actions">' +
@@ -7120,7 +7138,7 @@ function renderGradingView() {
     var C = 119.38; // 2·π·19 (ring radius 19)
     var offset = C * (1 - (p.total ? p.graded / p.total : 0));
     var msg, tone;
-    if (!campSel) { msg = campsInMonth.length ? 'Pick a campaign to start grading' : 'No ' + (gradingType === 'all' ? '' : typeLabel.toLowerCase() + ' ') + 'videos to grade in ' + escapeHtml(sel.label); tone = 'idle'; }
+    if (!campSel && !allCampaigns) { msg = campsInMonth.length ? 'Pick a campaign to start grading' : 'No ' + (gradingType === 'all' ? '' : typeLabel.toLowerCase() + ' ') + 'videos to grade in ' + escapeHtml(sel.label); tone = 'idle'; }
     else if (p.total === 0) { msg = 'Nothing to grade in this list 👍'; tone = 'idle'; }
     else if (p.complete) { msg = 'All caught up — nice work! 🎉'; tone = 'done'; }
     else if (p.graded === 0) { msg = "Let’s grade — " + p.total + ' waiting'; tone = 'start'; }
@@ -7153,7 +7171,7 @@ function renderGradingView() {
       '<div class="gr-hero-main">' +
         '<div class="gr-hero-msg">' + msg + '</div>' +
         '<div class="gr-hero-sub">' +
-          (campSel ? '<b>' + p.graded + '/' + p.total + '</b> graded in ' + escapeHtml(campSel.name) : escapeHtml(scopeNote)) +
+          (campSel ? '<b>' + p.graded + '/' + p.total + '</b> graded in ' + escapeHtml(campSel.name) : (allCampaigns ? '<b>' + p.graded + '/' + p.total + '</b> graded across all campaigns' : escapeHtml(scopeNote))) +
           ' · <span class="gr-hero-scope">' + escapeHtml(week ? weekLabel : sel.label + ' · ' + typeLabel) + '</span>' +
         '</div>' +
       '</div>' +
@@ -7180,7 +7198,10 @@ function renderGradingView() {
   var campOptsHtml = (function() {
     var byCountry = {};
     campsInMonth.forEach(function(c) { (byCountry[c.country] = byCountry[c.country] || []).push(c); });
-    return (STATE.countries || []).map(function(co) {
+    // "All campaigns" sits at the top of the dropdown — picks up every campaign in scope,
+    // so the Grade Videos table + progress ring reflect the union rather than one campaign.
+    var allOpt = '<option value="all"' + (allCampaigns ? ' selected' : '') + '>★ All campaigns</option>';
+    var groups = (STATE.countries || []).map(function(co) {
       var list = byCountry[co.code] || [];
       if (!list.length) return '';
       var opts = list.map(function(c) {
@@ -7188,6 +7209,7 @@ function renderGradingView() {
       }).join('');
       return '<optgroup label="' + escapeHtml(co.code) + '">' + opts + '</optgroup>';
     }).join('');
+    return allOpt + groups;
   })();
   // Paid/Organic segmented control.
   var TYPE_TABS = [['all', 'All'], ['Paid Ads', 'Paid'], ['Organic', 'Organic']];
@@ -7277,9 +7299,16 @@ function renderGradingView() {
       : '<button class="grading-dismiss-btn" onclick="App.dismissAssetVideo(' + aid + ')" title="Dismiss — exclude from the scorecard">⊘</button>';
     if (graded) actions += '<button class="grading-del-btn" onclick="App.deleteAssetGrade(' + aid + ')" title="Clear this video’s grade">🗑</button>';
     var rowCls = dismissed ? 'grading-row-dismissed' : (graded ? 'grading-row-graded' : '');
+    // In All-Campaigns mode we show the campaign as a small chip under the video name
+    // so it's clear which campaign each row belongs to. Country code helps disambiguate.
+    var campChip = '';
+    if (allCampaigns) {
+      var rc = findCampaignById(a.campaignId);
+      if (rc) campChip = '<div class="grading-log-camp" title="Campaign for this video">' + escapeHtml(rc.country + ' · ' + rc.name) + '</div>';
+    }
     return '<tr class="' + rowCls + '">' +
       '<td class="grading-log-video">' + escapeHtml(name) +
-        (dismissed ? ' <span class="grading-dismissed-tag">dismissed</span>' : '') + '</td>' +
+        (dismissed ? ' <span class="grading-dismissed-tag">dismissed</span>' : '') + campChip + '</td>' +
       '<td class="grading-log-editor">' + (a.editor
         ? '<div class="editor-avatar av-' + escapeHtml(a.editor) + '">' + escapeHtml(editorInitials(a.editor)) + '</div>'
         : '<span class="grading-log-noeditor" title="No editor assigned">—</span>') + '</td>' +
@@ -7294,13 +7323,14 @@ function renderGradingView() {
   }
 
   var vidRows;
-  if (!campSel) {
+  if (!campSel && !allCampaigns) {
     vidRows = '<tr><td colspan="9" class="grading-log-empty">Pick a month and campaign above to start grading its videos.</td></tr>';
   } else if (assetsToRender.length === 0) {
+    var whereLabel = allCampaigns ? 'any campaign' : escapeHtml(campSel.name);
     vidRows = '<tr><td colspan="9" class="grading-log-empty">' +
       (dismissedAssets.length && !showDismissed
         ? 'All videos here are dismissed (' + dismissedAssets.length + '). Use “Show dismissed”.'
-        : 'No videos in ' + escapeHtml(campSel.name) + ' for ' + escapeHtml(week ? weekLabel : sel.label) + '.') +
+        : 'No videos in ' + whereLabel + ' for ' + escapeHtml(week ? weekLabel : sel.label) + '.') +
       '</td></tr>';
   } else {
     vidRows = assetsToRender.map(assetRowHtml).join('');
@@ -7313,7 +7343,9 @@ function renderGradingView() {
   var gradeList =
     '<div class="grading-section">' +
       '<div class="grading-section-title">Grade Videos' +
-        (campSel ? ' <span class="grading-section-note">' + escapeHtml(campSel.name) + ' · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>' : '') +
+        (campSel
+          ? ' <span class="grading-section-note">' + escapeHtml(campSel.name) + ' · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>'
+          : (allCampaigns ? ' <span class="grading-section-note">All campaigns · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>' : '')) +
         ' <span class="grading-type-hint" title="Type is auto-set from the file name: OP → Maintenance, N → Net New. Change it in the dropdown if the name is unusual.">✨ type auto-detected</span>' +
         dismissToggle +
       '</div>' +
