@@ -6703,6 +6703,46 @@ function renderEditorStatsView() {
   // Month pace mini-line — same tone as Grading's gr-month-mini.
   var monthMini = '<div class="gr-month-mini">' + wrap.monthLabel + ': <b>' + wrap.monthApprovals + '</b> / ' + wrap.monthTarget + ' target · pace <b>' + wrap.monthExpected + '</b></div>';
 
+  // Composite block — the same rating the Grading Scorecard produces, sliced to
+  // this editor's current ISO week and current calendar month. Draws from
+  // STATE.grades (via computeScorecard), so it stays in sync with what Elsa /
+  // Avy grade in the Grading tab. No paid/organic split — Editor Stats is a
+  // single unified view.
+  function _fmt1(x) { return (Math.round((Number(x) || 0) * 10) / 10).toFixed(1); }
+  var _esTodayISO = todayUK();
+  var _esThisWeekStart = isoWeekStart(_esTodayISO);
+  var _esThisYM = _esTodayISO.slice(0, 7);
+  var _esWeekGrades  = (STATE.grades || []).filter(function(g) { return g && !g.dismissed && isoWeekStart(g.date) === _esThisWeekStart; });
+  var _esMonthGrades = (STATE.grades || []).filter(function(g) { return g && !g.dismissed && (g.date || '').slice(0, 7) === _esThisYM; });
+  var _esWeekCard  = computeScorecard(selected, _esWeekGrades,  null);
+  var _esMonthCard = computeScorecard(selected, _esMonthGrades, null);
+  var _esThisMonthLabel = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(_esThisYM.slice(5, 7), 10) - 1] + ' ' + _esThisYM.slice(0, 4);
+  function _esCompositeCell(rc, label, when) {
+    var rr = rc.rating;
+    var pillar = 'Brand ' + _fmt1(rc.ptsBrand) + '/25 · QA ' + _fmt1(rc.ptsQa) + '/30 · Innov ' + _fmt1(rc.ptsInnov) + '/15 · Out ' + _fmt1(rc.ptsOut) + '/15 · Rev ' + _fmt1(rc.ptsRev) + '/15';
+    var title = label + ' (' + when + ') — ' + _fmt1(rc.composite) + '/100 · ' + rc.total + ' video' + (rc.total === 1 ? '' : 's') + ' · ' + rr.label + '\n' + pillar;
+    if (rc.total === 0) {
+      return '<div class="es-composite-cell is-empty" title="' + escapeHtml(title) + '">' +
+          '<div class="es-composite-cell-label">' + escapeHtml(label) + '</div>' +
+          '<div class="es-composite-cell-num">—<span class="es-composite-cell-max">/100</span></div>' +
+          '<div class="es-composite-cell-sub">no graded videos yet</div>' +
+        '</div>';
+    }
+    return '<div class="es-composite-cell" title="' + escapeHtml(title) + '">' +
+        '<div class="es-composite-cell-label">' + escapeHtml(label) + '</div>' +
+        '<div class="es-composite-cell-num"><b>' + _fmt1(rc.composite) + '</b><span class="es-composite-cell-max">/100</span></div>' +
+        '<div class="es-composite-cell-sub"><span class="grading-rating grading-rating-' + rr.key + '">' + rr.dot + ' ' + escapeHtml(rr.label) + '</span> · ' + rc.total + ' video' + (rc.total === 1 ? '' : 's') + '</div>' +
+      '</div>';
+  }
+  var compositeBlock =
+    '<div class="es-composite-block" title="Composite score — the same one shown on the Grading Scorecard. Weekly = current Mon–Sun. Monthly = current calendar month.">' +
+      '<div class="es-composite-title">Composite score</div>' +
+      '<div class="es-composite-row">' +
+        _esCompositeCell(_esWeekCard,  'This week',  _esThisWeekStart ? weekRangeLabel(_esThisWeekStart) : '') +
+        _esCompositeCell(_esMonthCard, 'This month', _esThisMonthLabel) +
+      '</div>' +
+    '</div>';
+
   var greeting = isSelf ? "Here's your week" : escapeHtml(selected) + "'s week";
   var subMsg = wrap.thisWeek > 0
     ? '<b>' + wrap.thisWeek + '</b> approved · ' + weekRangeLabel(wrap.weekRange.start)
@@ -6822,7 +6862,7 @@ function renderEditorStatsView() {
     '</div>' +
     (badgesOpen ? '<div class="es-badges-body">' + groupsHtml + '</div>' : '');
 
-  return '<div class="editor-stats-view">' + picker + hero + badgesShelf + '</div>';
+  return '<div class="editor-stats-view">' + picker + hero + compositeBlock + badgesShelf + '</div>';
 }
 
 // The effective revision-round count for a grade. When the grade is linked to a
@@ -7252,6 +7292,38 @@ function renderGradingView() {
   var targetAutoTitle = gradingType === 'Organic'
     ? 'Auto target for Organic: 1 Net New/day'
     : (gradingType === 'Paid Ads' ? 'Auto target for Paid: 3–4/day (OP or N)' : '');
+
+  // Rollup composites — always show today's rolling week + month per editor,
+  // independent of the month/year/week selectors so the health check stays stable
+  // as you jump around in the grade table. Still respects the Paid/Organic filter,
+  // since the rest of the scorecard does.
+  var _todayISO = todayUK();
+  var _thisWeekStart = isoWeekStart(_todayISO);
+  var _thisYM = _todayISO.slice(0, 7);
+  function _inScopeType(g) {
+    if (!g || g.dismissed) return false;
+    if (gradingType !== 'all' && gradeCampaignType(g) !== gradingType) return false;
+    return true;
+  }
+  var gradesThisWeek  = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && isoWeekStart(g.date) === _thisWeekStart; });
+  var gradesThisMonth = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && (g.date || '').slice(0, 7) === _thisYM; });
+  var weekByEditor = {}, monthByEditor = {};
+  GRADING_EDITORS.forEach(function(e) {
+    weekByEditor[e]  = computeScorecard(e, gradesThisWeek,  suggestedTarget);
+    monthByEditor[e] = computeScorecard(e, gradesThisMonth, suggestedTarget);
+  });
+  var _thisWeekLabel  = _thisWeekStart ? weekRangeLabel(_thisWeekStart) : '';
+  var _thisMonthLabel = MONTHS_FULL[parseInt(_thisYM.slice(5, 7), 10) - 1] + ' ' + _thisYM.slice(0, 4);
+  function rollupCell(rc, label) {
+    var rr = rc.rating;
+    var pillar = 'Brand ' + fmt1(rc.ptsBrand) + '/25 · QA ' + fmt1(rc.ptsQa) + '/30 · Innov ' + fmt1(rc.ptsInnov) + '/15 · Out ' + fmt1(rc.ptsOut) + '/15 · Rev ' + fmt1(rc.ptsRev) + '/15';
+    var title = label + ' — ' + fmt1(rc.composite) + '/100 · ' + rc.total + ' video' + (rc.total === 1 ? '' : 's') + ' · ' + rr.label + '\n' + pillar;
+    var body = rc.total > 0
+      ? '<span class="grading-composite-num">' + fmt1(rc.composite) + '</span><span class="grading-composite-max">/100</span>' +
+        '<span class="grading-rollup-sub"><span class="grading-rollup-dot grading-rollup-dot-' + rr.key + '" title="' + escapeHtml(rr.label) + '">' + rr.dot + '</span>' + rc.total + ' vid' + (rc.total === 1 ? '' : 's') + '</span>'
+      : '<span class="grading-composite-num grading-rollup-empty">—</span><span class="grading-rollup-sub">0 vids</span>';
+    return '<td class="grading-sc-rollup" title="' + escapeHtml(title) + '">' + body + '</td>';
+  }
   var scoreRows = cards.map(function(c) {
     var e = c.editor;
     var meta = (STATE.scorecardMeta && STATE.scorecardMeta[e]) || {};
@@ -7281,6 +7353,8 @@ function renderGradingView() {
       '<td class="grading-sc-input"><input type="number" class="grading-mini-input' + (tgtIsAutoShown ? ' is-auto' : '') + '" min="0" step="0.5" value="' + escapeHtml(String(tgtVal)) + '" placeholder="' + tgtPlaceholder + '" onchange="App.setScorecardMeta(\'' + escapeHtml(e) + '\',\'targetPerDay\',this.value)" title="Daily target. Auto: Organic 1/day · Paid 3–4/day. Type to override.">' + tgtAutoPill + '</td>' +
       '<td class="grading-sc-composite"><span class="grading-composite-num">' + fmt1(c.composite) + '</span><span class="grading-composite-max">/100</span></td>' +
       '<td class="grading-sc-rating"><span class="grading-rating grading-rating-' + rd.key + '">' + rd.dot + ' ' + rd.label + '</span></td>' +
+      rollupCell(weekByEditor[e],  'This week (' + _thisWeekLabel + ')') +
+      rollupCell(monthByEditor[e], 'This month (' + _thisMonthLabel + ')') +
     '</tr>';
   }).join('');
 
@@ -7298,6 +7372,8 @@ function renderGradingView() {
           '<th title="15 pts">Revisions<span class="grading-th-pts">15</span></th>' +
           '<th class="grading-th-input">Avg/Day</th><th class="grading-th-input">Target/Day</th>' +
           '<th>Composite</th><th>Rating</th>' +
+          '<th class="grading-th-rollup" title="Composite for the current calendar week (Mon–Sun containing today), across all months. Respects the Paid/Organic filter.">This Week<span class="grading-th-sub">' + escapeHtml(_thisWeekLabel) + '</span></th>' +
+          '<th class="grading-th-rollup" title="Composite for the current calendar month, across all campaigns. Respects the Paid/Organic filter.">This Month<span class="grading-th-sub">' + escapeHtml(_thisMonthLabel) + '</span></th>' +
         '</tr></thead>' +
         '<tbody>' + scoreRows + '</tbody>' +
       '</table>' +
