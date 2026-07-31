@@ -6898,6 +6898,80 @@ function gradeRating(score) {
   return { key: 'atrisk', label: 'At Risk', dot: '🔴' };
 }
 
+// Coaching recommendation for the Editor Scorecard's "Recommendation" column.
+// Combines the rating band (tone + intervention level) with the weakest pillar
+// (targeted action). Reads to Elsa — advice on how to coach this editor next
+// cycle, not to the editor themselves. Falls back to `fallbackCard` when the
+// primary scope has no graded videos yet, so a filter with no data still gets
+// a useful note. Returns null when nothing at all has been graded.
+function gradeRecommendation(primaryCard, fallbackCard) {
+  var card = (primaryCard && primaryCard.total > 0) ? primaryCard : fallbackCard;
+  if (!card || card.total === 0) return null;
+  var rating = card.rating.key;
+  // Rank pillars by how close they are to max. Weakest first.
+  var pillars = [
+    { key: 'brand', label: 'brand alignment', pct: card.brandRate, fill: card.ptsBrand / GRADE_POINTS.brand },
+    { key: 'qa',    label: 'QA hygiene',       pct: card.qaRate,    fill: card.ptsQa    / GRADE_POINTS.qa },
+    { key: 'rev',   label: 'revision discipline', pct: card.capRate, fill: card.ptsRev / GRADE_POINTS.speedRevisions },
+    { key: 'innov', label: 'new ideas',        pct: (card.ideas >= 1 ? 100 : 0), fill: card.ptsInnov / GRADE_POINTS.innovation }
+  ];
+  if (card.hasOutput) {
+    pillars.push({ key: 'output', label: 'output pace', pct: card.avgPerDay / card.targetDay * 100, fill: card.ptsOut / GRADE_POINTS.speedOutput });
+  }
+  pillars.sort(function(a, b) { return a.fill - b.fill; });
+  var weakest = pillars[0];
+
+  // Rating band → tone; weakest pillar → targeted action.
+  var bandCopy = {
+    excellent: 'Anchor the flagship briefs on them and pair them with the rest of the team as a mentor — they earned it.',
+    solid:     'Stretch them into a harder brief this cycle',
+    needswork: 'One weak pillar dragging the rest',
+    atrisk:    'Below 60/100 — pair with a mentor and cap the weekly load until fundamentals hold'
+  };
+  var pillarAction = {
+    brand:  'sit with Avy for a 30-min brand-pass walkthrough and mark 3 recent misses.',
+    qa:     'QA-pair the next three cuts with Elsa before For Review — same-day feedback loop.',
+    rev:    'clarify brief with PM before the first cut; log every revision reason.',
+    innov:  'set a target of at least one Net-New concept per delivery cycle.',
+    output: 'trim scope per cut and post a morning ETA per video in Slack.'
+  };
+  // If Output is dragging the score purely because Avg/Day is unset, the real fix is
+  // to fill in the manual meta — say that instead of the generic "trim scope" copy.
+  var missingOutputData = !card.hasOutput;
+  var tone, body;
+  if (rating === 'excellent') {
+    tone = 'excellent';
+    body = bandCopy.excellent;
+  } else if (rating === 'solid') {
+    tone = 'solid';
+    if (weakest.fill >= 0.85) {
+      // All pillars strong — no weakness to nudge, just stretch.
+      body = 'Solid across the board — stretch them into a harder brief this cycle to graduate them to Excellent.';
+    } else if (weakest.key === 'output' || (missingOutputData && weakest.fill >= 0.9)) {
+      body = bandCopy.solid + ' — and set Avg/Day for this editor so the Output pillar starts scoring.';
+    } else {
+      body = bandCopy.solid + ' — with a small nudge on ' + weakest.label + ' (' + Math.round(weakest.pct) + '% now).';
+    }
+  } else if (rating === 'needswork') {
+    tone = 'needswork';
+    if (missingOutputData && weakest.fill >= 0.7) {
+      body = "Pillars look OK but Output isn't scoring — set Avg/Day for this editor so the composite reflects real pace.";
+    } else {
+      body = bandCopy.needswork + ': ' + weakest.label + ' is at ' + Math.round(weakest.pct) + '%. ' + pillarAction[weakest.key];
+    }
+  } else {
+    tone = 'atrisk';
+    body = bandCopy.atrisk + '. Start with ' + weakest.label + ' (' + Math.round(weakest.pct) + '% now) — ' + pillarAction[weakest.key];
+  }
+  return {
+    tone: tone,
+    text: body,
+    weakestPillar: weakest.label,
+    weakestPct: weakest.pct,
+    basedOn: (primaryCard && primaryCard.total > 0) ? 'primary' : 'month'
+  };
+}
+
 // Roll a set of grade rows + the editor's manual meta (Avg Videos/Day, Target/Day)
 // up into one scorecard object. `grades` is the already period-filtered list.
 function computeScorecard(editor, grades, suggestedTarget) {
@@ -7422,6 +7496,20 @@ function renderGradingView() {
       : '<span class="grading-composite-num grading-rollup-empty">—</span><span class="grading-rollup-sub">0 vids</span>';
     return '<td class="grading-sc-rollup" title="' + escapeHtml(title) + '">' + body + '</td>';
   }
+  function recommendationCell(primary, monthCard) {
+    var rec = gradeRecommendation(primary, monthCard);
+    if (!rec) {
+      return '<td class="grading-sc-rec grading-sc-rec-empty" title="No graded videos yet — grade some to unlock coaching.">' +
+          '<span class="grading-rec-tag">— · needs data</span>' +
+          '<span class="grading-rec-text">Grade a few videos to see a coaching note.</span>' +
+        '</td>';
+    }
+    var basedOnLabel = rec.basedOn === 'primary' ? 'current scope' : 'this month';
+    return '<td class="grading-sc-rec grading-sc-rec-' + rec.tone + '" title="' + escapeHtml('Based on ' + basedOnLabel + ' · weakest pillar: ' + rec.weakestPillar + ' (' + Math.round(rec.weakestPct) + '%)') + '">' +
+        '<span class="grading-rec-tag grading-rec-tag-' + rec.tone + '">' + escapeHtml(basedOnLabel) + '</span>' +
+        '<span class="grading-rec-text">' + escapeHtml(rec.text) + '</span>' +
+      '</td>';
+  }
   // Team-wide composite for This Week / This Month — a single number per period
   // pooled across every editor's grades (all campaigns, respecting Paid/Organic).
   // Rendered as a strip ABOVE the per-editor scorecard so you get "how did the whole
@@ -7489,6 +7577,7 @@ function renderGradingView() {
       '<td class="grading-sc-rating"><span class="grading-rating grading-rating-' + rd.key + '">' + rd.dot + ' ' + rd.label + '</span></td>' +
       rollupCell(weekByEditor[e],  'This week (' + _thisWeekLabel + ')') +
       rollupCell(monthByEditor[e], 'This month (' + _thisMonthLabel + ')') +
+      recommendationCell(c, monthByEditor[e]) +
     '</tr>';
   }).join('');
 
@@ -7509,6 +7598,7 @@ function renderGradingView() {
           '<th>Composite</th><th>Rating</th>' +
           '<th class="grading-th-rollup" title="Composite for the current calendar week (Mon–Sun containing today), across all months. Respects the Paid/Organic filter.">This Week<span class="grading-th-sub">' + escapeHtml(_thisWeekLabel) + '</span></th>' +
           '<th class="grading-th-rollup" title="Composite for the current calendar month, across all campaigns. Respects the Paid/Organic filter.">This Month<span class="grading-th-sub">' + escapeHtml(_thisMonthLabel) + '</span></th>' +
+          '<th class="grading-th-rec" title="Coaching note — based on the rating band + the weakest pillar. Uses the current-filter composite when it has data; falls back to This Month otherwise.">Recommendation<span class="grading-th-sub">rating + weakest pillar</span></th>' +
         '</tr></thead>' +
         '<tbody>' + scoreRows + '</tbody>' +
       '</table>' +

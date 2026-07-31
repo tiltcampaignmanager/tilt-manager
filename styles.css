@@ -1489,12 +1489,24 @@
 
   /* Rollup columns (This Week / This Month composite, independent of the month/year/week filter) */
   .grading-th-rollup { white-space: nowrap; border-left: 1px dashed var(--border); }
-  .grading-th-rollup .grading-th-sub { display: block; margin-top: 2px; font-size: 9px; font-weight: 400; color: var(--text3); letter-spacing: 0; }
+  .grading-th-sub { display: block; margin-top: 2px; font-size: 9px; font-weight: 400; color: var(--text3); letter-spacing: 0; text-transform: none; }
   .grading-sc-rollup { white-space: nowrap; border-left: 1px dashed var(--border); }
   .grading-sc-rollup .grading-composite-num { font-size: 14px; }
   .grading-sc-rollup .grading-rollup-empty { color: var(--text3); }
   .grading-rollup-sub { display: block; margin-top: 1px; font-size: 10px; color: var(--text3); }
   .grading-rollup-dot { display: inline-block; margin-right: 4px; font-size: 10px; vertical-align: baseline; }
+
+  /* Recommendation column — coaching note per editor, tone-coloured by rating band. */
+  .grading-th-rec { min-width: 280px; white-space: normal; border-left: 1px dashed var(--border); }
+  .grading-sc-rec { min-width: 280px; max-width: 340px; white-space: normal; vertical-align: top; border-left: 1px dashed var(--border); }
+  .grading-rec-tag { display: inline-block; margin-bottom: 5px; padding: 2px 7px; border-radius: 4px; font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; background: var(--bg3); color: var(--text3); }
+  .grading-rec-tag-excellent { background: var(--green-bg); color: var(--green-text); }
+  .grading-rec-tag-solid     { background: var(--amber-bg); color: var(--amber-text); }
+  .grading-rec-tag-needswork { background: var(--amber-bg); color: var(--amber-text); }
+  .grading-rec-tag-atrisk    { background: var(--red-bg);   color: var(--red-text); }
+  .grading-rec-text { display: block; font-size: 11.5px; line-height: 1.45; color: var(--text2); font-weight: 400; }
+  .grading-sc-rec-excellent .grading-rec-text { color: var(--text1); }
+  .grading-sc-rec-empty .grading-rec-text { color: var(--text3); font-style: italic; }
 
   /* Graded-videos log */
   .grading-log-video { font-weight: 500; color: var(--text1); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
