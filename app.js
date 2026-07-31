@@ -6899,69 +6899,65 @@ function gradeRating(score) {
 }
 
 // Coaching recommendation for the Editor Scorecard's "Recommendation" column.
-// Combines the rating band (tone + intervention level) with the weakest pillar
-// (targeted action). Reads to Elsa — advice on how to coach this editor next
-// cycle, not to the editor themselves. Falls back to `fallbackCard` when the
-// primary scope has no graded videos yet, so a filter with no data still gets
-// a useful note. Returns null when nothing at all has been graded.
+// Written as three beats per Elsa's LEU framework: Logic (what it means) → Evidence
+// (the numbers behind it) → Utility (what to do next). Reads to Elsa, not to the
+// editor. Falls back to `fallbackCard` when the primary scope has no graded videos
+// yet. Returns null when nothing at all has been graded.
 function gradeRecommendation(primaryCard, fallbackCard) {
   var card = (primaryCard && primaryCard.total > 0) ? primaryCard : fallbackCard;
   if (!card || card.total === 0) return null;
+  function fmt1(x) { return (Math.round((Number(x) || 0) * 10) / 10).toFixed(1); }
   var rating = card.rating.key;
-  // Rank pillars by how close they are to max. Weakest first.
+  // Rank pillars by how close each one is to max. Weakest first.
   var pillars = [
     { key: 'brand', label: 'brand alignment', pct: card.brandRate, fill: card.ptsBrand / GRADE_POINTS.brand },
-    { key: 'qa',    label: 'QA hygiene',       pct: card.qaRate,    fill: card.ptsQa    / GRADE_POINTS.qa },
-    { key: 'rev',   label: 'revision discipline', pct: card.capRate, fill: card.ptsRev / GRADE_POINTS.speedRevisions },
-    { key: 'innov', label: 'new ideas',        pct: (card.ideas >= 1 ? 100 : 0), fill: card.ptsInnov / GRADE_POINTS.innovation }
+    { key: 'qa',    label: 'QA',              pct: card.qaRate,    fill: card.ptsQa    / GRADE_POINTS.qa },
+    { key: 'rev',   label: 'revision count',  pct: card.capRate,   fill: card.ptsRev   / GRADE_POINTS.speedRevisions },
+    { key: 'innov', label: 'new ideas',       pct: (card.ideas >= 1 ? 100 : 0), fill: card.ptsInnov / GRADE_POINTS.innovation }
   ];
   if (card.hasOutput) {
-    pillars.push({ key: 'output', label: 'output pace', pct: card.avgPerDay / card.targetDay * 100, fill: card.ptsOut / GRADE_POINTS.speedOutput });
+    pillars.push({ key: 'output', label: 'pace', pct: card.avgPerDay / card.targetDay * 100, fill: card.ptsOut / GRADE_POINTS.speedOutput });
   }
   pillars.sort(function(a, b) { return a.fill - b.fill; });
   var weakest = pillars[0];
-
-  // Rating band → tone; weakest pillar → targeted action.
-  var bandCopy = {
-    excellent: 'Anchor the flagship briefs on them and pair them with the rest of the team as a mentor — they earned it.',
-    solid:     'Stretch them into a harder brief this cycle',
-    needswork: 'One weak pillar dragging the rest',
-    atrisk:    'Below 60/100 — pair with a mentor and cap the weekly load until fundamentals hold'
-  };
-  var pillarAction = {
-    brand:  'sit with Avy for a 30-min brand-pass walkthrough and mark 3 recent misses.',
-    qa:     'QA-pair the next three cuts with Elsa before For Review — same-day feedback loop.',
-    rev:    'clarify brief with PM before the first cut; log every revision reason.',
-    innov:  'set a target of at least one Net-New concept per delivery cycle.',
-    output: 'trim scope per cut and post a morning ETA per video in Slack.'
-  };
-  // If Output is dragging the score purely because Avg/Day is unset, the real fix is
-  // to fill in the manual meta — say that instead of the generic "trim scope" copy.
+  var comp = fmt1(card.composite);
+  var wPct = Math.round(weakest.pct);
   var missingOutputData = !card.hasOutput;
-  var tone, body;
+
+  // Targeted actions per pillar. Physical verbs, no em dashes, concrete next step.
+  var pillarAction = {
+    brand:  'Sit with Avy, walk 3 recent misses, get the brand rules crisp in their head.',
+    qa:     'QA-pair their next 3 cuts with Elsa before For Review, same-day feedback loop.',
+    rev:    'Get the brief crystal-clear with PM before they start cutting. Log why every revision came back.',
+    innov:  'Set a target: 1 Net-New concept per cycle, minimum. Track it on the scorecard.',
+    output: 'Trim scope on the next cut and post a morning ETA per video in Slack.'
+  };
+
+  var tone = rating, body;
   if (rating === 'excellent') {
-    tone = 'excellent';
-    body = bandCopy.excellent;
+    // Logic: flagship. Evidence: composite + green pillars. Utility: hardest brief + mentor.
+    body = "Flagship level. Composite " + comp + "/100 with every pillar green. Give them the hardest brief this cycle and let them coach whoever's struggling.";
   } else if (rating === 'solid') {
-    tone = 'solid';
     if (weakest.fill >= 0.85) {
-      // All pillars strong — no weakness to nudge, just stretch.
-      body = 'Solid across the board — stretch them into a harder brief this cycle to graduate them to Excellent.';
+      // All pillars strong. Logic: reliable. Evidence: nothing weak. Utility: stretch.
+      body = "Reliable across every pillar. Composite " + comp + "/100 with nothing weak enough to target. Hand them a harder brief next cycle and see if they can jump to Excellent.";
     } else if (weakest.key === 'output' || (missingOutputData && weakest.fill >= 0.9)) {
-      body = bandCopy.solid + ' — and set Avg/Day for this editor so the Output pillar starts scoring.';
+      // Output the drag (or purely missing meta). Logic: masked. Evidence: score + blank field. Utility: set Avg/Day.
+      body = "Composite " + comp + "/100 but pace isn't scoring because Avg/Day is blank. Set it so the real number can show.";
     } else {
-      body = bandCopy.solid + ' — with a small nudge on ' + weakest.label + ' (' + Math.round(weakest.pct) + '% now).';
+      // Solid but one pillar off. Logic: outlier. Evidence: score + pillar %. Utility: fix that one thing.
+      body = "Composite " + comp + "/100. " + capitalize(weakest.label) + " is the outlier at " + wPct + "%. " + pillarAction[weakest.key] + " Fix that one thing and they're Excellent by next cycle.";
     }
   } else if (rating === 'needswork') {
-    tone = 'needswork';
     if (missingOutputData && weakest.fill >= 0.7) {
-      body = "Pillars look OK but Output isn't scoring — set Avg/Day for this editor so the composite reflects real pace.";
+      body = "Composite " + comp + "/100. Pillars look OK, but pace isn't scoring because Avg/Day is blank. Set it so the score reflects real output.";
     } else {
-      body = bandCopy.needswork + ': ' + weakest.label + ' is at ' + Math.round(weakest.pct) + '%. ' + pillarAction[weakest.key];
+      // Logic: dragged by one pillar. Evidence: score + pillar %. Utility: action + "one-fix" reassurance.
+      body = "Composite " + comp + "/100, dragged by " + weakest.label + " at " + wPct + "%. " + pillarAction[weakest.key] + " Everything else scores, so this is a one-fix issue.";
     }
   } else {
-    tone = 'atrisk';
-    body = bandCopy.atrisk + '. Start with ' + weakest.label + ' (' + Math.round(weakest.pct) + '% now) — ' + pillarAction[weakest.key];
+    // At Risk. Logic: fundamentals cracking. Evidence: sub-60 score + weak pillar. Utility: protect + fix biggest crack.
+    body = "Composite " + comp + "/100. " + capitalize(weakest.label) + " is the biggest crack at " + wPct + "%. Cap their load, pair them with a mentor, start on " + weakest.label + ". " + pillarAction[weakest.key];
   }
   return {
     tone: tone,
@@ -6971,6 +6967,7 @@ function gradeRecommendation(primaryCard, fallbackCard) {
     basedOn: (primaryCard && primaryCard.total > 0) ? 'primary' : 'month'
   };
 }
+function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
 // Roll a set of grade rows + the editor's manual meta (Avg Videos/Day, Target/Day)
 // up into one scorecard object. `grades` is the already period-filtered list.
@@ -7499,9 +7496,9 @@ function renderGradingView() {
   function recommendationCell(primary, monthCard) {
     var rec = gradeRecommendation(primary, monthCard);
     if (!rec) {
-      return '<td class="grading-sc-rec grading-sc-rec-empty" title="No graded videos yet — grade some to unlock coaching.">' +
-          '<span class="grading-rec-tag">— · needs data</span>' +
-          '<span class="grading-rec-text">Grade a few videos to see a coaching note.</span>' +
+      return '<td class="grading-sc-rec grading-sc-rec-empty" title="Nothing graded yet in this scope. Grade a few and the coaching note will show up.">' +
+          '<span class="grading-rec-tag">needs data</span>' +
+          '<span class="grading-rec-text">Nothing graded yet. Tick a few Brand/QA/Idea boxes above and the note will fill in.</span>' +
         '</td>';
     }
     var basedOnLabel = rec.basedOn === 'primary' ? 'current scope' : 'this month';
