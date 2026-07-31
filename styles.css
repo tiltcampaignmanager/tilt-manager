@@ -1432,6 +1432,14 @@
   .grading-section-note { font-size: 11px; font-weight: 500; color: var(--text3); text-transform: none; letter-spacing: 0; }
   .grading-log-filter { margin-left: auto; text-transform: none; letter-spacing: 0; }
 
+  /* Grade Videos collapsible header — click title to toggle, chevron rotates. */
+  .grading-videos-toggle { cursor: pointer; user-select: none; padding: 4px 0; flex-wrap: wrap; }
+  .grading-videos-toggle:hover .grading-videos-heading { color: var(--accent); }
+  .grading-videos-chev { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text3); width: 12px; text-align: center; transition: color 0.12s; }
+  .grading-videos-heading { transition: color 0.12s; }
+  .grading-videos-progress { font-size: 11px; font-weight: 500; color: var(--text2); text-transform: none; letter-spacing: 0; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px; }
+  .grading-videos-actions { margin-left: auto; cursor: default; }
+
   /* Tables */
   .grading-table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
   .grading-scorecard, .grading-log-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 720px; }

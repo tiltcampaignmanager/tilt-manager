@@ -400,6 +400,7 @@ var Fb = {
       editorStatsSelected: STATE.editorStatsSelected || null,
       editorStatsBadgesCollapsed: !!STATE.editorStatsBadgesCollapsed,
       editorStatsGroupCollapsed: STATE.editorStatsGroupCollapsed || {},
+      gradingVideosCollapsed: !!STATE.gradingVideosCollapsed,
       _lastEditedBy: Auth.user ? Auth.user.uid : null,
       _lastEditedByName: Auth.user ? Auth.user.displayName : null,
       _lastEditedAt: Date.now()
@@ -1636,6 +1637,9 @@ var STATE = {
   // (Milestones, Craft, Momentum, Range, Consistency) one at a time.
   editorStatsBadgesCollapsed: false,
   editorStatsGroupCollapsed: {},
+  // Grading tab: Grade Videos table collapsed state (per-user persisted). Header still
+  // shows the graded/total count so you know progress at a glance while folded.
+  gradingVideosCollapsed: false,
 
   countries: [
     { code: 'UK', name: 'United Kingdom' },
@@ -7340,26 +7344,45 @@ function renderGradingView() {
         (showDismissed ? 'Hide dismissed (' + dismissedAssets.length + ')' : 'Show dismissed (' + dismissedAssets.length + ')') + '</button>'
     : '';
 
+  // Grade Videos is collapsible (per-user, persisted via STATE.gradingVideosCollapsed).
+  // Header always shows graded/total for the current scope so the count stays visible
+  // even when the table is folded. Chevron + role="button" on the title mirrors the
+  // Editor Stats badges shelf pattern. When collapsed we still render the "Show
+  // dismissed" toggle inline so the user can access it without expanding.
+  var videosOpen = !STATE.gradingVideosCollapsed;
+  var scopeNoteHtml =
+    campSel
+      ? ' <span class="grading-section-note">' + escapeHtml(campSel.name) + ' · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>'
+      : (allCampaigns ? ' <span class="grading-section-note">All campaigns · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>' : '');
+  var progressPill = (primary.total > 0)
+    ? '<span class="grading-videos-progress" title="Videos graded in the current scope">' + primary.graded + ' / ' + primary.total + ' graded</span>'
+    : '';
   var gradeList =
     '<div class="grading-section">' +
-      '<div class="grading-section-title">Grade Videos' +
-        (campSel
-          ? ' <span class="grading-section-note">' + escapeHtml(campSel.name) + ' · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>'
-          : (allCampaigns ? ' <span class="grading-section-note">All campaigns · ' + escapeHtml(week ? weekLabel : sel.label) + '</span>' : '')) +
+      '<div class="grading-section-title grading-videos-toggle' + (videosOpen ? ' is-open' : '') + '"' +
+        ' role="button" tabindex="0" aria-expanded="' + videosOpen + '"' +
+        ' onclick="App.toggleGradingVideos()"' +
+        ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();App.toggleGradingVideos()}">' +
+        '<span class="grading-videos-chev">' + (videosOpen ? '▼' : '▶') + '</span>' +
+        '<span class="grading-videos-heading">Grade Videos</span>' +
+        scopeNoteHtml +
+        progressPill +
         ' <span class="grading-type-hint" title="Type is auto-set from the file name: OP → Maintenance, N → Net New. Change it in the dropdown if the name is unusual.">✨ type auto-detected</span>' +
-        dismissToggle +
+        (dismissToggle ? '<span class="grading-videos-actions" onclick="event.stopPropagation()">' + dismissToggle + '</span>' : '') +
       '</div>' +
-      '<div class="grading-table-scroll grading-scroll-videos">' +
-      '<table class="grading-log-table">' +
-        '<thead><tr>' +
-          '<th>Video</th><th>Editor</th><th>Type</th>' +
-          '<th title="Brand Pass — Avy">Brand</th><th title="QA Clean — Elsa">QA</th>' +
-          '<th title="Revision rounds">Rounds</th><th title="Within revision cap">Cap</th>' +
-          '<th title="New Idea — Elsa">Idea</th><th></th>' +
-        '</tr></thead>' +
-        '<tbody>' + vidRows + '</tbody>' +
-      '</table>' +
-      '</div>' +
+      (videosOpen
+        ? '<div class="grading-table-scroll grading-scroll-videos">' +
+          '<table class="grading-log-table">' +
+            '<thead><tr>' +
+              '<th>Video</th><th>Editor</th><th>Type</th>' +
+              '<th title="Brand Pass — Avy">Brand</th><th title="QA Clean — Elsa">QA</th>' +
+              '<th title="Revision rounds">Rounds</th><th title="Within revision cap">Cap</th>' +
+              '<th title="New Idea — Elsa">Idea</th><th></th>' +
+            '</tr></thead>' +
+            '<tbody>' + vidRows + '</tbody>' +
+          '</table>' +
+          '</div>'
+        : '') +
     '</div>';
 
   // ── Editor Scorecard (rolls up the selected month's grades within the active filters) ──
@@ -12625,6 +12648,11 @@ var App = {
   },
   toggleEditorStatsBadges: function() {
     STATE.editorStatsBadgesCollapsed = !STATE.editorStatsBadgesCollapsed;
+    saveState();
+    render();
+  },
+  toggleGradingVideos: function() {
+    STATE.gradingVideosCollapsed = !STATE.gradingVideosCollapsed;
     saveState();
     render();
   },
