@@ -6899,89 +6899,95 @@ function gradeRating(score) {
 }
 
 // Coaching recommendation for the Editor Scorecard's "Recommendation" column.
-// Written as three beats per Elsa's LEU framework: Logic (what it means) → Evidence
-// (the numbers behind it) → Utility (what to do next). Reads to Elsa, not to the
-// editor. Falls back to `fallbackCard` when the primary scope has no graded videos
-// yet. Returns null when nothing at all has been graded.
+// Three explicit beats — focus pillar (what to improve) → evidence (where they're
+// struggling, in numbers) → why it matters (the business impact). Reads to Elsa,
+// not to the editor. Innovation here means edit-style innovation (structure, pacing,
+// hook, transitions) — something the editor controls at the timeline, NOT a
+// production brief type. Falls back to `fallbackCard` when the primary scope is
+// empty. Returns null when nothing has been graded.
 function gradeRecommendation(primaryCard, fallbackCard) {
   var card = (primaryCard && primaryCard.total > 0) ? primaryCard : fallbackCard;
   if (!card || card.total === 0) return null;
   function fmt1(x) { return (Math.round((Number(x) || 0) * 10) / 10).toFixed(1); }
   var rating = card.rating.key;
-  // Rank pillars by how close each one is to max. Weakest first.
   var pillars = [
     { key: 'brand', label: 'brand alignment', pct: card.brandRate, fill: card.ptsBrand / GRADE_POINTS.brand },
     { key: 'qa',    label: 'QA',              pct: card.qaRate,    fill: card.ptsQa    / GRADE_POINTS.qa },
-    { key: 'rev',   label: 'revision count',  pct: card.capRate,   fill: card.ptsRev   / GRADE_POINTS.speedRevisions },
-    { key: 'innov', label: 'new ideas',       pct: (card.ideas >= 1 ? 100 : 0), fill: card.ptsInnov / GRADE_POINTS.innovation }
+    { key: 'rev',   label: 'revision discipline', pct: card.capRate, fill: card.ptsRev / GRADE_POINTS.speedRevisions },
+    { key: 'innov', label: 'edit-style innovation', pct: (card.ideas >= 1 ? 100 : 0), fill: card.ptsInnov / GRADE_POINTS.innovation }
   ];
   if (card.hasOutput) {
-    pillars.push({ key: 'output', label: 'pace', pct: card.avgPerDay / card.targetDay * 100, fill: card.ptsOut / GRADE_POINTS.speedOutput });
+    pillars.push({ key: 'output', label: 'delivery pace', pct: card.avgPerDay / card.targetDay * 100, fill: card.ptsOut / GRADE_POINTS.speedOutput });
   }
   pillars.sort(function(a, b) { return a.fill - b.fill; });
   var weakest = pillars[0];
   var comp = fmt1(card.composite);
   var wPct = Math.round(weakest.pct);
   var missingOutputData = !card.hasOutput;
+  var N = card.total;
+  var basedOn = (primaryCard && primaryCard.total > 0) ? 'primary' : 'month';
 
-  // Targeted actions per pillar. Physical verbs, concrete next step. Innovation
-  // routes to production rather than the editor: editors don't originate Net-New
-  // concepts, they cut what production briefs them, so a low-innov score is
-  // usually a signal about the brief pipeline (see the innov-is-brief-driven memo).
-  var pillarAction = {
-    brand:  'Sit with Avy, walk 3 recent misses, get the brand rules crisp in their head.',
-    qa:     'QA-pair their next 3 cuts with Elsa before For Review, same-day feedback loop.',
-    rev:    'Get the brief crystal-clear with PM before they start cutting. Log why every revision came back.',
-    innov:  "Check what production is queuing for them. Editors cut what they're briefed, so this is a signal about the brief pipeline, not the editor.",
-    output: 'Trim scope on the next cut and post a morning ETA per video in Slack.'
+  // Per-pillar three-beat templates. `evidence` cites the actual numbers, `why`
+  // grounds it in a downstream business consequence.
+  var pillarFocus = {
+    brand:  'Push on brand alignment.',
+    qa:     'Push on QA hygiene.',
+    rev:    'Push on revision discipline.',
+    innov:  'Push on edit-style innovation.',
+    output: 'Push on delivery pace.'
   };
-  // Innovation is brief-driven, so the framing shifts: "dragged by" (which reads as
-  // the editor's fault) becomes "brief-driven" copy that routes the fix to production.
-  var weakestIsInnov = weakest.key === 'innov';
+  var pillarEvidence = {
+    brand:  'Brand pass rate at ' + wPct + '% across ' + N + ' videos this cycle.',
+    qa:     'QA-clean rate at ' + wPct + '% across ' + N + ' videos this cycle.',
+    rev:    'Only ' + wPct + '% of cuts landed inside the revision cap.',
+    innov:  (wPct === 0 ? 'No new-idea flags across any of the ' + N + ' videos graded.' : 'New-idea flag on only ' + wPct + '% of their videos.'),
+    output: 'Delivering ' + fmt1(card.avgPerDay) + '/day against a ' + fmt1(card.targetDay) + '/day target.'
+  };
+  var pillarWhy = {
+    brand:  "Off-brand cuts bounce back to Avy, which slows every approval on the campaign.",
+    qa:     "Every cut caught in QA stretches the timeline. Half snagging on QA means twice the review load for Elsa.",
+    rev:    "Extra revision rounds cost 24-48h each. Repeat that across a campaign and the launch date slips.",
+    innov:  "Safe cuts get watched but not remembered. Distinctive edit style is what separates Solid editors from Excellent ones.",
+    output: "The team is planning around a higher pace than they're hitting. Every gap widens the backlog."
+  };
 
-  var tone = rating, body;
+  var tone = rating, focus, evidence, why;
+
+  // Excellent: no weakness to fix, just anchor + coach.
   if (rating === 'excellent') {
-    // Logic: flagship. Evidence: composite + green pillars. Utility: hardest brief + mentor.
-    body = "Flagship level. Composite " + comp + "/100 with every pillar green. Give them the hardest brief this cycle and let them coach whoever's struggling.";
-  } else if (rating === 'solid') {
-    if (weakest.fill >= 0.85) {
-      // All pillars strong. Logic: reliable. Evidence: nothing weak. Utility: stretch.
-      body = "Reliable across every pillar. Composite " + comp + "/100 with nothing weak enough to target. Hand them a harder brief next cycle and see if they can jump to Excellent.";
-    } else if (weakest.key === 'output' || (missingOutputData && weakest.fill >= 0.9)) {
-      // Output the drag (or purely missing meta). Logic: masked. Evidence: score + blank field. Utility: set Avg/Day.
-      body = "Composite " + comp + "/100 but pace isn't scoring because Avg/Day is blank. Set it so the real number can show.";
-    } else if (weakestIsInnov) {
-      body = "Composite " + comp + "/100. New ideas is the outlier at " + wPct + "%, and that pillar is brief-driven. Push production for more Net-New briefs in their queue rather than nudging the editor.";
-    } else {
-      // Solid but one pillar off. Logic: outlier. Evidence: score + pillar %. Utility: fix that one thing.
-      body = "Composite " + comp + "/100. " + capitalize(weakest.label) + " is the outlier at " + wPct + "%. " + pillarAction[weakest.key] + " Fix that one thing and they're Excellent by next cycle.";
-    }
-  } else if (rating === 'needswork') {
-    if (missingOutputData && weakest.fill >= 0.7) {
-      body = "Composite " + comp + "/100. Pillars look OK, but pace isn't scoring because Avg/Day is blank. Set it so the score reflects real output.";
-    } else if (weakestIsInnov) {
-      body = "Composite " + comp + "/100. New ideas at " + wPct + "% is dragging, but that's brief-driven. " + pillarAction.innov;
-    } else {
-      // Logic: dragged by one pillar. Evidence: score + pillar %. Utility: action + "one-fix" reassurance.
-      body = "Composite " + comp + "/100, dragged by " + weakest.label + " at " + wPct + "%. " + pillarAction[weakest.key] + " Everything else scores, so this is a one-fix issue.";
-    }
-  } else {
-    // At Risk. Logic: fundamentals cracking. Evidence: sub-60 score + weak pillar. Utility: protect + fix biggest crack.
-    if (weakestIsInnov) {
-      body = "Composite " + comp + "/100. New ideas at " + wPct + "% is the biggest drag, but that's brief-driven. Check what production is queuing before capping the editor's load. Fundamentals to watch on their side: whichever pillar's next weakest.";
-    } else {
-      body = "Composite " + comp + "/100. " + capitalize(weakest.label) + " is the biggest crack at " + wPct + "%. Cap their load, pair them with a mentor, start on " + weakest.label + ". " + pillarAction[weakest.key];
-    }
+    focus    = 'Anchor level.';
+    evidence = 'Composite ' + comp + '/100 with every pillar green.';
+    why      = "Give them the hardest brief this cycle and let them coach whoever's dragging.";
   }
+  // Solid + all pillars ≥ 85%: nothing weak enough to target — stretch them.
+  else if (rating === 'solid' && weakest.fill >= 0.85) {
+    focus    = 'Reliable across every pillar.';
+    evidence = 'Composite ' + comp + '/100, no pillar below ' + Math.round(weakest.fill * 100) + '% fill.';
+    why      = 'Hand them a harder brief next cycle and see if they can jump to Excellent.';
+  }
+  // Missing Avg/Day and everything else is strong → the real fix is data entry.
+  else if (missingOutputData && weakest.fill >= 0.85 && (rating === 'solid' || rating === 'needswork')) {
+    focus    = 'Set Avg/Day for this editor.';
+    evidence = 'Output scores 0 because Avg/Day is blank. Composite ' + comp + '/100 without it.';
+    why      = "The real composite is masked. Fill in Avg/Day so the score reflects what they're actually shipping.";
+  }
+  // Everything else: focus on the weakest pillar with the three-beat template.
+  else {
+    focus    = pillarFocus[weakest.key];
+    evidence = 'Composite ' + comp + '/100. ' + pillarEvidence[weakest.key];
+    why      = pillarWhy[weakest.key];
+  }
+
   return {
     tone: tone,
-    text: body,
+    focus: focus,
+    evidence: evidence,
+    why: why,
     weakestPillar: weakest.label,
     weakestPct: weakest.pct,
-    basedOn: (primaryCard && primaryCard.total > 0) ? 'primary' : 'month'
+    basedOn: basedOn
   };
 }
-function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
 // Roll a set of grade rows + the editor's manual meta (Avg Videos/Day, Target/Day)
 // up into one scorecard object. `grades` is the already period-filtered list.
@@ -7512,13 +7518,16 @@ function renderGradingView() {
     if (!rec) {
       return '<td class="grading-sc-rec grading-sc-rec-empty" title="Nothing graded yet in this scope. Grade a few and the coaching note will show up.">' +
           '<span class="grading-rec-tag">needs data</span>' +
-          '<span class="grading-rec-text">Nothing graded yet. Tick a few Brand/QA/Idea boxes above and the note will fill in.</span>' +
+          '<span class="grading-rec-focus">Nothing graded yet.</span>' +
+          '<span class="grading-rec-why">Tick a few Brand/QA/Idea boxes above and the coaching note will fill in.</span>' +
         '</td>';
     }
     var basedOnLabel = rec.basedOn === 'primary' ? 'current scope' : 'this month';
     return '<td class="grading-sc-rec grading-sc-rec-' + rec.tone + '" title="' + escapeHtml('Based on ' + basedOnLabel + ' · weakest pillar: ' + rec.weakestPillar + ' (' + Math.round(rec.weakestPct) + '%)') + '">' +
         '<span class="grading-rec-tag grading-rec-tag-' + rec.tone + '">' + escapeHtml(basedOnLabel) + '</span>' +
-        '<span class="grading-rec-text">' + escapeHtml(rec.text) + '</span>' +
+        '<span class="grading-rec-focus">' + escapeHtml(rec.focus) + '</span>' +
+        '<span class="grading-rec-evidence">' + escapeHtml(rec.evidence) + '</span>' +
+        '<span class="grading-rec-why">' + escapeHtml(rec.why) + '</span>' +
       '</td>';
   }
   // Team-wide composite for This Week / This Month — a single number per period

@@ -1507,6 +1507,12 @@
   .grading-rec-text { display: block; font-size: 11.5px; line-height: 1.45; color: var(--text2); font-weight: 400; }
   .grading-sc-rec-excellent .grading-rec-text { color: var(--text1); }
   .grading-sc-rec-empty .grading-rec-text { color: var(--text3); font-style: italic; }
+  /* Three-beat layout inside the Recommendation cell: focus (bold) → evidence (muted, mono for numbers) → why it matters (regular). */
+  .grading-rec-focus { display: block; margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--text1); line-height: 1.35; }
+  .grading-rec-evidence { display: block; margin-top: 4px; font-size: 11px; color: var(--text3); line-height: 1.4; }
+  .grading-rec-why { display: block; margin-top: 4px; font-size: 11.5px; color: var(--text2); line-height: 1.45; }
+  .grading-sc-rec-empty .grading-rec-focus { color: var(--text3); font-weight: 500; font-style: italic; }
+  .grading-sc-rec-empty .grading-rec-why { color: var(--text3); font-style: italic; }
 
   /* Graded-videos log */
   .grading-log-video { font-weight: 500; color: var(--text1); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
