@@ -7095,7 +7095,8 @@ function resolveGradingYM() {
   if (!y || !m) {
     var yms = (STATE.assets || []).map(assetPeriodYM).filter(Boolean).sort();
     var latest = yms.length ? yms[yms.length - 1] : todayUK().slice(0, 7);
-    y = latest.slice(0, 4); m = latest.slice(5, 7);
+    if (!y) y = latest.slice(0, 4);
+    if (!m) m = latest.slice(5, 7);
   }
   y = String(y); m = String(m);
   var ym = y + '-' + m;
