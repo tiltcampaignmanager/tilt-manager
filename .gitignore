@@ -18,3 +18,7 @@ Thumbs.db
 # inject it at runtime, and Firebase Web API keys are project identifiers, not
 # secrets. The real secrets (Slack/Meta tokens) live in Cloud Function secrets,
 # never in this repo.
+
+# Large background video files — kept locally for reference only. Committing them
+# balloons the repo past GitHub Pages' 1GB limit and slows every clone.
+kinetic_dots_bg/

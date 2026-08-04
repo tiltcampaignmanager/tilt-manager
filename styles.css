@@ -258,9 +258,9 @@
   .no-link { font-size: 12px; color: var(--text3); font-family: 'JetBrains Mono', monospace; }
   .editor-cell { display: flex; align-items: center; gap: 7px; }
   .editor-avatar { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; font-family: 'JetBrains Mono', monospace; }
-  .av-Zidni { background: #3c3489; color: var(--accent2); }
-  .av-Patty { background: #085041; color: var(--green-text); }
-  .av-Sharm { background: #633806; color: var(--amber-text); }
+  .av-Zidni { background: #3c3489 url('editor_pics/zidni.png') center/cover no-repeat; color: transparent; }
+  .av-Patty { background: #085041 url('editor_pics/patty.png') center/cover no-repeat; color: transparent; }
+  .av-Sharm { background: #633806 url('editor_pics/sharm.png') center/cover no-repeat; color: transparent; }
   .av-Elsa { background: #72243e; color: var(--pink-text); }
   .editor-name { font-size: 12px; color: var(--text1); }
   .status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -1230,9 +1230,9 @@
     .cat-pill { background: var(--cat-bg-light); color: var(--cat-fg-light); }
 
     /* Editor avatars */
-    .av-Zidni { background: #e8e6f8; color: #4a40b0; }
-    .av-Patty { background: #d4f4e6; color: #0a5040; }
-    .av-Sharm { background: #fff0d5; color: #8a4f00; }
+    .av-Zidni { background: #e8e6f8 url('editor_pics/zidni.png') center/cover no-repeat; color: transparent; }
+    .av-Patty { background: #d4f4e6 url('editor_pics/patty.png') center/cover no-repeat; color: transparent; }
+    .av-Sharm { background: #fff0d5 url('editor_pics/sharm.png') center/cover no-repeat; color: transparent; }
     .av-Elsa  { background: #fde0ea; color: #8a1f3f; }
 
     /* Activity / change tags. Use background-color (NOT the shorthand) because
@@ -1451,6 +1451,8 @@
 
   .grading-sc-editor { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text1); white-space: nowrap; }
   .grading-sc-editor .editor-avatar { width: 24px; height: 24px; font-size: 10px; }
+  .grading-copy-btn { margin-left: 4px; padding: 2px 6px; background: transparent; border: 1px solid var(--border); border-radius: 5px; color: var(--text2); cursor: pointer; font-size: 12px; line-height: 1; opacity: 0.55; transition: opacity 0.12s, border-color 0.12s, background 0.12s; }
+  .grading-copy-btn:hover { opacity: 1; border-color: var(--accent); background: var(--accent-dim); }
   .grading-sc-total { font-family: 'JetBrains Mono', monospace; color: var(--text2); }
   .grading-sc-num { white-space: nowrap; }
   .grading-sc-num b { font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--text1); }

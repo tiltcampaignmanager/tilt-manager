@@ -6009,6 +6009,238 @@ function fireGradingCelebration(total) {
 // never on a re-render or when you merely navigate to an already-complete scope.
 var GradingFx = { sig: null, wasComplete: false };
 
+// ===================== SCORECARD → SLACK IMAGE =====================
+// Wrapped-style scorecard image. renderGradingView populates _scorecardImageCtx each
+// render; the 📸 button on each row calls copyScorecardImage(editor), which rasterizes
+// a 1080×1600 SVG (random gradient + editor photo + composite + weekly/monthly trend +
+// pillar bars + coaching beat) to PNG and drops it on the clipboard for a paste into
+// Slack. Falls back to a PNG download when the browser blocks clipboard-image writes.
+var _scorecardImageCtx = { byEditor: {}, scope: '' };
+
+function _prevIsoWeekStart(mondayIso) {
+  if (!mondayIso) return null;
+  var d = new Date(mondayIso + 'T12:00:00');
+  if (isNaN(d.getTime())) return null;
+  d.setDate(d.getDate() - 7);
+  var mm = d.getMonth() + 1, dd = d.getDate();
+  return d.getFullYear() + '-' + (mm < 10 ? '0' + mm : mm) + '-' + (dd < 10 ? '0' + dd : dd);
+}
+function _prevYearMonth(ym) {
+  var y = parseInt(ym.slice(0, 4), 10), m = parseInt(ym.slice(5, 7), 10);
+  m -= 1;
+  if (m < 1) { m = 12; y -= 1; }
+  return y + '-' + (m < 10 ? '0' + m : m);
+}
+
+// Pillar bar color: green/amber/red at 80% / 60% fill cutoffs. Matches the tracker's
+// .grading-rating-* pill scheme so on-screen green rows read green on the image too.
+function _pillarBarColor(pct) {
+  if (pct >= 0.80) return '#5dcaa5';
+  if (pct >= 0.60) return '#fac775';
+  return '#f09595';
+}
+var _RATING_IMG_COL = {
+  excellent: { bg: '#04342c', fg: '#5dcaa5' },
+  solid:     { bg: '#412402', fg: '#fac775' },
+  needswork: { bg: '#412402', fg: '#fac775' },
+  atrisk:    { bg: '#501313', fg: '#f09595' }
+};
+var _EDITOR_PIC = {
+  Zidni: 'editor_pics/zidni.png',
+  Patty: 'editor_pics/patty.png',
+  Sharm: 'editor_pics/sharm.png'
+};
+// Random gradient from gradient_bg/1..53.jpeg. Fresh pick per copy so no two shares
+// look identical (Wrapped-style variety).
+function _randomGradientBg() { return 'gradient_bg/' + (1 + Math.floor(Math.random() * 53)) + '.jpeg'; }
+
+// SVG has no wrap — split by words up to ~maxChars. Used for coaching focus/evidence.
+function _svgWrapText(text, maxChars) {
+  var words = String(text || '').split(/\s+/), lines = [], line = '';
+  for (var i = 0; i < words.length; i++) {
+    var w = words[i], next = line ? (line + ' ' + w) : w;
+    if (next.length > maxChars && line) { lines.push(line); line = w; }
+    else { line = next; }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function buildScorecardImageSvg(editor) {
+  var ctx = _scorecardImageCtx.byEditor[editor];
+  if (!ctx || !ctx.card) return '';
+  var W = 1080, H = 1600;
+  var card = ctx.card;
+  var rk = card.rating.key;
+  var rl = card.rating.label;
+  var rc = _RATING_IMG_COL[rk] || _RATING_IMG_COL.atrisk;
+  var ink = '#ffffff';
+  var pic = _EDITOR_PIC[editor] || '';
+  var bg = _randomGradientBg();
+  var idx = Math.floor(Math.random() * 1e9);
+  function fmt1(x) { return (Math.round((Number(x) || 0) * 10) / 10).toFixed(1); }
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+  function trend(current, previous) {
+    var delta = current - previous;
+    var up = delta >= 0;
+    return { sym: up ? '↑' : '↓', col: up ? '#7ee6b8' : '#ff9d9d', mag: fmt1(Math.abs(delta)), prev: previous };
+  }
+  var trW = trend(card.composite, (ctx.prevWeek && ctx.prevWeek.composite) || 0);
+  var trM = trend(card.composite, (ctx.prevMonth && ctx.prevMonth.composite) || 0);
+
+  function bar(y, label, pts, max) {
+    var pct = max ? Math.max(0, Math.min(1, pts / max)) : 0;
+    var barW = 780, barX = 150, filledW = Math.round(barW * pct);
+    var ptsLabel = fmt1(pts) + '/' + max;
+    var barCol = _pillarBarColor(pts / max);
+    return (
+      '<text x="' + barX + '" y="' + (y - 20) + '" fill="' + ink + '" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="700">' + esc(label) + '</text>' +
+      '<text x="' + (barX + barW) + '" y="' + (y - 20) + '" text-anchor="end" fill="' + ink + '" opacity="0.75" font-family="ui-monospace, Menlo, monospace" font-size="20" font-weight="600">' + esc(ptsLabel) + '</text>' +
+      '<rect x="' + barX + '" y="' + y + '" width="' + barW + '" height="10" rx="5" fill="' + ink + '" fill-opacity="0.18"/>' +
+      '<rect x="' + barX + '" y="' + y + '" width="' + filledW + '" height="10" rx="5" fill="' + barCol + '"/>'
+    );
+  }
+
+  var rec = ctx.coaching;
+  var focusLines    = rec ? _svgWrapText(rec.focus,    52) : ['Not enough data yet.'];
+  var evidenceLines = rec ? _svgWrapText(rec.evidence, 68) : ['Grade a few videos and coaching will fill in.'];
+  var recX = 100, recY = 1320;
+  var recSvg = '';
+  recSvg += '<line x1="' + recX + '" y1="' + (recY - 44) + '" x2="' + (W - recX) + '" y2="' + (recY - 44) + '" stroke="' + ink + '" stroke-opacity="0.22"/>';
+  recSvg += '<text x="' + recX + '" y="' + recY + '" fill="' + ink + '" opacity="0.65" font-family="ui-monospace, Menlo, monospace" font-size="17" font-weight="600" letter-spacing="4">COACHING · ELSA</text>';
+  var fy = recY + 46;
+  focusLines.forEach(function(ln, i) {
+    recSvg += '<text x="' + recX + '" y="' + (fy + i * 42) + '" fill="' + ink + '" font-family="Inter, system-ui, sans-serif" font-size="34" font-weight="800" letter-spacing="-0.5">' + esc(ln) + '</text>';
+  });
+  var ey = fy + focusLines.length * 42 + 22;
+  evidenceLines.forEach(function(ln, i) {
+    recSvg += '<text x="' + recX + '" y="' + (ey + i * 30) + '" fill="' + ink + '" opacity="0.88" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="500">' + esc(ln) + '</text>';
+  });
+
+  var pillFont = 22, pillPadX = 22, pillPadY = 12;
+  var pillTextEstW = rl.length * (pillFont * 0.58);
+  var pillW = Math.round(pillTextEstW + pillPadX * 2);
+  var pillH = pillFont + pillPadY * 2;
+  var pillX = (W - pillW) / 2;
+  var pillY = 650;
+
+  function trendBlock(cx, tr, label) {
+    var y = 750;
+    return (
+      '<text x="' + cx + '" y="' + y + '" text-anchor="middle" fill="' + tr.col + '" font-family="Inter, system-ui, sans-serif" font-size="36" font-weight="800">' + tr.sym + ' ' + tr.mag + ' pts</text>' +
+      '<text x="' + cx + '" y="' + (y + 34) + '" text-anchor="middle" fill="' + ink + '" opacity="0.65" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="500" letter-spacing="2">vs ' + esc(label) + ' · ' + fmt1(tr.prev) + '</text>'
+    );
+  }
+
+  var totalVids = card.total || 0;
+
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" preserveAspectRatio="xMidYMid slice">' +
+      '<defs>' +
+        '<clipPath id="clip-' + idx + '"><rect width="' + W + '" height="' + H + '"/></clipPath>' +
+        '<clipPath id="ava-' + idx + '"><circle cx="140" cy="248" r="50"/></clipPath>' +
+      '</defs>' +
+      '<g clip-path="url(#clip-' + idx + ')">' +
+        '<image href="' + bg + '" x="0" y="0" width="' + W + '" height="' + H + '" preserveAspectRatio="xMidYMid slice"/>' +
+        '<rect width="' + W + '" height="' + H + '" fill="rgba(0,0,0,0.42)"/>' +
+        '<text x="80" y="80" fill="' + ink + '" opacity="0.85" font-family="ui-monospace, Menlo, monospace" font-size="19" font-weight="600" letter-spacing="5">TILT · EDITOR SCORECARD</text>' +
+        '<text x="80" y="115" fill="' + ink + '" opacity="0.7" font-family="ui-monospace, Menlo, monospace" font-size="18" font-weight="500">' + esc(_scorecardImageCtx.scope || '') + '</text>' +
+        '<image href="' + pic + '" x="90" y="198" width="100" height="100" clip-path="url(#ava-' + idx + ')" preserveAspectRatio="xMidYMid slice"/>' +
+        '<circle cx="140" cy="248" r="50" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="3"/>' +
+        '<text x="215" y="240" fill="' + ink + '" font-family="Inter, system-ui, sans-serif" font-size="60" font-weight="800" letter-spacing="-2">' + esc(editor) + '</text>' +
+        '<text x="215" y="278" fill="' + ink + '" opacity="0.8" font-family="ui-monospace, Menlo, monospace" font-size="19" font-weight="500">' + totalVids + ' video' + (totalVids === 1 ? '' : 's') + ' graded</text>' +
+        '<text x="540" y="560" text-anchor="middle" fill="' + ink + '" font-family="Inter, system-ui, sans-serif" font-size="240" font-weight="900" letter-spacing="-10">' + fmt1(card.composite) + '</text>' +
+        '<text x="540" y="612" text-anchor="middle" fill="' + ink + '" opacity="0.7" font-family="ui-monospace, Menlo, monospace" font-size="' + pillFont + '" font-weight="600" letter-spacing="4">/ 100 · COMPOSITE</text>' +
+        '<rect x="' + pillX + '" y="' + pillY + '" width="' + pillW + '" height="' + pillH + '" rx="' + (pillH / 2) + '" fill="' + rc.bg + '" fill-opacity="0.35" stroke="' + rc.fg + '" stroke-width="2"/>' +
+        '<text x="540" y="' + (pillY + pillH / 2) + '" text-anchor="middle" dominant-baseline="central" fill="' + rc.fg + '" font-family="Inter, system-ui, sans-serif" font-size="' + pillFont + '" font-weight="700">' + esc(rl) + '</text>' +
+        trendBlock(305, trW, 'last week') +
+        trendBlock(775, trM, 'last month') +
+        bar(890,  'Brand',      card.ptsBrand, 25) +
+        bar(945,  'QA',         card.ptsQa,    30) +
+        bar(1000, 'Innovation', card.ptsInnov, 15) +
+        bar(1055, 'Output',     card.ptsOut,   15) +
+        bar(1110, 'Revisions',  card.ptsRev,   15) +
+        recSvg +
+      '</g>' +
+    '</svg>'
+  );
+}
+
+// Rasterize an SVG string to a PNG blob. All <image href="..."> refs are fetched and
+// inlined as data: URIs first, otherwise the canvas taints and .toBlob() would fail.
+function _rasterizeSvgToPng(svgString, w, h) {
+  var refs = svgString.match(/href="[^"]+"/g) || [];
+  var urls = [], seen = {};
+  refs.forEach(function(m) {
+    var u = m.slice(6, -1);
+    if (u.indexOf('data:') === 0) return;
+    if (seen[u]) return;
+    seen[u] = true; urls.push(u);
+  });
+  return Promise.all(urls.map(function(u) {
+    return fetch(u).then(function(r) { return r.blob(); }).then(function(b) {
+      return new Promise(function(res) {
+        var fr = new FileReader();
+        fr.onload = function() { res({ u: u, d: fr.result }); };
+        fr.readAsDataURL(b);
+      });
+    });
+  })).then(function(pairs) {
+    pairs.forEach(function(p) {
+      svgString = svgString.split('href="' + p.u + '"').join('href="' + p.d + '"');
+    });
+    var blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    return new Promise(function(resolve, reject) {
+      var img = new Image();
+      img.onload = function() {
+        var c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        c.toBlob(function(pb) { pb ? resolve(pb) : reject(new Error('toBlob returned null')); }, 'image/png');
+      };
+      img.onerror = function(e) { URL.revokeObjectURL(url); reject(e); };
+      img.src = url;
+    });
+  });
+}
+
+function _downloadScorecardPng(blob, editor) {
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  var day = (typeof todayUK === 'function') ? todayUK() : new Date().toISOString().slice(0, 10);
+  a.download = 'tilt-scorecard-' + editor.toLowerCase() + '-' + day + '.png';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function() { URL.revokeObjectURL(a.href); }, 1500);
+}
+
+function copyScorecardImage(editor) {
+  var ctx = _scorecardImageCtx.byEditor[editor];
+  if (!ctx || !ctx.card) { toast('No scorecard data yet for ' + editor, 'warn'); return; }
+  var svg = buildScorecardImageSvg(editor);
+  _rasterizeSvgToPng(svg, 1080, 1600).then(function(pngBlob) {
+    if (navigator.clipboard && window.ClipboardItem) {
+      try {
+        var item = new ClipboardItem({ 'image/png': pngBlob });
+        navigator.clipboard.write([item]).then(function() {
+          toast('📸 Scorecard copied — paste into Slack (⌘V)', 'success');
+        }).catch(function() {
+          _downloadScorecardPng(pngBlob, editor);
+          toast('Scorecard downloaded — clipboard blocked', 'warn');
+        });
+        return;
+      } catch (e) { /* fall through */ }
+    }
+    _downloadScorecardPng(pngBlob, editor);
+    toast('Scorecard downloaded — drag into Slack', 'success');
+  }).catch(function(e) {
+    console.error('Scorecard image failed', e);
+    toast('Failed to render scorecard image', 'warn');
+  });
+}
+
 // ===================== GAME FEEL (juicy clicks) =====================
 // A tiny dependency-free "game feel" layer inspired by web games: tactile button
 // presses (CSS), a click ripple on the prominent buttons, reward pops + sparkles when
@@ -7502,6 +7734,19 @@ function renderGradingView() {
     weekByEditor[e]  = computeScorecard(e, gradesThisWeek,  suggestedTarget);
     monthByEditor[e] = computeScorecard(e, gradesThisMonth, suggestedTarget);
   });
+
+  // Previous week/month grades → cards, so the Wrapped image can render trend deltas
+  // ("↑ 4.2 pts vs last week · 83.2"). Same paid/organic scope as the current-period
+  // rollups so the comparison is apples-to-apples.
+  var _prevWeekStart = _prevIsoWeekStart(_thisWeekStart);
+  var _prevYM        = _prevYearMonth(_thisYM);
+  var gradesPrevWeek  = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && isoWeekStart(g.date) === _prevWeekStart; });
+  var gradesPrevMonth = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && (g.date || '').slice(0, 7) === _prevYM; });
+  var prevWeekByEditor = {}, prevMonthByEditor = {};
+  GRADING_EDITORS.forEach(function(e) {
+    prevWeekByEditor[e]  = computeScorecard(e, gradesPrevWeek,  suggestedTarget);
+    prevMonthByEditor[e] = computeScorecard(e, gradesPrevMonth, suggestedTarget);
+  });
   var _thisWeekLabel  = _thisWeekStart ? weekRangeLabel(_thisWeekStart) : '';
   var _thisMonthLabel = MONTHS_FULL[parseInt(_thisYM.slice(5, 7), 10) - 1] + ' ' + _thisYM.slice(0, 4);
   function rollupCell(rc, label) {
@@ -7567,6 +7812,19 @@ function renderGradingView() {
       '</div>' +
     '</div>';
 
+  // Populate the Wrapped image context every render, so App.copyScorecardImage can
+  // pull fresh data for the clicked editor. Coaching mirrors the row-level cell:
+  // primary card + monthly fallback → gradeRecommendation → focus/evidence beats.
+  _scorecardImageCtx = { byEditor: {}, scope: scopeNote };
+  cards.forEach(function(c) {
+    _scorecardImageCtx.byEditor[c.editor] = {
+      card:      c,
+      prevWeek:  prevWeekByEditor[c.editor],
+      prevMonth: prevMonthByEditor[c.editor],
+      coaching:  gradeRecommendation(c, monthByEditor[c.editor])
+    };
+  });
+
   var scoreRows = cards.map(function(c) {
     var e = c.editor;
     var meta = (STATE.scorecardMeta && STATE.scorecardMeta[e]) || {};
@@ -7585,7 +7843,9 @@ function renderGradingView() {
     var tgtPlaceholder = c.targetIsAuto ? fmt1(c.targetDay) : '—';
     var tgtAutoPill = tgtIsAutoShown ? '<span class="grading-rounds-tag is-auto" title="' + escapeHtml(targetAutoTitle) + '">auto</span>' : '';
     return '<tr>' +
-      '<td class="grading-sc-editor"><div class="editor-avatar av-' + escapeHtml(e) + '">' + escapeHtml(editorInitials(e)) + '</div><span>' + escapeHtml(e) + '</span></td>' +
+      '<td class="grading-sc-editor"><div class="editor-avatar av-' + escapeHtml(e) + '">' + escapeHtml(editorInitials(e)) + '</div><span>' + escapeHtml(e) + '</span>' +
+        '<button class="grading-copy-btn" onclick="App.copyScorecardImage(\'' + escapeHtml(e) + '\')" title="Copy Wrapped-style scorecard as an image (paste into Slack)">📸</button>' +
+      '</td>' +
       '<td class="grading-sc-total">' + c.total + '</td>' +
       cell(c.ptsBrand, pct(c.brandRate), 'Brand pass rate ' + pct(c.brandRate) + ' → ' + fmt1(c.ptsBrand) + '/25') +
       cell(c.ptsQa, pct(c.qaRate), 'QA clean rate ' + pct(c.qaRate) + ' → ' + fmt1(c.ptsQa) + '/30') +
@@ -12790,6 +13050,8 @@ var App = {
   setGradingType: function(t) { STATE.gradingType = (t === 'Paid Ads' || t === 'Organic') ? t : 'all'; STATE.gradingCampaignId = null; render(); },
   // Weekly filter. Empty string ('Whole month') clears it.
   setGradingWeek: function(w) { STATE.gradingWeek = w || null; render(); },
+  // Copy the editor's Wrapped-style scorecard as a PNG to the clipboard (Slack paste).
+  copyScorecardImage: copyScorecardImage,
 
   // Get-or-create the single grade record linked to a campaign video. Grading a video
   // inline (ticking Brand/QA/Idea, setting type/rounds) lazily creates it the first time.
