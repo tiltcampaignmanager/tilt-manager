@@ -6241,6 +6241,52 @@ function copyScorecardImage(editor) {
   });
 }
 
+// Send the editor's Wrapped-style scorecard as a Slack DM to that editor. Uses the
+// sendSlackScorecardDm Cloud Function, which opens a DM with editorSlackIds[editor]
+// and uploads via Slack's v2 file API. The image is rasterized client-side and sent
+// as base64 in the callable payload.
+function sendScorecardImageToSlack(editor) {
+  var ctx = _scorecardImageCtx.byEditor[editor];
+  if (!ctx || !ctx.card) { toast('No scorecard data yet for ' + editor, 'warn'); return; }
+  var slackId = (STATE.editorSlackIds || {})[editor] || '';
+  if (!slackId) { toast('Set ' + editor + '’s Slack ID in Config first', 'warn'); return; }
+  toast('Sending scorecard to ' + editor + '…', 'success');
+  var svg = buildScorecardImageSvg(editor);
+  _rasterizeSvgToPng(svg, 1080, 1600).then(function(pngBlob) {
+    // Convert to base64 (strip the "data:image/png;base64," prefix).
+    return new Promise(function(resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function() {
+        var s = String(fr.result || '');
+        var comma = s.indexOf(',');
+        resolve(comma >= 0 ? s.slice(comma + 1) : s);
+      };
+      fr.onerror = function(e) { reject(e); };
+      fr.readAsDataURL(pngBlob);
+    });
+  }).then(function(b64) {
+    var call = firebase.functions().httpsCallable('sendSlackScorecardDm');
+    var day = (typeof todayUK === 'function') ? todayUK() : new Date().toISOString().slice(0, 10);
+    return call({
+      editorSlackId: slackId,
+      imageBase64: b64,
+      filename: 'tilt-scorecard-' + editor.toLowerCase() + '-' + day + '.png',
+      initialComment: 'Your Tilt scorecard — ' + (_scorecardImageCtx.scope || 'this period')
+    });
+  }).then(function(r) {
+    var d = (r && r.data) || {};
+    if (d.ok) {
+      toast('✈️ Scorecard DM’d to ' + editor, 'success');
+    } else {
+      console.warn('Slack DM failed', d);
+      toast('Slack send failed: ' + (d.body || 'unknown'), 'warn');
+    }
+  }).catch(function(e) {
+    console.error('sendScorecardImageToSlack', e);
+    toast('Slack send failed: ' + ((e && e.message) || 'network error'), 'warn');
+  });
+}
+
 // ===================== GAME FEEL (juicy clicks) =====================
 // A tiny dependency-free "game feel" layer inspired by web games: tactile button
 // presses (CSS), a click ripple on the prominent buttons, reward pops + sparkles when
@@ -7845,6 +7891,7 @@ function renderGradingView() {
     return '<tr>' +
       '<td class="grading-sc-editor"><div class="editor-avatar av-' + escapeHtml(e) + '">' + escapeHtml(editorInitials(e)) + '</div><span>' + escapeHtml(e) + '</span>' +
         '<button class="grading-copy-btn" onclick="App.copyScorecardImage(\'' + escapeHtml(e) + '\')" title="Copy Wrapped-style scorecard as an image (paste into Slack)">📸</button>' +
+        '<button class="grading-copy-btn" onclick="App.sendScorecardImageToSlack(\'' + escapeHtml(e) + '\')" title="DM the scorecard image directly to ' + escapeHtml(e) + ' on Slack">✈️</button>' +
       '</td>' +
       '<td class="grading-sc-total">' + c.total + '</td>' +
       cell(c.ptsBrand, pct(c.brandRate), 'Brand pass rate ' + pct(c.brandRate) + ' → ' + fmt1(c.ptsBrand) + '/25') +
@@ -13052,6 +13099,8 @@ var App = {
   setGradingWeek: function(w) { STATE.gradingWeek = w || null; render(); },
   // Copy the editor's Wrapped-style scorecard as a PNG to the clipboard (Slack paste).
   copyScorecardImage: copyScorecardImage,
+  // DM the editor their Wrapped-style scorecard directly (Cloud Function upload).
+  sendScorecardImageToSlack: sendScorecardImageToSlack,
 
   // Get-or-create the single grade record linked to a campaign video. Grading a video
   // inline (ticking Brand/QA/Idea, setting type/rounds) lazily creates it the first time.

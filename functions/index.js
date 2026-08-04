@@ -67,3 +67,72 @@ exports.sendSlackChatPostMessage = onCall(
     return { ok: !!json.ok, body: json.error || (json.ok ? 'ok' : 'unknown'), status: res.status };
   }
 );
+
+// ── Slack: DM a scorecard image to an editor ─────────────────────────
+// Client calls with { editorSlackId, imageBase64, filename?, initialComment? }.
+// Server opens a DM with the editor and uploads the image via the v2 file API
+// (files.upload was deprecated Mar 2025). Three steps: getUploadURLExternal →
+// POST bytes → completeUploadExternal with the DM channel_id.
+exports.sendSlackScorecardDm = onCall(
+  { secrets: [SLACK_BOT_TOKEN], region: 'us-central1', timeoutSeconds: 60, memory: '512MiB' },
+  async (request) => {
+    requireTiltUser(request);
+
+    const { editorSlackId, imageBase64, filename, initialComment } = request.data || {};
+    if (!editorSlackId || !imageBase64) {
+      throw new HttpsError('invalid-argument', 'editorSlackId and imageBase64 are required');
+    }
+    const token = SLACK_BOT_TOKEN.value();
+    const authHeader = 'Bearer ' + token;
+
+    // 1. Open a DM with the editor.
+    const openRes = await fetch('https://slack.com/api/conversations.open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: authHeader },
+      body: new URLSearchParams({ users: String(editorSlackId) }).toString(),
+    });
+    const openJson = await openRes.json();
+    if (!openJson.ok) {
+      return { ok: false, body: 'conversations.open failed: ' + (openJson.error || 'unknown') };
+    }
+    const channelId = openJson.channel.id;
+
+    // 2. Reserve an upload URL for the image.
+    const buffer = Buffer.from(imageBase64, 'base64');
+    const uploadFilename = filename || 'scorecard.png';
+    const getUrlRes = await fetch('https://slack.com/api/files.getUploadURLExternal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: authHeader },
+      body: new URLSearchParams({ filename: uploadFilename, length: String(buffer.length) }).toString(),
+    });
+    const getUrlJson = await getUrlRes.json();
+    if (!getUrlJson.ok) {
+      return { ok: false, body: 'getUploadURLExternal failed: ' + (getUrlJson.error || 'unknown') };
+    }
+    const { upload_url: uploadUrl, file_id: fileId } = getUrlJson;
+
+    // 3. POST the raw file bytes to the reserved URL.
+    const putRes = await fetch(uploadUrl, { method: 'POST', body: buffer });
+    if (!putRes.ok) {
+      return { ok: false, body: 'file upload POST failed: ' + putRes.status };
+    }
+
+    // 4. Complete the upload and share it into the editor's DM.
+    const completePayload = {
+      files: [{ id: fileId, title: uploadFilename }],
+      channel_id: channelId,
+    };
+    if (initialComment) completePayload.initial_comment = String(initialComment);
+    const completeRes = await fetch('https://slack.com/api/files.completeUploadExternal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+      body: JSON.stringify(completePayload),
+    });
+    const completeJson = await completeRes.json();
+    if (!completeJson.ok) {
+      return { ok: false, body: 'completeUploadExternal failed: ' + (completeJson.error || 'unknown') };
+    }
+
+    return { ok: true, body: 'ok', channel: channelId, fileId: fileId };
+  }
+);
