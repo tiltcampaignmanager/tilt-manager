@@ -7761,40 +7761,60 @@ function renderGradingView() {
     ? 'Auto target for Organic: 1 Net New/day'
     : (gradingType === 'Paid Ads' ? 'Auto target for Paid: 3–4/day (OP or N)' : '');
 
-  // Rollup composites — always show today's rolling week + month per editor,
-  // independent of the month/year/week selectors so the health check stays stable
-  // as you jump around in the grade table. Still respects the Paid/Organic filter,
-  // since the rest of the scorecard does.
+  // Rollup composites — respect the top filters (month/year, campaign, type, week)
+  // so the "Sel Week / Sel Month" columns reflect what you're actually looking at.
+  // Month rollup = selected month + campaign + type. Week rollup = same, further
+  // narrowed to the selected week if one is picked; otherwise the current ISO week
+  // when it falls in the selected month; otherwise the most recent week in the
+  // selected month that has any grades in scope.
   var _todayISO = todayUK();
-  var _thisWeekStart = isoWeekStart(_todayISO);
-  var _thisYM = _todayISO.slice(0, 7);
+  var _currentWeekStart = isoWeekStart(_todayISO);
+  var _rollupYM = selYM;
   function _inScopeType(g) {
     if (!g || g.dismissed) return false;
     if (gradingType !== 'all' && gradeCampaignType(g) !== gradingType) return false;
     return true;
   }
-  var gradesThisWeek  = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && isoWeekStart(g.date) === _thisWeekStart; });
-  var gradesThisMonth = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && (g.date || '').slice(0, 7) === _thisYM; });
+  function _inScopeCamp(g) {
+    if (allCampaigns || !campSel) return true;
+    var a = findAssetById(g.assetId);
+    return !!(a && a.campaignId === campSel.id);
+  }
+  var gradesInScopeMonth = (STATE.grades || []).filter(function(g) {
+    return _inScopeType(g) && _inScopeCamp(g) && (g.date || '').slice(0, 7) === _rollupYM;
+  });
+  // Resolve the "week" the Sel Week column shows: explicit filter → current week if in
+  // selected month → most recent week with grades in scope → first ISO week of selected month.
+  var _rollupWeekStart = week
+    || (_currentWeekStart && _currentWeekStart.slice(0, 7) === _rollupYM ? _currentWeekStart : null);
+  if (!_rollupWeekStart) {
+    var _weekStartsInScope = {};
+    gradesInScopeMonth.forEach(function(g) { var w = isoWeekStart(g.date); if (w) _weekStartsInScope[w] = true; });
+    var _sortedWeeks = Object.keys(_weekStartsInScope).sort();
+    if (_sortedWeeks.length) _rollupWeekStart = _sortedWeeks[_sortedWeeks.length - 1];
+  }
+  if (!_rollupWeekStart) _rollupWeekStart = isoWeekStart(_rollupYM + '-01');
+  var gradesInScopeWeek = gradesInScopeMonth.filter(function(g) { return isoWeekStart(g.date) === _rollupWeekStart; });
   var weekByEditor = {}, monthByEditor = {};
   GRADING_EDITORS.forEach(function(e) {
-    weekByEditor[e]  = computeScorecard(e, gradesThisWeek,  suggestedTarget);
-    monthByEditor[e] = computeScorecard(e, gradesThisMonth, suggestedTarget);
+    weekByEditor[e]  = computeScorecard(e, gradesInScopeWeek,  suggestedTarget);
+    monthByEditor[e] = computeScorecard(e, gradesInScopeMonth, suggestedTarget);
   });
 
   // Previous week/month grades → cards, so the Wrapped image can render trend deltas
-  // ("↑ 4.2 pts vs last week · 83.2"). Same paid/organic scope as the current-period
+  // ("↑ 4.2 pts vs last week · 83.2"). Same scope (type + campaign) as the current-period
   // rollups so the comparison is apples-to-apples.
-  var _prevWeekStart = _prevIsoWeekStart(_thisWeekStart);
-  var _prevYM        = _prevYearMonth(_thisYM);
-  var gradesPrevWeek  = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && isoWeekStart(g.date) === _prevWeekStart; });
-  var gradesPrevMonth = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && (g.date || '').slice(0, 7) === _prevYM; });
+  var _prevWeekStart = _prevIsoWeekStart(_rollupWeekStart);
+  var _prevYM        = _prevYearMonth(_rollupYM);
+  var gradesPrevWeek  = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && _inScopeCamp(g) && isoWeekStart(g.date) === _prevWeekStart; });
+  var gradesPrevMonth = (STATE.grades || []).filter(function(g) { return _inScopeType(g) && _inScopeCamp(g) && (g.date || '').slice(0, 7) === _prevYM; });
   var prevWeekByEditor = {}, prevMonthByEditor = {};
   GRADING_EDITORS.forEach(function(e) {
     prevWeekByEditor[e]  = computeScorecard(e, gradesPrevWeek,  suggestedTarget);
     prevMonthByEditor[e] = computeScorecard(e, gradesPrevMonth, suggestedTarget);
   });
-  var _thisWeekLabel  = _thisWeekStart ? weekRangeLabel(_thisWeekStart) : '';
-  var _thisMonthLabel = MONTHS_FULL[parseInt(_thisYM.slice(5, 7), 10) - 1] + ' ' + _thisYM.slice(0, 4);
+  var _thisWeekLabel  = _rollupWeekStart ? weekRangeLabel(_rollupWeekStart) : '';
+  var _thisMonthLabel = MONTHS_FULL[parseInt(_rollupYM.slice(5, 7), 10) - 1] + ' ' + _rollupYM.slice(0, 4);
   function rollupCell(rc, label) {
     var rr = rc.rating;
     var pillar = 'Brand ' + fmt1(rc.ptsBrand) + '/25 · QA ' + fmt1(rc.ptsQa) + '/30 · Innov ' + fmt1(rc.ptsInnov) + '/15 · Out ' + fmt1(rc.ptsOut) + '/15 · Rev ' + fmt1(rc.ptsRev) + '/15';
@@ -7850,11 +7870,11 @@ function renderGradingView() {
       '</div>';
   }
   var teamStrip =
-    '<div class="grading-team-strip" title="Team composite = one composite /100 pooled across every editor for the period. Same pillar formula as per-editor, applied to pooled counts. Respects the Paid/Organic filter; ignores the Month/Year/Week selectors so the team snapshot stays stable.">' +
-      '<div class="grading-team-title">Team composite <span class="grading-team-title-note">all editors · all campaigns · Paid/Organic filter respected</span></div>' +
+    '<div class="grading-team-strip" title="Team composite = one composite /100 pooled across every editor for the period. Same pillar formula as per-editor, applied to pooled counts. Respects the top filters (Month/Year, Campaign, Paid/Organic, Week if picked).">' +
+      '<div class="grading-team-title">Team composite <span class="grading-team-title-note">all editors · reflects the top filters</span></div>' +
       '<div class="grading-team-row">' +
-        teamCard(teamWeek,  'This week',  _thisWeekLabel) +
-        teamCard(teamMonth, 'This month', _thisMonthLabel) +
+        teamCard(teamWeek,  'Sel week',  _thisWeekLabel) +
+        teamCard(teamMonth, 'Sel month', _thisMonthLabel) +
       '</div>' +
     '</div>';
 
@@ -7903,8 +7923,8 @@ function renderGradingView() {
       '<td class="grading-sc-input"><input type="number" class="grading-mini-input' + (tgtIsAutoShown ? ' is-auto' : '') + '" min="0" step="0.5" value="' + escapeHtml(String(tgtVal)) + '" placeholder="' + tgtPlaceholder + '" onchange="App.setScorecardMeta(\'' + escapeHtml(e) + '\',\'targetPerDay\',this.value)" title="Daily target. Auto: Organic 1/day · Paid 3–4/day. Type to override.">' + tgtAutoPill + '</td>' +
       '<td class="grading-sc-composite"><span class="grading-composite-num">' + fmt1(c.composite) + '</span><span class="grading-composite-max">/100</span></td>' +
       '<td class="grading-sc-rating"><span class="grading-rating grading-rating-' + rd.key + '">' + rd.dot + ' ' + rd.label + '</span></td>' +
-      rollupCell(weekByEditor[e],  'This week (' + _thisWeekLabel + ')') +
-      rollupCell(monthByEditor[e], 'This month (' + _thisMonthLabel + ')') +
+      rollupCell(weekByEditor[e],  'Sel week (' + _thisWeekLabel + ')') +
+      rollupCell(monthByEditor[e], 'Sel month (' + _thisMonthLabel + ')') +
       recommendationCell(c, monthByEditor[e]) +
     '</tr>';
   }).join('');
@@ -7924,8 +7944,8 @@ function renderGradingView() {
           '<th title="15 pts">Revisions<span class="grading-th-pts">15</span></th>' +
           '<th class="grading-th-input">Avg/Day</th><th class="grading-th-input">Target/Day</th>' +
           '<th>Composite</th><th>Rating</th>' +
-          '<th class="grading-th-rollup" title="Composite for the current calendar week (Mon–Sun containing today), across all months. Respects the Paid/Organic filter.">This Week<span class="grading-th-sub">' + escapeHtml(_thisWeekLabel) + '</span></th>' +
-          '<th class="grading-th-rollup" title="Composite for the current calendar month, across all campaigns. Respects the Paid/Organic filter.">This Month<span class="grading-th-sub">' + escapeHtml(_thisMonthLabel) + '</span></th>' +
+          '<th class="grading-th-rollup" title="Composite for the selected week — the Week filter if picked, else the current ISO week when it falls in the selected month, else the most recent week with graded work in scope. Respects the top filters (Month/Year, Campaign, Paid/Organic).">Sel Week<span class="grading-th-sub">' + escapeHtml(_thisWeekLabel) + '</span></th>' +
+          '<th class="grading-th-rollup" title="Composite for the selected month. Respects the top filters (Month/Year, Campaign, Paid/Organic).">Sel Month<span class="grading-th-sub">' + escapeHtml(_thisMonthLabel) + '</span></th>' +
           '<th class="grading-th-rec" title="Coaching note — based on the rating band + the weakest pillar. Uses the current-filter composite when it has data; falls back to This Month otherwise.">Recommendation<span class="grading-th-sub">rating + weakest pillar</span></th>' +
         '</tr></thead>' +
         '<tbody>' + scoreRows + '</tbody>' +
