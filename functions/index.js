@@ -154,6 +154,14 @@ exports.pushCompletedCampaignsToLinear = onCall(
   async (request) => {
     requireTiltUser(request);
 
+    // Reporting filter passed from the client (Reporting tab's current selection).
+    // Falls back to "no filter" — pushes every completed campaign.
+    const filter = (request.data && request.data.filter) || {};
+    const range = filter.range && filter.range.start && filter.range.end ? filter.range : null;
+    const wantCountry  = filter.country  && filter.country  !== 'all' ? filter.country  : null;
+    const wantType     = filter.type     && filter.type     !== 'all' ? filter.type     : null;
+    const wantCategory = filter.category && filter.category !== 'all' ? filter.category : null;
+
     // 1. Load config.
     const cfgSnap = await db.doc('config/linear').get();
     if (!cfgSnap.exists) {
@@ -162,6 +170,7 @@ exports.pushCompletedCampaignsToLinear = onCall(
     const cfg = cfgSnap.data() || {};
     const teamKey = cfg.teamKey;
     const projectId = cfg.projectId || null;
+    const assigneeEmail = cfg.assigneeEmail || 'elsa@tilt.app';
     if (!teamKey) {
       throw new HttpsError('failed-precondition', 'config/linear.teamKey is required.');
     }
@@ -177,6 +186,10 @@ exports.pushCompletedCampaignsToLinear = onCall(
     const resolvedProject = projectId ? await linearResolveProject(teamId, projectId) : null;
     const resolvedProjectId = resolvedProject ? resolvedProject.id : null;
     console.log('[Linear] Config projectId:', JSON.stringify(projectId), '→ resolved:', JSON.stringify(resolvedProject));
+
+    // 2c. Resolve assignee email → Linear user id (once per invocation).
+    const assigneeId = assigneeEmail ? await linearResolveUserId(assigneeEmail) : null;
+    console.log('[Linear] Assignee:', assigneeEmail, '→', assigneeId);
 
     // 3. Load workspace state + assets subcollection + existing push history.
     const [stateSnap, assetsSnap, pushesSnap] = await Promise.all([
@@ -206,7 +219,19 @@ exports.pushCompletedCampaignsToLinear = onCall(
       if (active.length === 0) return false;
       return active.every((a) => SIMPLE.has(c.country) ? a.status === 'Approved' : a.categoryHeadQc === 'Approved');
     };
-    const completed = campaigns.filter(isCompleted);
+    // Finish date = latest dateApproved across the campaign's assets. Used
+    // for both the title's Month token and the reporting-period filter.
+    const finishOf = (c) => campAssets(c.id).reduce((max, a) => (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max, '');
+    // Apply the Reporting tab's filters. finishDate within [range.start, range.end]
+    // (inclusive), plus country / type / category — mirrors the client's Reporting UI.
+    const inRange = (iso) => !range || (iso && iso >= range.start && iso <= range.end);
+    const matchesFilter = (c) => {
+      if (wantCountry  && c.country !== wantCountry) return false;
+      if (wantType     && (c.type || 'Paid Ads') !== wantType) return false;
+      if (wantCategory && (c.category || 'Uncategorised') !== wantCategory) return false;
+      return inRange(finishOf(c));
+    };
+    const completed = campaigns.filter((c) => isCompleted(c) && matchesFilter(c));
 
     // 5. Compute team snapshot (current month, pooled across all editors).
     const teamSnapshot = computeTeamMetrics(grades, assets, scorecardMeta);
@@ -221,11 +246,11 @@ exports.pushCompletedCampaignsToLinear = onCall(
     async function pushOne(c) {
       try {
         const campMetrics = computeCampaignMetrics(c, campAssets(c.id), grades);
-        const title = 'Creative Production: ' + (c.category || 'Uncategorised') + ' | ' + (c.name || 'Untitled');
+        const title = buildIssueTitle(c, finishOf(c));
         const body = buildIssueBody(c, campAssets(c.id), campMetrics, teamSnapshot);
         const existing = pushes[String(c.id)];
         if (existing && existing.issueId) {
-          await linearUpdateIssue(existing.issueId, { title, description: body, projectId: resolvedProjectId });
+          await linearUpdateIssue(existing.issueId, { title, description: body, projectId: resolvedProjectId, assigneeId });
           await db.doc('state/app/linearPushes/' + String(c.id)).set({
             issueId: existing.issueId,
             url: existing.url || null,
@@ -234,7 +259,7 @@ exports.pushCompletedCampaignsToLinear = onCall(
           }, { merge: true });
           updated.push({ campaignId: c.id, issueId: existing.issueId });
         } else {
-          const res = await linearCreateIssue({ teamId, projectId: resolvedProjectId, title, description: body });
+          const res = await linearCreateIssue({ teamId, projectId: resolvedProjectId, title, description: body, assigneeId });
           await db.doc('state/app/linearPushes/' + String(c.id)).set({
             issueId: res.id,
             url: res.url,
@@ -328,10 +353,13 @@ async function linearGetTeamId(teamKey) {
   return node.id;
 }
 
-async function linearCreateIssue({ teamId, projectId, title, description }) {
+async function linearCreateIssue({ teamId, projectId, title, description, assigneeId }) {
+  const input = { teamId, title, description };
+  if (projectId) input.projectId = projectId;
+  if (assigneeId) input.assigneeId = assigneeId;
   const data = await linearGraphQL(
     'mutation($input:IssueCreateInput!){ issueCreate(input:$input){ success issue{ id identifier url } } }',
-    { input: { teamId, projectId: projectId || undefined, title, description } }
+    { input }
   );
   if (!data.issueCreate || !data.issueCreate.success) {
     throw new Error('Linear issueCreate returned success=false.');
@@ -339,9 +367,10 @@ async function linearCreateIssue({ teamId, projectId, title, description }) {
   return data.issueCreate.issue;
 }
 
-async function linearUpdateIssue(issueId, { title, description, projectId }) {
+async function linearUpdateIssue(issueId, { title, description, projectId, assigneeId }) {
   const input = { title, description };
   if (projectId) input.projectId = projectId;
+  if (assigneeId) input.assigneeId = assigneeId;
   const data = await linearGraphQL(
     'mutation($id:String!,$input:IssueUpdateInput!){ issueUpdate(id:$id,input:$input){ success } }',
     { id: issueId, input }
@@ -349,6 +378,35 @@ async function linearUpdateIssue(issueId, { title, description, projectId }) {
   if (!data.issueUpdate || !data.issueUpdate.success) {
     throw new Error('Linear issueUpdate returned success=false.');
   }
+}
+
+// Resolve a workspace-member email to a Linear user id (used for assignee).
+// Falls back to null if not found — the caller then omits the field.
+async function linearResolveUserId(email) {
+  const data = await linearGraphQL(
+    'query($email:String!){ users(filter:{email:{eq:$email}}){ nodes{ id email } } }',
+    { email: String(email).trim().toLowerCase() }
+  );
+  const nodes = (data && data.users && data.users.nodes) || [];
+  return nodes[0] ? nodes[0].id : null;
+}
+
+// Title template: "Creative Production | <Category> - <Campaign Name> | <Month YYYY>".
+// Month is derived from the campaign's finish date (latest asset approval),
+// so re-pushes reflect the actual completion month even if the campaign
+// name doesn't spell it out.
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function buildIssueTitle(c, finishDate) {
+  const cat  = c.category || 'Uncategorised';
+  const name = c.name || 'Untitled';
+  const iso  = finishDate || '';
+  let monthLbl = '';
+  if (/^\d{4}-\d{2}/.test(iso)) {
+    const yr = iso.slice(0, 4);
+    const mi = parseInt(iso.slice(5, 7), 10) - 1;
+    if (mi >= 0 && mi < 12) monthLbl = MONTH_NAMES[mi] + ' ' + yr;
+  }
+  return 'Creative Production | ' + cat + ' - ' + name + (monthLbl ? ' | ' + monthLbl : '');
 }
 
 // ─── KPI metric helpers (server port of app.js:7272 / :7323, restricted

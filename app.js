@@ -13814,16 +13814,58 @@ var App = {
       if (!active.length) return false;
       return active.every(function(a) { return SIMPLE.indexOf(c.country) >= 0 ? a.status === 'Approved' : a.categoryHeadQc === 'Approved'; });
     }
-    var completed = (STATE.campaigns || []).filter(isCompleted);
+    // finishOf = latest dateApproved on the campaign's assets — matches the server.
+    function finishOf(c) {
+      return campAssets(c.id).reduce(function(max, a) { return (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max; }, '');
+    }
+    // Build the same date range the Reporting tab is showing so we scope
+    // the push to the visible period. Weekly = current/selected week (Mon–Sun),
+    // Monthly = selected month, Quarterly = selected quarter.
+    function isoDate(d) { var mm = d.getMonth()+1, dd = d.getDate(); return d.getFullYear()+'-'+(mm<10?'0':'')+mm+'-'+(dd<10?'0':'')+dd; }
+    var period = STATE.reportingPeriod || 'monthly';
+    var now = bizNow(); var cy = now.getFullYear(), cm = now.getMonth();
+    var range, periodLabel;
+    if (period === 'weekly') {
+      var weekOffset = typeof STATE.reportingWeekOffset === 'number' ? STATE.reportingWeekOffset : 0;
+      var dow = now.getDay(); var daysToMon = dow === 0 ? -6 : 1 - dow;
+      var monday = new Date(now); monday.setDate(now.getDate() + daysToMon + weekOffset * 7);
+      var sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+      range = { start: isoDate(monday), end: isoDate(sunday) };
+      periodLabel = weekOffset === 0 ? 'this week' : (weekOffset === -1 ? 'last week' : 'week of ' + range.start);
+    } else if (period === 'quarterly') {
+      var selQ = STATE.reportingQuarter || (cy + '-Q' + (Math.floor(cm/3)+1));
+      var qYear = parseInt(selQ.slice(0,4), 10), qNum = parseInt(selQ.slice(6), 10) - 1;
+      var qStart = new Date(qYear, qNum*3, 1), qEnd = new Date(qYear, qNum*3 + 3, 0);
+      range = { start: isoDate(qStart), end: isoDate(qEnd) };
+      periodLabel = 'Q' + (qNum+1) + ' ' + qYear;
+    } else {
+      var mKey = STATE.reportingMonth || (cy + '-' + (cm<9?'0':'') + (cm+1));
+      var mYear = parseInt(mKey.slice(0,4), 10), mMon = parseInt(mKey.slice(5,7), 10) - 1;
+      var mr = getMonthRange(mYear, mMon);
+      range = { start: mr.start, end: mr.end };
+      var MONTH_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      periodLabel = MONTH_LONG[mMon] + ' ' + mYear;
+    }
+    var country  = STATE.reportingCountry  || 'all';
+    var type     = STATE.reportingType     || 'all';
+    var category = STATE.reportingCategory || 'all';
+    function matchesFilter(c) {
+      if (country  !== 'all' && c.country !== country) return false;
+      if (type     !== 'all' && (c.type || 'Paid Ads') !== type) return false;
+      if (category !== 'all' && (c.category || 'Uncategorised') !== category) return false;
+      var f = finishOf(c);
+      return f && f >= range.start && f <= range.end;
+    }
+    var completed = (STATE.campaigns || []).filter(function(c) { return isCompleted(c) && matchesFilter(c); });
     if (!completed.length) {
-      if (typeof toast === 'function') toast('No completed campaigns to push.', 'info');
+      if (typeof toast === 'function') toast('No completed campaigns in ' + periodLabel + '.', 'info');
       return;
     }
-    if (!confirm('Push ' + completed.length + ' completed campaign' + (completed.length === 1 ? '' : 's') + ' to Linear?\n\nAlready-pushed campaigns will be updated, not duplicated.')) return;
+    if (!confirm('Push ' + completed.length + ' completed campaign' + (completed.length === 1 ? '' : 's') + ' from ' + periodLabel + ' to Linear?\n\nAlready-pushed campaigns will be updated, not duplicated.')) return;
     if (typeof toast === 'function') toast('Pushing to Linear…', 'info');
     try {
       var call = firebase.functions().httpsCallable('pushCompletedCampaignsToLinear', { timeout: 300000 });
-      call({}).then(function(r) {
+      call({ filter: { range: range, country: country, type: type, category: category } }).then(function(r) {
         var d = r.data || {};
         if (d.ok) {
           var parts = [];
