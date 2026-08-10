@@ -13822,7 +13822,7 @@ var App = {
     if (!confirm('Push ' + completed.length + ' completed campaign' + (completed.length === 1 ? '' : 's') + ' to Linear?\n\nAlready-pushed campaigns will be updated, not duplicated.')) return;
     if (typeof toast === 'function') toast('Pushing to Linear…', 'info');
     try {
-      var call = firebase.functions().httpsCallable('pushCompletedCampaignsToLinear');
+      var call = firebase.functions().httpsCallable('pushCompletedCampaignsToLinear', { timeout: 300000 });
       call({}).then(function(r) {
         var d = r.data || {};
         if (d.ok) {
