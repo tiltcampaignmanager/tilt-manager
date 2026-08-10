@@ -19,8 +19,13 @@
 
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
+const admin = require('firebase-admin');
+
+if (!admin.apps.length) admin.initializeApp();
+const db = admin.firestore();
 
 const SLACK_BOT_TOKEN = defineSecret('SLACK_BOT_TOKEN');
+const LINEAR_API_KEY = defineSecret('LINEAR_API_KEY');
 
 const ALLOWED_DOMAIN = 'tilt.app';
 
@@ -136,3 +141,280 @@ exports.sendSlackScorecardDm = onCall(
     return { ok: true, body: 'ok', channel: channelId, fileId: fileId };
   }
 );
+
+// ── Linear: push completed campaigns as issues ───────────────────────
+// Client clicks a button; server reads Firestore state, computes each
+// completed campaign's KPI + a team-wide snapshot, and creates (or
+// updates, if already pushed) one Linear issue per completed campaign.
+// Config lives in Firestore config/linear = { teamKey, projectId }.
+// Push history lives in state/app/linearPushes/{campaignId} so we
+// never race the main state/app doc.
+exports.pushCompletedCampaignsToLinear = onCall(
+  { secrets: [LINEAR_API_KEY], region: 'us-central1', timeoutSeconds: 120, memory: '512MiB' },
+  async (request) => {
+    requireTiltUser(request);
+
+    // 1. Load config.
+    const cfgSnap = await db.doc('config/linear').get();
+    if (!cfgSnap.exists) {
+      throw new HttpsError('failed-precondition', 'config/linear document is missing. Create it with { teamKey, projectId }.');
+    }
+    const cfg = cfgSnap.data() || {};
+    const teamKey = cfg.teamKey;
+    const projectId = cfg.projectId || null;
+    if (!teamKey) {
+      throw new HttpsError('failed-precondition', 'config/linear.teamKey is required.');
+    }
+
+    // 2. Resolve team key → team id (Linear needs the id, not the key).
+    const teamId = await linearGetTeamId(teamKey);
+
+    // 3. Load workspace state + assets subcollection + existing push history.
+    const [stateSnap, assetsSnap, pushesSnap] = await Promise.all([
+      db.doc('state/app').get(),
+      db.collection('state/app/assets').get(),
+      db.collection('state/app/linearPushes').get(),
+    ]);
+    if (!stateSnap.exists) {
+      throw new HttpsError('failed-precondition', 'state/app document is missing.');
+    }
+    const state = stateSnap.data() || {};
+    const campaigns = Array.isArray(state.campaigns) ? state.campaigns : [];
+    const grades = Array.isArray(state.grades) ? state.grades : [];
+    const scorecardMeta = state.scorecardMeta || {};
+    const assets = [];
+    assetsSnap.forEach((d) => assets.push(d.data()));
+    const pushes = {};
+    pushesSnap.forEach((d) => { pushes[d.id] = d.data(); });
+
+    // 4. Determine completed campaigns (c.done OR every non-cancelled asset Approved).
+    // Same signal as the Reporting tab (app.js:10238).
+    const SIMPLE = new Set(['IT', 'ES', 'PL']);
+    const campAssets = (cid) => assets.filter((a) => String(a.campaignId) === String(cid));
+    const isCompleted = (c) => {
+      if (c.done) return true;
+      const active = campAssets(c.id).filter((a) => a.status !== 'Cancelled' && a.categoryHeadQc !== 'Cancelled');
+      if (active.length === 0) return false;
+      return active.every((a) => SIMPLE.has(c.country) ? a.status === 'Approved' : a.categoryHeadQc === 'Approved');
+    };
+    const completed = campaigns.filter(isCompleted);
+
+    // 5. Compute team snapshot (current month, pooled across all editors).
+    const teamSnapshot = computeTeamMetrics(grades, assets, scorecardMeta);
+
+    // 6. Push each completed campaign.
+    const created = [];
+    const updated = [];
+    const errors = [];
+    for (const c of completed) {
+      try {
+        const campMetrics = computeCampaignMetrics(c, campAssets(c.id), grades);
+        const title = 'Creative Production: ' + (c.category || 'Uncategorised') + ' | ' + (c.name || 'Untitled');
+        const body = buildIssueBody(c, campAssets(c.id), campMetrics, teamSnapshot);
+        const existing = pushes[String(c.id)];
+        if (existing && existing.issueId) {
+          await linearUpdateIssue(existing.issueId, { title, description: body });
+          await db.doc('state/app/linearPushes/' + String(c.id)).set({
+            issueId: existing.issueId,
+            url: existing.url || null,
+            pushedAt: admin.firestore.FieldValue.serverTimestamp(),
+            title, campaignId: String(c.id),
+          }, { merge: true });
+          updated.push({ campaignId: c.id, issueId: existing.issueId });
+        } else {
+          const res = await linearCreateIssue({ teamId, projectId, title, description: body });
+          await db.doc('state/app/linearPushes/' + String(c.id)).set({
+            issueId: res.id,
+            url: res.url,
+            identifier: res.identifier,
+            pushedAt: admin.firestore.FieldValue.serverTimestamp(),
+            title, campaignId: String(c.id),
+          });
+          created.push({ campaignId: c.id, issueId: res.id, url: res.url, identifier: res.identifier });
+        }
+      } catch (e) {
+        errors.push({ campaignId: c.id, name: c.name, error: (e && e.message) || String(e) });
+      }
+    }
+
+    return {
+      ok: errors.length === 0,
+      created: created.length,
+      updated: updated.length,
+      skipped: campaigns.length - completed.length,
+      completedTotal: completed.length,
+      errors,
+      details: { created, updated },
+    };
+  }
+);
+
+// ─── Linear GraphQL helpers ──────────────────────────────────────────
+
+async function linearGraphQL(query, variables) {
+  const res = await fetch('https://api.linear.app/graphql', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: LINEAR_API_KEY.value(),
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  const json = await res.json();
+  if (json.errors && json.errors.length) {
+    throw new Error('Linear API: ' + json.errors.map((e) => e.message).join('; '));
+  }
+  return json.data;
+}
+
+async function linearGetTeamId(teamKey) {
+  const data = await linearGraphQL(
+    'query($key:String!){ teams(filter:{key:{eq:$key}}){ nodes{ id key name } } }',
+    { key: String(teamKey).toUpperCase() }
+  );
+  const node = data && data.teams && data.teams.nodes && data.teams.nodes[0];
+  if (!node) throw new Error('Linear team not found for key "' + teamKey + '".');
+  return node.id;
+}
+
+async function linearCreateIssue({ teamId, projectId, title, description }) {
+  const data = await linearGraphQL(
+    'mutation($input:IssueCreateInput!){ issueCreate(input:$input){ success issue{ id identifier url } } }',
+    { input: { teamId, projectId: projectId || undefined, title, description } }
+  );
+  if (!data.issueCreate || !data.issueCreate.success) {
+    throw new Error('Linear issueCreate returned success=false.');
+  }
+  return data.issueCreate.issue;
+}
+
+async function linearUpdateIssue(issueId, { title, description }) {
+  const data = await linearGraphQL(
+    'mutation($id:String!,$input:IssueUpdateInput!){ issueUpdate(id:$id,input:$input){ success } }',
+    { id: issueId, input: { title, description } }
+  );
+  if (!data.issueUpdate || !data.issueUpdate.success) {
+    throw new Error('Linear issueUpdate returned success=false.');
+  }
+}
+
+// ─── KPI metric helpers (server port of app.js:7272 / :7323, restricted
+// to the five raw metrics the user asked for) ────────────────────────
+
+// Revision-round cap by content type (Net New ≤ 4, Maintenance ≤ 2).
+// Mirrors gradeWithinCap in app.js:7165.
+function gradeWithinCap(g) {
+  const cap = String(g && g.contentType || '').toLowerCase() === 'maintenance' ? 2 : 4;
+  const r = Number(g && g.revisionRounds) || 0;
+  return r <= cap;
+}
+
+function pctRate(num, den) { return den > 0 ? (num / den * 100) : 0; }
+
+function meanRevisionRounds(rows) {
+  if (!rows.length) return null;
+  const s = rows.reduce((acc, g) => acc + (Number(g.revisionRounds) || 0), 0);
+  return s / rows.length;
+}
+
+function ymOf(dateStr) { return (dateStr || '').slice(0, 7); }
+
+// Team snapshot: current calendar month, pooled across editors' grades.
+function computeTeamMetrics(grades, assets, scorecardMeta) {
+  const now = new Date();
+  const ym = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  const monthGrades = grades.filter((g) => ymOf(g.date) === ym && !g.dismissed);
+  const editors = Array.from(new Set(monthGrades.map((g) => g.editor).filter(Boolean)));
+
+  const total = monthGrades.length;
+  const qaN = monthGrades.filter((g) => g.qaClean).length;
+  const brandN = monthGrades.filter((g) => g.brandPass).length;
+  const ideasN = monthGrades.filter((g) => g.newIdea).length;
+
+  // Team Avg output per day: video-weighted mean of per-editor avgVideosPerDay.
+  // Editors without a set avgVideosPerDay drop out of the denominator.
+  let outNum = 0, outDen = 0;
+  editors.forEach((ed) => {
+    const meta = scorecardMeta[ed] || {};
+    const v = (meta.avgVideosPerDay === '' || meta.avgVideosPerDay == null) ? null : Number(meta.avgVideosPerDay);
+    if (v == null || isNaN(v)) return;
+    const w = monthGrades.filter((g) => g.editor === ed).length;
+    outNum += v * w;
+    outDen += w;
+  });
+  const avgPerDay = outDen > 0 ? outNum / outDen : null;
+
+  return {
+    ym,
+    total,
+    qaRate: pctRate(qaN, total),
+    brandRate: pctRate(brandN, total),
+    innovationRate: pctRate(ideasN, total),
+    avgPerDay,
+    avgRevisionRounds: meanRevisionRounds(monthGrades),
+    editors,
+    withinCapRate: pctRate(monthGrades.filter(gradeWithinCap).length, total),
+  };
+}
+
+// Per-campaign metrics: all grades linked to this campaign's assets, no date filter.
+function computeCampaignMetrics(campaign, campaignAssets, grades) {
+  const assetIds = new Set(campaignAssets.map((a) => String(a.id)));
+  const rows = grades.filter((g) => assetIds.has(String(g.assetId)) && !g.dismissed);
+  const total = rows.length;
+  const qaN = rows.filter((g) => g.qaClean).length;
+  const brandN = rows.filter((g) => g.brandPass).length;
+  const ideasN = rows.filter((g) => g.newIdea).length;
+  const revisionRounds = campaignAssets.map((a) => Number(a.revisionRounds) || 0);
+  const avgRounds = revisionRounds.length ? revisionRounds.reduce((s, x) => s + x, 0) / revisionRounds.length : null;
+  return {
+    total,
+    qaRate: pctRate(qaN, total),
+    brandRate: pctRate(brandN, total),
+    innovationRate: pctRate(ideasN, total),
+    avgRevisionRounds: avgRounds,
+    editors: Array.from(new Set(campaignAssets.map((a) => a.editor).filter(Boolean))),
+    assetCount: campaignAssets.length,
+    approvedCount: campaignAssets.filter((a) => a.status === 'Approved').length,
+  };
+}
+
+function fmtPct(v) { return v == null ? '—' : (Math.round(v * 10) / 10) + '%'; }
+function fmtNum(v, digits) { if (v == null) return '—'; const p = Math.pow(10, digits || 1); return String(Math.round(v * p) / p); }
+
+function buildIssueBody(c, campaignAssets, camp, team) {
+  const finishDate = campaignAssets.reduce((max, a) => (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max, '');
+  const editorsList = camp.editors.length ? camp.editors.join(', ') : '—';
+  return [
+    '## Campaign',
+    '- **Country:** ' + (c.country || '—'),
+    '- **Category:** ' + (c.category || '—'),
+    '- **Type:** ' + (c.type || '—'),
+    '- **Editors:** ' + editorsList,
+    '- **Assets:** ' + camp.approvedCount + ' approved / ' + camp.assetCount + ' total',
+    finishDate ? '- **Completed:** ' + finishDate : '',
+    '',
+    '## This campaign\'s KPI',
+    'Across the campaign\'s ' + camp.total + ' graded asset(s):',
+    '',
+    '| Metric | Value |',
+    '| --- | --- |',
+    '| QA | ' + fmtPct(camp.qaRate) + ' |',
+    '| Brand | ' + fmtPct(camp.brandRate) + ' |',
+    '| Innovation | ' + fmtPct(camp.innovationRate) + ' |',
+    '| Speed — Avg revision rounds | ' + fmtNum(camp.avgRevisionRounds, 2) + ' |',
+    '',
+    '## Team snapshot (' + team.ym + ')',
+    'Pooled across ' + team.editors.length + ' editor(s), ' + team.total + ' graded asset(s) this month.',
+    '',
+    '| Metric | Value |',
+    '| --- | --- |',
+    '| QA | ' + fmtPct(team.qaRate) + ' |',
+    '| Brand | ' + fmtPct(team.brandRate) + ' |',
+    '| Innovation | ' + fmtPct(team.innovationRate) + ' |',
+    '| Speed — Avg output per day | ' + fmtNum(team.avgPerDay, 2) + ' |',
+    '| Speed — Avg revision rounds | ' + fmtNum(team.avgRevisionRounds, 2) + ' |',
+    '',
+    '_Auto-generated by the Tilt Creative Tracker._',
+  ].filter(Boolean).join('\n');
+}

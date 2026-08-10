@@ -10400,6 +10400,7 @@ function renderReportingView() {
       '<div class="report-ctrl-divider"></div>' +
       '<button class="report-slack-copy-btn" onclick="App.copyReportingSlack()" title="Copy a Slack-formatted summary of this report to clipboard">📋 Copy for Slack</button>' +
       '<button class="report-slack-copy-btn" onclick="App.copyManagerReport()" title="Copy a plain-English report with filter explanations for management" style="margin-left:6px;">📊 Copy for Manager</button>' +
+      '<button class="report-slack-copy-btn" onclick="App.pushToLinear()" title="Create/update a Linear issue for every completed campaign with its KPI + a team snapshot" style="margin-left:6px;">↗ Push to Linear</button>' +
     '</div>';
 
   var mainContent = view === 'kanban' ? kanbanHtml() : tableHtml();
@@ -13797,6 +13798,55 @@ var App = {
   },
 
   // --- Reporting Slack copy ---
+  // Push every completed campaign to Linear via the pushCompletedCampaignsToLinear
+  // callable. "Completed" = c.done OR every non-cancelled asset is Approved (matches
+  // the Reporting tab's Done chip). Idempotent: pushes are keyed by campaign id in
+  // Firestore's state/app/linearPushes, so re-clicking updates the existing issues
+  // instead of duplicating them.
+  pushToLinear: function() {
+    var SIMPLE = ['IT','ES','PL'];
+    function campAssets(cid) {
+      return (STATE.assets || []).filter(function(a) { return String(a.campaignId) === String(cid); });
+    }
+    function isCompleted(c) {
+      if (c.done) return true;
+      var active = campAssets(c.id).filter(function(a) { return a.status !== 'Cancelled' && a.categoryHeadQc !== 'Cancelled'; });
+      if (!active.length) return false;
+      return active.every(function(a) { return SIMPLE.indexOf(c.country) >= 0 ? a.status === 'Approved' : a.categoryHeadQc === 'Approved'; });
+    }
+    var completed = (STATE.campaigns || []).filter(isCompleted);
+    if (!completed.length) {
+      if (typeof toast === 'function') toast('No completed campaigns to push.', 'info');
+      return;
+    }
+    if (!confirm('Push ' + completed.length + ' completed campaign' + (completed.length === 1 ? '' : 's') + ' to Linear?\n\nAlready-pushed campaigns will be updated, not duplicated.')) return;
+    if (typeof toast === 'function') toast('Pushing to Linear…', 'info');
+    try {
+      var call = firebase.functions().httpsCallable('pushCompletedCampaignsToLinear');
+      call({}).then(function(r) {
+        var d = r.data || {};
+        if (d.ok) {
+          var parts = [];
+          if (d.created) parts.push(d.created + ' created');
+          if (d.updated) parts.push(d.updated + ' updated');
+          if (!parts.length) parts.push('no changes');
+          if (typeof toast === 'function') toast('Linear: ' + parts.join(', ') + '.', 'success');
+        } else {
+          var errCount = (d.errors && d.errors.length) || 0;
+          var firstMsg = (d.errors && d.errors[0] && d.errors[0].error) || 'unknown error';
+          if (typeof toast === 'function') toast('Linear push had ' + errCount + ' error' + (errCount === 1 ? '' : 's') + ': ' + firstMsg, 'error');
+          console.warn('[Linear push] errors:', d.errors);
+        }
+      }).catch(function(err) {
+        var msg = (err && (err.message || err.code)) || 'network error';
+        if (typeof toast === 'function') toast('Linear push failed: ' + msg, 'error');
+        console.warn('[Linear push] call failed:', err);
+      });
+    } catch (e) {
+      if (typeof toast === 'function') toast('Linear push failed: ' + ((e && e.message) || e), 'error');
+    }
+  },
+
   copyReportingSlack: function() {
     var period   = STATE.reportingPeriod    || 'monthly';
     var country  = STATE.reportingCountry  || 'all';
