@@ -13830,7 +13830,9 @@ var App = {
           if (d.created) parts.push(d.created + ' created');
           if (d.updated) parts.push(d.updated + ' updated');
           if (!parts.length) parts.push('no changes');
-          if (typeof toast === 'function') toast('Linear: ' + parts.join(', ') + '.', 'success');
+          var proj = d.project && d.project.name ? ' → ' + d.project.name : '';
+          if (typeof toast === 'function') toast('Linear: ' + parts.join(', ') + proj + '.', 'success');
+          console.log('[Linear push] response:', d);
         } else {
           var errCount = (d.errors && d.errors.length) || 0;
           var firstMsg = (d.errors && d.errors[0] && d.errors[0].error) || 'unknown error';

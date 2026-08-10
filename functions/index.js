@@ -171,10 +171,12 @@ exports.pushCompletedCampaignsToLinear = onCall(
 
     // 2b. Resolve projectId. Accepts a full UUID, the URL-slug tail
     // (the last 12 hex chars Linear appends to `.../project/name-<hex>`),
-    // or a project name — resolves to a real UUID against the team's
-    // projects. Fails loudly with the available project names so the
-    // config error is diagnosable.
-    const resolvedProjectId = projectId ? await linearResolveProjectId(teamId, projectId) : null;
+    // or a project name — resolves to a real UUID by searching every
+    // project in the workspace. Fails loudly with the available project
+    // names so the config error is diagnosable.
+    const resolvedProject = projectId ? await linearResolveProject(teamId, projectId) : null;
+    const resolvedProjectId = resolvedProject ? resolvedProject.id : null;
+    console.log('[Linear] Config projectId:', JSON.stringify(projectId), '→ resolved:', JSON.stringify(resolvedProject));
 
     // 3. Load workspace state + assets subcollection + existing push history.
     const [stateSnap, assetsSnap, pushesSnap] = await Promise.all([
@@ -223,7 +225,7 @@ exports.pushCompletedCampaignsToLinear = onCall(
         const body = buildIssueBody(c, campAssets(c.id), campMetrics, teamSnapshot);
         const existing = pushes[String(c.id)];
         if (existing && existing.issueId) {
-          await linearUpdateIssue(existing.issueId, { title, description: body });
+          await linearUpdateIssue(existing.issueId, { title, description: body, projectId: resolvedProjectId });
           await db.doc('state/app/linearPushes/' + String(c.id)).set({
             issueId: existing.issueId,
             url: existing.url || null,
@@ -256,6 +258,7 @@ exports.pushCompletedCampaignsToLinear = onCall(
       updated: updated.length,
       skipped: campaigns.length - completed.length,
       completedTotal: completed.length,
+      project: resolvedProject,
       errors,
       details: { created, updated },
     };
@@ -289,24 +292,30 @@ async function linearGraphQL(query, variables) {
 
 // Linear project IDs are UUIDs. Users often paste the URL-slug tail
 // (last 12 hex chars, no hyphens) or the project name instead. Resolve
-// any of those to the real UUID by listing the team's projects.
+// any of those to the real UUID by listing ALL workspace projects (not
+// just team.projects — projects can be workspace-scoped and still valid
+// on the team). Returns { id, name } or throws with the projects seen.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-async function linearResolveProjectId(teamId, raw) {
+async function linearResolveProject(teamId, raw) {
   const value = String(raw).trim();
-  if (UUID_RE.test(value)) return value;
   const data = await linearGraphQL(
-    'query($teamId:String!){ team(id:$teamId){ projects(first:250){ nodes{ id name } } } }',
-    { teamId }
+    'query{ projects(first:250, includeArchived:false){ nodes{ id name teams{ nodes{ id } } } } }',
+    {}
   );
-  const nodes = (data && data.team && data.team.projects && data.team.projects.nodes) || [];
+  const nodes = (data && data.projects && data.projects.nodes) || [];
+  // If a full UUID was given, look it up directly (returns name for logging).
+  if (UUID_RE.test(value)) {
+    const byId = nodes.find((p) => String(p.id).toLowerCase() === value.toLowerCase());
+    return byId || { id: value, name: '(unknown — UUID not in workspace listing)' };
+  }
   const lower = value.toLowerCase();
   // Match by name (case-insensitive), then by URL-slug tail (id ends with the value).
   const byName = nodes.find((p) => String(p.name || '').toLowerCase() === lower);
-  if (byName) return byName.id;
+  if (byName) return { id: byName.id, name: byName.name };
   const byTail = nodes.find((p) => String(p.id).replace(/-/g, '').toLowerCase().endsWith(lower.replace(/-/g, '')));
-  if (byTail) return byTail.id;
-  const sample = nodes.slice(0, 8).map((p) => p.name + ' (' + p.id + ')').join(', ');
-  throw new Error('config/linear.projectId "' + value + '" did not match any project in team. Paste the full UUID or the project name. Team projects: ' + (sample || 'none'));
+  if (byTail) return { id: byTail.id, name: byTail.name };
+  const sample = nodes.slice(0, 20).map((p) => p.name + ' (' + p.id + ')').join(', ');
+  throw new Error('config/linear.projectId "' + value + '" did not match any project in the workspace. Paste the full UUID or the project name. Workspace projects: ' + (sample || 'none'));
 }
 
 async function linearGetTeamId(teamKey) {
@@ -330,10 +339,12 @@ async function linearCreateIssue({ teamId, projectId, title, description }) {
   return data.issueCreate.issue;
 }
 
-async function linearUpdateIssue(issueId, { title, description }) {
+async function linearUpdateIssue(issueId, { title, description, projectId }) {
+  const input = { title, description };
+  if (projectId) input.projectId = projectId;
   const data = await linearGraphQL(
     'mutation($id:String!,$input:IssueUpdateInput!){ issueUpdate(id:$id,input:$input){ success } }',
-    { id: issueId, input: { title, description } }
+    { id: issueId, input }
   );
   if (!data.issueUpdate || !data.issueUpdate.success) {
     throw new Error('Linear issueUpdate returned success=false.');
