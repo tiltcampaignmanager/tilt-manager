@@ -249,7 +249,12 @@ exports.pushCompletedCampaignsToLinear = onCall(
         const title = buildIssueTitle(c, finishOf(c));
         const body = buildIssueBody(c, campAssets(c.id), campMetrics, teamSnapshot);
         const existing = pushes[String(c.id)];
-        if (existing && existing.issueId) {
+        // Linear "delete" is a soft-delete: issueUpdate on a trashed issue
+        // still returns success:true, so the modal would link to a tombstoned
+        // page. Verify the stored issue is alive before updating; if not,
+        // fall through to create and overwrite the push-history doc.
+        const alive = existing && existing.issueId ? await linearIsIssueAlive(existing.issueId) : false;
+        if (alive) {
           await linearUpdateIssue(existing.issueId, { title, description: body, projectId: resolvedProjectId, assigneeId });
           await db.doc('state/app/linearPushes/' + String(c.id)).set({
             issueId: existing.issueId,
@@ -323,11 +328,36 @@ async function linearGraphQL(query, variables) {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function linearResolveProject(teamId, raw) {
   const value = String(raw).trim();
-  const data = await linearGraphQL(
-    'query{ projects(first:250, includeArchived:false){ nodes{ id name teams{ nodes{ id } } } } }',
-    {}
-  );
-  const nodes = (data && data.projects && data.projects.nodes) || [];
+  // Fast path: Linear's project(id:) accepts either a full UUID or the URL
+  // slug-tail (the 12 hex chars Linear appends to /project/name-<hex>), and
+  // works even when the API token's user can't see the project via the
+  // workspace-wide projects() listing.
+  const trySlugs = [value];
+  const urlMatch = value.match(/\/project\/([^\/?#]+)/i);
+  if (urlMatch) trySlugs.push(urlMatch[1]);
+  const tailMatch = value.match(/([0-9a-f]{12})(?:\/|$)/i);
+  if (tailMatch) trySlugs.push(tailMatch[1]);
+  for (const slug of trySlugs) {
+    try {
+      const d = await linearGraphQL('query($id:String!){ project(id:$id){ id name } }', { id: slug });
+      if (d && d.project && d.project.id) return { id: d.project.id, name: d.project.name };
+    } catch (_) { /* fall through to listing */ }
+  }
+  // Fallback: paginate every workspace project the API token can see and
+  // match by UUID, name, or slug-tail.
+  const nodes = [];
+  let after = null;
+  for (let page = 0; page < 20; page++) {
+    const data = await linearGraphQL(
+      'query($after:String){ projects(first:250, after:$after, includeArchived:false){ pageInfo{ hasNextPage endCursor } nodes{ id name } } }',
+      { after }
+    );
+    const chunk = (data && data.projects && data.projects.nodes) || [];
+    nodes.push(...chunk);
+    const info = (data && data.projects && data.projects.pageInfo) || {};
+    if (!info.hasNextPage) break;
+    after = info.endCursor;
+  }
   // If a full UUID was given, look it up directly (returns name for logging).
   if (UUID_RE.test(value)) {
     const byId = nodes.find((p) => String(p.id).toLowerCase() === value.toLowerCase());
@@ -365,6 +395,22 @@ async function linearCreateIssue({ teamId, projectId, title, description, assign
     throw new Error('Linear issueCreate returned success=false.');
   }
   return data.issueCreate.issue;
+}
+
+// Returns true iff the issue still exists and hasn't been trashed. Any query
+// error (e.g. "Entity not found") is treated as not-alive so the caller falls
+// back to creating a fresh issue instead of updating a tombstone.
+async function linearIsIssueAlive(issueId) {
+  try {
+    const data = await linearGraphQL(
+      'query($id:String!){ issue(id:$id){ id trashed } }',
+      { id: issueId }
+    );
+    const iss = data && data.issue;
+    return !!(iss && iss.id && !iss.trashed);
+  } catch (_) {
+    return false;
+  }
 }
 
 async function linearUpdateIssue(issueId, { title, description, projectId, assigneeId }) {
