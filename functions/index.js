@@ -257,7 +257,7 @@ exports.pushCompletedCampaignsToLinear = onCall(
             pushedAt: admin.firestore.FieldValue.serverTimestamp(),
             title, campaignId: String(c.id),
           }, { merge: true });
-          updated.push({ campaignId: c.id, issueId: existing.issueId });
+          updated.push({ campaignId: c.id, issueId: existing.issueId, url: existing.url || null, identifier: existing.identifier || null });
         } else {
           const res = await linearCreateIssue({ teamId, projectId: resolvedProjectId, title, description: body, assigneeId });
           await db.doc('state/app/linearPushes/' + String(c.id)).set({

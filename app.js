@@ -13875,6 +13875,31 @@ var App = {
           var proj = d.project && d.project.name ? ' → ' + d.project.name : '';
           if (typeof toast === 'function') toast('Linear: ' + parts.join(', ') + proj + '.', 'success');
           console.log('[Linear push] response:', d);
+          // Surface every touched issue as a clickable Linear link — toasts are
+          // text-only so we open a modal listing created + updated with their URLs.
+          var det = d.details || {};
+          var rows = (det.created || []).map(function(x) { return { kind: 'Created', item: x }; })
+            .concat((det.updated || []).map(function(x) { return { kind: 'Updated', item: x }; }));
+          if (rows.length) {
+            var campById = {};
+            (STATE.campaigns || []).forEach(function(c) { campById[String(c.id)] = c; });
+            function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+            var rowsHtml = rows.map(function(r) {
+              var it = r.item; var c = campById[String(it.campaignId)] || {};
+              var label = it.identifier ? esc(it.identifier) : ('issue ' + esc(String(it.issueId || '').slice(0, 6)));
+              var name = esc((c.category || 'Uncategorised') + ' — ' + (c.name || 'Untitled'));
+              var badge = '<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;background:' + (r.kind === 'Created' ? '#d1fadf;color:#054f31' : '#e0e7ff;color:#312e81') + ';margin-right:8px;">' + r.kind + '</span>';
+              var link = it.url ? '<a href="' + esc(it.url) + '" target="_blank" rel="noopener" style="color:#4f46e5;text-decoration:none;font-family:monospace;">' + label + ' ↗</a>' : '<span style="font-family:monospace;color:#6b7280;">' + label + '</span>';
+              return '<div style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid #eef2f7;">' + badge + link + '<span style="color:#374151;">' + name + '</span></div>';
+            }).join('');
+            var summary = parts.join(', ') + (d.project && d.project.name ? ' → ' + esc(d.project.name) : '');
+            var html =
+              '<div class="modal-title">Pushed to Linear</div>' +
+              '<div style="margin:2px 0 10px 0;color:#374151;">' + esc(summary) + '</div>' +
+              '<div style="max-height:60vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:4px 8px;">' + rowsHtml + '</div>' +
+              '<div class="modal-actions" style="margin-top:14px;"><button class="cancel-btn" id="modal-cancel">Close</button></div>';
+            openModal(html, function() {});
+          }
         } else {
           var errCount = (d.errors && d.errors.length) || 0;
           var firstMsg = (d.errors && d.errors[0] && d.errors[0].error) || 'unknown error';
