@@ -330,6 +330,12 @@ function bootApp() { /* replaced at end of script */ }
 var Fb = {
   STATE_DOC: 'state/app',
   ASSETS_COLL: 'state/app/assets',
+  // Rolling 30-day snapshots of STATE.grades so an accidental wipe (a stale-snapshot
+  // save overwriting ticks, someone unchecking in bulk) can be rolled back from the
+  // Config tab. Docs are keyed by the London-civil date (yyyy-mm-dd). One write per
+  // browser session per day.
+  GRADES_BACKUPS_COLL: 'state/app/gradesBackups',
+  _todayGradesBackup: null, // yyyy-mm-dd string; blocks the write from firing again today
   _suppressUpload: false,
   _uploadTimer: null,
   _lastUploadJson: null,    // last-uploaded payload JSON, to skip no-op re-writes
@@ -886,6 +892,7 @@ var Fb = {
       }, 2500);
       HubSync.schedulePush();
       GSheets.scheduleSync();
+      Fb.ensureTodayGradesBackup();
     }).catch(function(err) {
       if (Fb._uploadTimer === _sentinel) Fb._uploadTimer = null;
       console.warn('[Fb] upload failed:', err);
@@ -914,6 +921,37 @@ var Fb = {
           toast('Firebase save failed — retrying…', 'error');
         }
       }
+    });
+  },
+
+  // Snapshot STATE.grades to state/app/gradesBackups/{yyyy-mm-dd} the first time
+  // a save succeeds each day (per browser session). Empty-grades snapshots are
+  // never written, so a wipe can't destroy the daily record — earlier days stay
+  // intact. Rotation deletes the 30-days-ago doc by predictable id so the
+  // collection stays bounded without a listing.
+  ensureTodayGradesBackup: function() {
+    if (!Auth.user) return;
+    var grades = Array.isArray(STATE.grades) ? STATE.grades : [];
+    if (grades.length === 0) return;
+    var today = todayISO();
+    if (Fb._todayGradesBackup === today) return;
+    Fb._todayGradesBackup = today;
+    var col = fbDb.collection(Fb.GRADES_BACKUPS_COLL);
+    col.doc(today).set({
+      grades: grades,
+      count: grades.length,
+      at: firebase.firestore.FieldValue.serverTimestamp(),
+      by: (Auth.user && (Auth.user.email || Auth.user.uid)) || null
+    }).then(function() {
+      // Rotate: drop the doc from 30 days ago on the London civil calendar. Predictable
+      // id → no listing, one delete. Missing doc is fine (delete is idempotent).
+      var d30 = bizNow(); d30.setDate(d30.getDate() - 30);
+      var mm = d30.getMonth() + 1, dd = d30.getDate();
+      var oldId = d30.getFullYear() + '-' + (mm < 10 ? '0' : '') + mm + '-' + (dd < 10 ? '0' : '') + dd;
+      col.doc(oldId).delete().catch(function() { /* fine if not present */ });
+    }).catch(function(err) {
+      console.warn('[Fb] gradesBackup write failed:', err);
+      Fb._todayGradesBackup = null; // let the next successful save try again
     });
   },
 
@@ -11684,6 +11722,17 @@ function renderConfigView() {
       '</details>' +
     '</div>' +
 
+    '<div class="section-title" style="margin-top:24px;">Grading backups</div>' +
+    '<div class="auto-card">' +
+      '<div class="auto-header">' +
+        '<div class="auto-icon">↺</div>' +
+        '<div><div class="auto-title">Restore grades from a daily snapshot</div>' +
+        '<div class="auto-sub">Rolling 30-day rollback of the Grading tab</div></div>' +
+      '</div>' +
+      '<div class="auto-desc">The first save of each day captures STATE.grades to a per-day Firestore doc. If someone clears grades — or a stale-snapshot save overwrites them — restore the previous day\'s snapshot here. Snapshots older than 30 days are automatically dropped.</div>' +
+      '<button class="run-btn" style="margin-top:10px;" onclick="App.openGradesBackupModal()">↺ Restore grades…</button>' +
+    '</div>' +
+
     '<div class="section-title" style="color:var(--red-text); margin-top:24px;">Danger Zone</div>' +
     '<div class="auto-card" style="border-color:var(--red); background:rgba(226,75,74,0.03);">' +
       '<div class="auto-header">' +
@@ -13103,6 +13152,64 @@ var App = {
     render();
   },
   getCurrentEditor: currentEditorFromAuth,
+
+  // ===== Grading backups (rolling 30-day rollback) =====
+  // List every backup in state/app/gradesBackups (newest first) and let the user
+  // restore any one of them into STATE.grades. See Fb.ensureTodayGradesBackup.
+  openGradesBackupModal: function() {
+    if (typeof fbDb === 'undefined' || !fbDb) { toast('Firestore not ready.', 'error'); return; }
+    var col = fbDb.collection(Fb.GRADES_BACKUPS_COLL);
+    col.orderBy(firebase.firestore.FieldPath.documentId(), 'desc').limit(35).get().then(function(snap) {
+      function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+      var rows = [];
+      snap.forEach(function(d) {
+        var data = d.data() || {};
+        var n = typeof data.count === 'number' ? data.count : (Array.isArray(data.grades) ? data.grades.length : 0);
+        rows.push({ id: d.id, count: n, by: data.by || '' });
+      });
+      if (!rows.length) {
+        var emptyHtml = '<div class="modal-title">Restore grades</div>' +
+          '<div style="margin:10px 0;color:#374151;">No backups yet. A snapshot is written the first time you save each day (once grades exist).</div>' +
+          '<div class="modal-actions" style="margin-top:14px;"><button class="cancel-btn" id="modal-cancel">Close</button></div>';
+        openModal(emptyHtml, function() {});
+        return;
+      }
+      var listHtml = rows.map(function(r) {
+        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid #eef2f7;">' +
+          '<div style="font-family:monospace;font-weight:600;min-width:110px;">' + esc(r.id) + '</div>' +
+          '<div style="color:#374151;">' + r.count + ' grade' + (r.count === 1 ? '' : 's') + '</div>' +
+          (r.by ? '<div style="font-size:11px;color:#6b7280;flex:1;text-align:right;">by ' + esc(r.by) + '</div>' : '<div style="flex:1;"></div>') +
+          '<button class="run-btn" onclick="App.restoreGradesFromBackup(\'' + esc(r.id) + '\')">Restore</button>' +
+        '</div>';
+      }).join('');
+      var html = '<div class="modal-title">Restore grades from backup</div>' +
+        '<div style="margin:2px 0 10px 0;color:#374151;">Pick a date. Restoring replaces the current grades with that day\'s snapshot — screenshot the Grading tab first if you\'re unsure.</div>' +
+        '<div style="max-height:60vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:4px 8px;">' + listHtml + '</div>' +
+        '<div class="modal-actions" style="margin-top:14px;"><button class="cancel-btn" id="modal-cancel">Close</button></div>';
+      openModal(html, function() {});
+    }).catch(function(err) {
+      toast('Couldn\'t load backups: ' + ((err && err.message) || err), 'error');
+    });
+  },
+  restoreGradesFromBackup: function(dateISO) {
+    if (!dateISO) return;
+    if (!window.confirm('Restore grades from ' + dateISO + '?\n\nThis replaces the current STATE.grades. If the current state has grades you want to keep, screenshot the Grading tab first — restore is not undo-able.')) return;
+    fbDb.collection(Fb.GRADES_BACKUPS_COLL).doc(dateISO).get().then(function(snap) {
+      if (!snap.exists) { toast('Backup ' + dateISO + ' not found.', 'error'); return; }
+      var data = snap.data() || {};
+      var grades = Array.isArray(data.grades) ? data.grades : [];
+      STATE.grades = grades;
+      // Clear the daily-write guard so the restored (non-empty) state gets captured
+      // for today too, replacing whatever pre-restore snapshot was written earlier.
+      Fb._todayGradesBackup = null;
+      saveState();
+      render();
+      closeModal();
+      toast('Restored ' + grades.length + ' grade' + (grades.length === 1 ? '' : 's') + ' from ' + dateISO + '.', 'success');
+    }).catch(function(err) {
+      toast('Restore failed: ' + ((err && err.message) || err), 'error');
+    });
+  },
 
   // ===== Grading (Editor KPI Scorecard) =====
   setGradingPeriod: function(p) { STATE.gradingPeriod = p; saveState(); render(); },
