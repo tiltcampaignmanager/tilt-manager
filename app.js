@@ -4489,7 +4489,7 @@ function renderSidebar() {
   var sidebarSearch = STATE.sidebarSearch || '';
   var searchBarHtml = '<div class="sidebar-search-wrap">' +
     '<span class="sidebar-search-icon">\u2315</span>' +
-    '<input id="sidebar-search-input" class="sidebar-search-input" type="text" placeholder="' + (compact ? 'Search' : 'Search all videos\u2026') + '" value="' + escapeHtml(sidebarSearch) + '" oninput="App.onSidebarSearch(this.value)" onkeydown="if(event.key===\'ArrowDown\'){event.preventDefault();App.sidebarSearchArrow(1);}else if(event.key===\'ArrowUp\'){event.preventDefault();App.sidebarSearchArrow(-1);}else if(event.key===\'Enter\'){event.preventDefault();App.sidebarSearchEnter();}">' +
+    '<input id="sidebar-search-input" class="sidebar-search-input" type="text" placeholder="' + (compact ? 'Search' : 'Search videos, campaigns, editor, category\u2026') + '" value="' + escapeHtml(sidebarSearch) + '" oninput="App.onSidebarSearch(this.value)" onkeydown="if(event.key===\'ArrowDown\'){event.preventDefault();App.sidebarSearchArrow(1);}else if(event.key===\'ArrowUp\'){event.preventDefault();App.sidebarSearchArrow(-1);}else if(event.key===\'Enter\'){event.preventDefault();App.sidebarSearchEnter();}">' +
     (sidebarSearch ? '<button class="sidebar-search-clear" onclick="App.clearSidebarSearch()" title="Clear">\u00D7</button>' : '') +
     '</div>';
 
@@ -4742,7 +4742,7 @@ function renderCampaignsView() {
     '<div class="camp-meta">' + metaChips + '</div>' +
     '</div>' +
     '<div class="toolbar">' +
-      '<div class="search-wrap"><span class="search-icon">\u2315</span><input id="main-search" type="text" placeholder="Search..." value="' + escapeHtml(STATE.search) + '" oninput="App.onSearch(this.value)"></div>' +
+      '<div class="search-wrap"><span class="search-icon">\u2315</span><input id="main-search" type="text" placeholder="Search name, editor, category, status, date\u2026" value="' + escapeHtml(STATE.search) + '" oninput="App.onSearch(this.value)"></div>' +
       '<select class="filter-select" onchange="App.onStatusFilter(this.value)">' +
         '<option value="all"' + (STATE.statusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' +
         STATUSES.map(function(s) { return '<option' + (STATE.statusFilter === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') +
