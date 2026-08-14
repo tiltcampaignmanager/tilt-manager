@@ -2190,7 +2190,31 @@ function openModal(html, onSubmit) {
   var cancel = document.getElementById('modal-cancel');
   if (cancel) cancel.addEventListener('click', closeModal);
   var submit = document.getElementById('modal-submit');
-  if (submit) submit.addEventListener('click', onSubmit);
+  if (submit && onSubmit) {
+    // Guarded submit: swap label to "Saving…" and disable the button so a
+    // double-click can't fire the handler twice. If the handler validation-rejects
+    // (modal stays open), restore the label so the user can fix and retry. On
+    // async handlers we don't have a promise to await, so we heuristically restore
+    // after a beat if the modal is still on screen.
+    var origLabel = submit.textContent;
+    var busy = false;
+    submit.addEventListener('click', function(ev) {
+      if (busy) { ev.preventDefault(); ev.stopImmediatePropagation(); return; }
+      busy = true;
+      submit.disabled = true;
+      submit.textContent = 'Saving…';
+      try { onSubmit.call(this, ev); } finally {
+        setTimeout(function() {
+          var stillOpen = document.getElementById('modal-overlay').classList.contains('open');
+          if (stillOpen && document.body.contains(submit)) {
+            submit.disabled = false;
+            submit.textContent = origLabel;
+            busy = false;
+          }
+        }, 400);
+      }
+    });
+  }
   setTimeout(function() {
     var el = document.querySelector('#modal input, #modal textarea, #modal select');
     if (el) el.focus();
@@ -2813,13 +2837,16 @@ function getFilteredAssets() {
   if (!camp) return [];
   var list = STATE.assets.filter(function(a) { return a.campaignId === camp.id; });
   if (STATE.search) {
-    var q = STATE.search.toLowerCase();
+    var tokens = STATE.search.toLowerCase().split(/\s+/).filter(Boolean);
     list = list.filter(function(a) {
-      return a.name.toLowerCase().indexOf(q) >= 0
-          || a.editor.toLowerCase().indexOf(q) >= 0
-          || a.version.toLowerCase().indexOf(q) >= 0
-          || a.status.toLowerCase().indexOf(q) >= 0
-          || (a.difficulty || '').toLowerCase().indexOf(q) >= 0;
+      var hay = [
+        a.name, a.editor, a.version, a.status, a.difficulty,
+        a.category, a.qc, a.categoryHeadQc,
+        a.estDelivery, a.dateApproved, a.chDateApproved,
+        formatDate(a.estDelivery), formatDate(a.dateApproved), formatDate(a.chDateApproved),
+        getCategoryHead(a.category)
+      ].filter(Boolean).join(' ').toLowerCase();
+      return tokens.every(function(t) { return hay.indexOf(t) >= 0; });
     });
   }
   if (STATE.statusFilter !== 'all') list = list.filter(function(a) { return a.status === STATE.statusFilter; });
@@ -3377,8 +3404,8 @@ function clearSchedule() {
   STATE.assets.forEach(function(a) {
     if (a.scheduledFor === dateStr && !a.released) { a.scheduledFor = ''; cleared++; }
   });
-  if (cleared) logAction('updated', 'Cleared ' + cleared + ' scheduled videos for ' + dateStr);
-  toast(cleared ? 'Cleared ' + cleared + ' scheduled videos' : 'Nothing to clear', cleared ? 'success' : '');
+  if (cleared) logAction('updated', 'Cleared ' + cleared + ' scheduled video' + (cleared === 1 ? '' : 's') + ' for ' + dateStr);
+  toast(cleared ? 'Cleared ' + cleared + ' scheduled video' + (cleared === 1 ? '' : 's') : 'Nothing to clear', cleared ? 'success' : '');
   render();
 }
 
@@ -3405,11 +3432,11 @@ function releaseScheduled() {
       items: list.map(function(a) { return { name: a.name, change: 'daily-queue' }; }),
       reason: 'daily-drop', body: lines.join('\n')
     });
-    logAction('notified', editor + ' \u2014 daily queue sent (' + list.length + ' videos)');
+    logAction('notified', editor + ' \u2014 daily queue sent (' + list.length + ' video' + (list.length === 1 ? '' : 's') + ')');
   });
   if (STATE.sentNotifications.length > 20) STATE.sentNotifications = STATE.sentNotifications.slice(0, 20);
 
-  toast(total ? 'Released ' + total + ' videos + sent daily queue pings' : 'Nothing to release', total ? 'success' : '');
+  toast(total ? 'Released ' + total + ' video' + (total === 1 ? '' : 's') + ' + sent daily queue pings' : 'Nothing to release', total ? 'success' : '');
   render();
 }
 
@@ -3804,6 +3831,11 @@ var SidebarEditState = { renameCampId: null, previousCompact: null };
 // rendered at (x, y) with Rename / Duplicate / Delete actions for that sub-campaign.
 // Dismissed by clicking anywhere outside, pressing Escape, or picking an action.
 var ContextMenuState = { subcampId: null, x: 0, y: 0 };
+
+// Transient sidebar-search keyboard navigation state. `idx` is which result is
+// currently highlighted for Enter-to-open. Reset on every query change and on
+// clear. Not persisted.
+var SidebarSearchNav = { idx: 0 };
 
 // Remove all drag-over highlights from every subcamp-item in the DOM.
 // Cheap: there aren't many items on screen. Called on drag leave / drop / dragend.
@@ -4457,29 +4489,52 @@ function renderSidebar() {
   var sidebarSearch = STATE.sidebarSearch || '';
   var searchBarHtml = '<div class="sidebar-search-wrap">' +
     '<span class="sidebar-search-icon">\u2315</span>' +
-    '<input id="sidebar-search-input" class="sidebar-search-input" type="text" placeholder="' + (compact ? 'Search' : 'Search all videos\u2026') + '" value="' + escapeHtml(sidebarSearch) + '" oninput="App.onSidebarSearch(this.value)">' +
+    '<input id="sidebar-search-input" class="sidebar-search-input" type="text" placeholder="' + (compact ? 'Search' : 'Search all videos\u2026') + '" value="' + escapeHtml(sidebarSearch) + '" oninput="App.onSidebarSearch(this.value)" onkeydown="if(event.key===\'ArrowDown\'){event.preventDefault();App.sidebarSearchArrow(1);}else if(event.key===\'ArrowUp\'){event.preventDefault();App.sidebarSearchArrow(-1);}else if(event.key===\'Enter\'){event.preventDefault();App.sidebarSearchEnter();}">' +
     (sidebarSearch ? '<button class="sidebar-search-clear" onclick="App.clearSidebarSearch()" title="Clear">\u00D7</button>' : '') +
     '</div>';
 
-  // When there is a search query, replace the country/campaign tree with results
+  // When there is a search query, replace the country/campaign tree with results.
+  // Matches across the whole asset+campaign row: ad name, editor, category, cat head,
+  // seller (campaign name), country, status/QC, difficulty, version, and dates
+  // (raw ISO plus human labels like "25 Apr 2026" / "Apr 2026"). Space-separated
+  // tokens must all match, so "patty luxury" finds Patty's Luxury videos.
   var bodyHtml;
   if (sidebarSearch) {
-    var q = sidebarSearch.toLowerCase();
+    var tokens = sidebarSearch.toLowerCase().split(/\s+/).filter(Boolean);
+    var monthLabelFor = function(my) {
+      if (!my || my.length < 7) return '';
+      var idx = parseInt(my.slice(5, 7), 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx > 11) return '';
+      return MONTH_SHORT[idx] + ' ' + my.slice(0, 4);
+    };
     var results = [];
     STATE.assets.forEach(function(a) {
-      if (a.name.toLowerCase().indexOf(q) >= 0) {
-        var camp = findCampaignById(a.campaignId);
-        if (camp) results.push({ asset: a, camp: camp });
-      }
+      var camp = findCampaignById(a.campaignId);
+      if (!camp) return;
+      var hay = [
+        a.name, a.editor, a.category, a.status, a.qc, a.categoryHeadQc,
+        a.version, a.difficulty,
+        a.estDelivery, a.dateApproved, a.chDateApproved,
+        formatDate(a.estDelivery), formatDate(a.dateApproved), formatDate(a.chDateApproved),
+        camp.name, camp.category, camp.country, camp.monthYear, monthLabelFor(camp.monthYear),
+        getCategoryHead(a.category), getCategoryHead(camp.category)
+      ].filter(Boolean).join(' ').toLowerCase();
+      var ok = tokens.every(function(t) { return hay.indexOf(t) >= 0; });
+      if (ok) results.push({ asset: a, camp: camp });
     });
-    results = results.slice(0, 20);
+    var SEARCH_CAP = 50;
+    results = results.slice(0, SEARCH_CAP);
     if (results.length === 0) {
       bodyHtml = '<div class="sidebar-search-empty">No videos found</div>';
     } else {
       bodyHtml = '<div class="sidebar-search-results">' +
-        results.map(function(r) {
+        (function() {
+          if (SidebarSearchNav.idx >= results.length) SidebarSearchNav.idx = 0;
+          return results;
+        })().map(function(r, i) {
           var flag = '<span class="country-flag flag-' + r.camp.country + '" style="width:16px;height:12px;font-size:8px;display:inline-block;vertical-align:middle;margin-right:4px;">' + r.camp.country + '</span>';
-          return '<div class="sidebar-search-result" onclick="App.jumpToAsset(\'' + r.camp.id + '\', \'' + r.asset.id + '\')" title="' + escapeHtml(r.camp.name) + '">' +
+          var activeCls = (i === SidebarSearchNav.idx) ? ' sidebar-search-result-active' : '';
+          return '<div class="sidebar-search-result' + activeCls + '" onclick="App.jumpToAsset(\'' + r.camp.id + '\', \'' + r.asset.id + '\')" title="' + escapeHtml(r.camp.name) + '">' +
             flag +
             '<div class="sidebar-search-result-text">' +
               '<div class="sidebar-search-result-asset">' + escapeHtml(r.asset.name) + '</div>' +
@@ -4487,7 +4542,7 @@ function renderSidebar() {
             '</div>' +
           '</div>';
         }).join('') +
-        (results.length === 20 ? '<div class="sidebar-search-more">Showing first 20 results</div>' : '') +
+        (results.length === SEARCH_CAP ? '<div class="sidebar-search-more">Showing first ' + SEARCH_CAP + ' results</div>' : '') +
       '</div>';
     }
   } else {
@@ -4700,6 +4755,9 @@ function renderCampaignsView() {
       '<input type="date" class="filter-select" title="Filter by Date Approved" value="' + escapeHtml(STATE.dateApprovedFilter) + '" onchange="App.onDateApprovedFilter(this.value)" style="color:' + (STATE.dateApprovedFilter ? 'var(--text1)' : 'var(--text3)') + ';width:148px;">' +
       '<input type="date" class="filter-select" title="Filter by Est. Delivery" value="' + escapeHtml(STATE.estDeliveryFilter) + '" onchange="App.onEstDeliveryFilter(this.value)" style="color:' + (STATE.estDeliveryFilter ? 'var(--text1)' : 'var(--text3)') + ';width:148px;">' +
       '<span class="count-chip">' + filtered.length + ' / ' + totalForCamp + ' rows</span>' +
+      ((STATE.search || STATE.statusFilter !== 'all' || STATE.editorFilter !== 'all' || STATE.qcFilter !== 'all' || STATE.dateApprovedFilter || STATE.estDeliveryFilter)
+        ? '<button class="edit-btn" onclick="App.clearCampaignFilters()" title="Clear all filters">✕ Clear filters</button>'
+        : '') +
       (function() {
         var assignedCount = STATE.assets.filter(function(a) { return String(a.campaignId) === String(camp.id) && a.status === 'Assigned'; }).length;
         return assignedCount > 0
@@ -10328,7 +10386,15 @@ function renderReportingView() {
     var out = '';
     if (type === 'all' || type === 'Paid Ads') out += sectionByCategory(paidCamps, 'Paid Ads campaigns');
     if (type === 'all' || type === 'Organic')  out += sectionByCategory(organicCamps, 'Organic campaigns');
-    if (!out) out = '<div style="color:var(--text3);font-size:13px;padding:40px 0;text-align:center">No campaigns match the current filters.</div>';
+    if (!out) {
+      var anyFilterSet = (STATE.reportingCountry && STATE.reportingCountry !== 'all')
+        || (STATE.reportingType && STATE.reportingType !== 'all')
+        || (STATE.reportingCategory && STATE.reportingCategory !== 'all');
+      out = '<div style="color:var(--text3);font-size:13px;padding:40px 0;text-align:center">'
+        + 'No campaigns match the current filters.'
+        + (anyFilterSet ? '<div style="margin-top:12px;"><button class="edit-btn" onclick="App.clearReportingFilters()">✕ Clear filters</button></div>' : '')
+        + '</div>';
+    }
     return out;
   }
 
@@ -10769,9 +10835,14 @@ function renderCatReviewView() {
       toggle + '</div>';
 
   if (pending.length === 0 && sentBack.length === 0) {
+    var widenBtn = (win !== 'monthly')
+      ? '<div style="margin-top:14px;"><button class="edit-btn" onclick="App.setCatReviewWindow(\'monthly\')">Show monthly backlog</button></div>'
+      : '';
     return '<div style="flex:1; overflow:auto; height:100%;"><div style="padding:28px 32px; max-width:920px;">' + header +
       '<div style="padding:60px 20px; text-align:center; color:var(--text3); font-size:14px; background:var(--bg2); border:1px solid var(--border); border-radius:12px;">' +
-      'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.</div></div></div>';
+      'Nothing waiting for review in this window. Videos land here when an editor sets a video’s status to <b>For Review</b>.' +
+      widenBtn +
+      '</div></div></div>';
   }
 
   // Head + category collapse state (persisted in STATE, mirrors reportingCollapsed).
@@ -13629,11 +13700,30 @@ var App = {
   },
   onSidebarSearch: function(v) {
     STATE.sidebarSearch = v;
+    // Reset keyboard-highlight to the first result whenever the query changes,
+    // so Enter always opens what the user was reading as they typed.
+    SidebarSearchNav.idx = 0;
     render();
   },
   clearSidebarSearch: function() {
     STATE.sidebarSearch = '';
+    SidebarSearchNav.idx = 0;
     render();
+  },
+  sidebarSearchArrow: function(delta) {
+    var results = document.querySelectorAll('.sidebar-search-result');
+    if (!results.length) return;
+    var n = results.length;
+    SidebarSearchNav.idx = ((SidebarSearchNav.idx + delta) % n + n) % n;
+    results.forEach(function(el, i) {
+      el.classList.toggle('sidebar-search-result-active', i === SidebarSearchNav.idx);
+      if (i === SidebarSearchNav.idx) el.scrollIntoView({ block: 'nearest' });
+    });
+  },
+  sidebarSearchEnter: function() {
+    var results = document.querySelectorAll('.sidebar-search-result');
+    var target = results[SidebarSearchNav.idx] || results[0];
+    if (target) target.click();
   },
   jumpToAsset: function(campId, assetId) {
     var camp = findCampaignById(campId);
@@ -13688,6 +13778,12 @@ var App = {
   },
   setContentFilter: function(cc) {
     STATE.contentCountryFilter = cc;
+    render();
+  },
+  clearReportingFilters: function() {
+    STATE.reportingCountry = 'all';
+    STATE.reportingType = 'all';
+    STATE.reportingCategory = 'all';
     render();
   },
   setContent: function(key, val) {
@@ -14130,7 +14226,7 @@ var App = {
       if (finishDate) lines.push('• Will be finished on ' + formatDate(finishDate));
       lines.push('');
     });
-    lines.push('*Total approved this period:* ' + totalApproved + ' videos across ' + camps.length + ' campaign' + (camps.length !== 1 ? 's' : ''));
+    lines.push('*Total approved this period:* ' + totalApproved + ' video' + (totalApproved === 1 ? '' : 's') + ' across ' + camps.length + ' campaign' + (camps.length !== 1 ? 's' : ''));
     copyToClipboard(lines.join('\n'), 'Slack message copied');
   },
 
@@ -16239,6 +16335,15 @@ var App = {
   onQcFilter: function(v) { STATE.qcFilter = v; render(); },
   onDateApprovedFilter: function(v) { STATE.dateApprovedFilter = v; render(); },
   onEstDeliveryFilter: function(v) { STATE.estDeliveryFilter = v; render(); },
+  clearCampaignFilters: function() {
+    STATE.search = '';
+    STATE.statusFilter = 'all';
+    STATE.editorFilter = 'all';
+    STATE.qcFilter = 'all';
+    STATE.dateApprovedFilter = '';
+    STATE.estDeliveryFilter = '';
+    render();
+  },
   // Video Log: toggle weekly grouping (sections by Estimated Delivery). View-only, per-user.
   toggleVideoWeeklyGroup: function() { STATE.videoWeeklyGroup = !STATE.videoWeeklyGroup; render(); },
   // Open the in-app video preview popup for a row.
@@ -16575,9 +16680,21 @@ window.App = App;
 document.getElementById('modal-overlay').addEventListener('click', function(e) { if (e.target.id === 'modal-overlay') closeModal(); });
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
-    // Escape priorities: active rename > context menu > modal. Handle the most specific first.
+    // Escape priorities: sidebar search > active rename > context menus > modal.
+    // Handle the most specific first.
+    var searchInput = document.getElementById('sidebar-search-input');
+    if (searchInput && document.activeElement === searchInput) {
+      if (STATE.sidebarSearch) { App.clearSidebarSearch(); return; }
+      searchInput.blur();
+      return;
+    }
     if (SidebarEditState.renameCampId !== null) { App.cancelRenameSubcamp(); return; }
     if (ContextMenuState.subcampId !== null) { App.hideSubcampContextMenu(); return; }
+    var kebab = document.getElementById('camp-actions-menu');
+    if (kebab && kebab.style.display && kebab.style.display !== 'none') {
+      kebab.style.display = 'none';
+      return;
+    }
     closeModal();
     return;
   }
@@ -16596,6 +16713,17 @@ document.addEventListener('keydown', function(e) {
     if (inEditable) return; // let native undo handle text editing
     e.preventDefault();
     undoLastEdit();
+  }
+  // Cmd/Ctrl+K — focus the sidebar search from anywhere. Overrides the browser's
+  // default (address-bar search in some builds); acceptable since our search is
+  // the equivalent within the app.
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'k' || e.key === 'K')) {
+    var input = document.getElementById('sidebar-search-input');
+    if (input) {
+      e.preventDefault();
+      input.focus();
+      input.select();
+    }
   }
 });
 // Dismiss the right-click menu on any click outside it. Listener is in the capture phase
