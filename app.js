@@ -14410,7 +14410,7 @@ var App = {
     lines.push('  Brand pass: ' + brandPct);
     lines.push('  Innovation: ' + innoPct);
     lines.push('  Avg output per day: ' + fmt2(avgPerDay));
-    lines.push('  Avg revision rounds: ' + fmt2(avgRounds));
+    lines.push('  Avg revision rounds: ' + (avgRounds == null ? '—' : String(Math.round(avgRounds))));
 
     copyToClipboard(lines.join('\n'), 'Report copied');
   },
