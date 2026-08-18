@@ -507,6 +507,16 @@ function fmtNum(v, digits) { if (v == null) return '—'; const p = Math.pow(10,
 
 function buildIssueBody(c, campaignAssets, camp) {
   const finishDate = campaignAssets.reduce((max, a) => (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max, '');
+  // Started = campaign's on-platform go-live date if set, otherwise the earliest
+  // estDelivery across the campaign's assets (proxy for production start).
+  let startDate = c.goneLive || '';
+  if (!startDate) {
+    startDate = campaignAssets.reduce((min, a) => {
+      const d = a.estDelivery || '';
+      if (!d) return min;
+      return (!min || d < min) ? d : min;
+    }, '');
+  }
   const editorsList = camp.editors.length ? camp.editors.join(', ') : '—';
   return [
     '## Campaign',
@@ -516,6 +526,7 @@ function buildIssueBody(c, campaignAssets, camp) {
     '- **Editors:** ' + editorsList,
     '- **Assets:** ' + camp.logged + ' Logged / ' + camp.catHeadApproved + ' Approved by Cat. Head',
     '- **Content mix:** ' + camp.newCount + ' New / ' + camp.optimizedCount + ' Optimized',
+    startDate ? '- **Started:** ' + startDate : '',
     finishDate ? '- **Completed:** ' + finishDate : '',
     '',
     '## This campaign\'s KPI',
