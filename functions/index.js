@@ -434,14 +434,14 @@ async function linearResolveUserId(email) {
 }
 
 // Title template: "Creative Production | <Category> - <Campaign Name> | <Month YYYY>".
-// Month is derived from the campaign's finish date (latest asset approval),
-// so re-pushes reflect the actual completion month even if the campaign
-// name doesn't spell it out.
+// Month prefers the campaign's user-set monthYear (matches how the tracker groups
+// campaigns in the sidebar / Reporting tab), falling back to the campaign's finish
+// date (latest asset approval) when monthYear is unset.
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 function buildIssueTitle(c, finishDate) {
   const cat  = c.category || 'Uncategorised';
   const name = c.name || 'Untitled';
-  const iso  = finishDate || '';
+  const iso  = (c.monthYear && /^\d{4}-\d{2}/.test(c.monthYear)) ? c.monthYear : (finishDate || '');
   let monthLbl = '';
   if (/^\d{4}-\d{2}/.test(iso)) {
     const yr = iso.slice(0, 4);
@@ -537,6 +537,6 @@ function buildIssueBody(c, campaignAssets, camp) {
     '| QA | ' + fmtPct(camp.qaRate) + ' |',
     '| Brand | ' + fmtPct(camp.brandRate) + ' |',
     '| Innovation | ' + fmtPct(camp.innovationRate) + ' |',
-    '| Speed — Avg revision rounds | ' + fmtNum(camp.avgRevisionRounds, 2) + ' |',
+    '| Speed — Avg revision rounds | ' + (camp.avgRevisionRounds == null ? '—' : String(Math.round(camp.avgRevisionRounds))) + ' |',
   ].filter(Boolean).join('\n');
 }
