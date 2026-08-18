@@ -14375,6 +14375,43 @@ var App = {
     lines.push('SUMMARY');
     lines.push('  Total approved ' + periodWord + ': ' + totalApproved + ' video' + (totalApproved!==1?'s':'') + ' across ' + totalCamps + ' campaign' + (totalCamps!==1?'s':''));
     if (totalPending > 0) lines.push('  Total pending category head sign-off: ' + totalPending + ' video' + (totalPending!==1?'s':''));
+
+    // Team snapshot — pool all grades whose date falls in the report's range,
+    // then compute QA / Brand / Innovation rates plus speed metrics. Independent
+    // of the country / type / category filters (this is a team-wide KPI).
+    var snapGrades = (STATE.grades || []).filter(function(g) {
+      if (!g || g.dismissed) return false;
+      var d = g.date || '';
+      return d >= range.start && d <= range.end;
+    });
+    var snapTotal = snapGrades.length;
+    function pct(n) { return snapTotal ? (Math.round(n / snapTotal * 1000) / 10) + '%' : '—'; }
+    var qaPct    = pct(snapGrades.filter(function(g){ return g.qaClean;  }).length);
+    var brandPct = pct(snapGrades.filter(function(g){ return g.brandPass;}).length);
+    var innoPct  = pct(snapGrades.filter(function(g){ return g.newIdea;  }).length);
+    var snapEditors = Array.from(new Set(snapGrades.map(function(g){ return g.editor; }).filter(Boolean)));
+    // Video-weighted mean of per-editor avgVideosPerDay; editors without a set value drop out.
+    var outNum = 0, outDen = 0;
+    snapEditors.forEach(function(ed) {
+      var meta = (STATE.scorecardMeta || {})[ed] || {};
+      var v = (meta.avgVideosPerDay === '' || meta.avgVideosPerDay == null) ? null : Number(meta.avgVideosPerDay);
+      if (v == null || isNaN(v)) return;
+      var w = snapGrades.filter(function(g){ return g.editor === ed; }).length;
+      outNum += v * w; outDen += w;
+    });
+    var avgPerDay = outDen > 0 ? outNum / outDen : null;
+    var revSum = snapGrades.reduce(function(s, g){ return s + (Number(g.revisionRounds) || 0); }, 0);
+    var avgRounds = snapTotal ? (revSum / snapTotal) : null;
+    function fmt2(v) { return v == null ? '—' : String(Math.round(v * 100) / 100); }
+
+    lines.push('');
+    lines.push('TEAM SNAPSHOT (Pooled across ' + snapEditors.length + ' editor' + (snapEditors.length!==1?'s':'') + ', ' + snapTotal + ' graded video' + (snapTotal!==1?'s':'') + ' ' + periodWord + ')');
+    lines.push('  QA pass: ' + qaPct);
+    lines.push('  Brand pass: ' + brandPct);
+    lines.push('  Innovation: ' + innoPct);
+    lines.push('  Avg output per day: ' + fmt2(avgPerDay));
+    lines.push('  Avg revision rounds: ' + fmt2(avgRounds));
+
     copyToClipboard(lines.join('\n'), 'Report copied');
   },
 
