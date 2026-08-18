@@ -203,7 +203,6 @@ exports.pushCompletedCampaignsToLinear = onCall(
     const state = stateSnap.data() || {};
     const campaigns = Array.isArray(state.campaigns) ? state.campaigns : [];
     const grades = Array.isArray(state.grades) ? state.grades : [];
-    const scorecardMeta = state.scorecardMeta || {};
     const assets = [];
     assetsSnap.forEach((d) => assets.push(d.data()));
     const pushes = {};
@@ -233,10 +232,7 @@ exports.pushCompletedCampaignsToLinear = onCall(
     };
     const completed = campaigns.filter((c) => isCompleted(c) && matchesFilter(c));
 
-    // 5. Compute team snapshot (current month, pooled across all editors).
-    const teamSnapshot = computeTeamMetrics(grades, assets, scorecardMeta);
-
-    // 6. Push each completed campaign — parallel with a concurrency cap so
+    // 5. Push each completed campaign — parallel with a concurrency cap so
     // 100+ campaigns don't serialise into a 60s+ callable timeout, while
     // staying under Linear's per-second burst limits.
     const created = [];
@@ -247,7 +243,7 @@ exports.pushCompletedCampaignsToLinear = onCall(
       try {
         const campMetrics = computeCampaignMetrics(c, campAssets(c.id), grades);
         const title = buildIssueTitle(c, finishOf(c));
-        const body = buildIssueBody(c, campAssets(c.id), campMetrics, teamSnapshot);
+        const body = buildIssueBody(c, campAssets(c.id), campMetrics);
         const existing = pushes[String(c.id)];
         // Linear "delete" is a soft-delete: issueUpdate on a trashed issue
         // still returns success:true, so the modal would link to a tombstoned
@@ -455,64 +451,24 @@ function buildIssueTitle(c, finishDate) {
   return 'Creative Production | ' + cat + ' - ' + name + (monthLbl ? ' | ' + monthLbl : '');
 }
 
-// ─── KPI metric helpers (server port of app.js:7272 / :7323, restricted
-// to the five raw metrics the user asked for) ────────────────────────
-
-// Revision-round cap by content type (Net New ≤ 4, Maintenance ≤ 2).
-// Mirrors gradeWithinCap in app.js:7165.
-function gradeWithinCap(g) {
-  const cap = String(g && g.contentType || '').toLowerCase() === 'maintenance' ? 2 : 4;
-  const r = Number(g && g.revisionRounds) || 0;
-  return r <= cap;
-}
-
 function pctRate(num, den) { return den > 0 ? (num / den * 100) : 0; }
 
-function meanRevisionRounds(rows) {
-  if (!rows.length) return null;
-  const s = rows.reduce((acc, g) => acc + (Number(g.revisionRounds) || 0), 0);
-  return s / rows.length;
+// Detect Net New vs Maintenance from a video's file name (Tilt naming code).
+// Port of detectContentType in app.js:6020 — OP family → Maintenance, N family → Net New.
+function detectContentType(name) {
+  if (!name) return null;
+  const tokens = String(name).split(/[_\s]+/);
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i].toUpperCase();
+    if (/^\d*I?OP$/.test(t)) return 'Maintenance';
+    if (/^\d*N$/.test(t)) return 'Net New';
+  }
+  return null;
 }
 
-function ymOf(dateStr) { return (dateStr || '').slice(0, 7); }
-
-// Team snapshot: current calendar month, pooled across editors' grades.
-function computeTeamMetrics(grades, assets, scorecardMeta) {
-  const now = new Date();
-  const ym = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
-  const monthGrades = grades.filter((g) => ymOf(g.date) === ym && !g.dismissed);
-  const editors = Array.from(new Set(monthGrades.map((g) => g.editor).filter(Boolean)));
-
-  const total = monthGrades.length;
-  const qaN = monthGrades.filter((g) => g.qaClean).length;
-  const brandN = monthGrades.filter((g) => g.brandPass).length;
-  const ideasN = monthGrades.filter((g) => g.newIdea).length;
-
-  // Team Avg output per day: video-weighted mean of per-editor avgVideosPerDay.
-  // Editors without a set avgVideosPerDay drop out of the denominator.
-  let outNum = 0, outDen = 0;
-  editors.forEach((ed) => {
-    const meta = scorecardMeta[ed] || {};
-    const v = (meta.avgVideosPerDay === '' || meta.avgVideosPerDay == null) ? null : Number(meta.avgVideosPerDay);
-    if (v == null || isNaN(v)) return;
-    const w = monthGrades.filter((g) => g.editor === ed).length;
-    outNum += v * w;
-    outDen += w;
-  });
-  const avgPerDay = outDen > 0 ? outNum / outDen : null;
-
-  return {
-    ym,
-    total,
-    qaRate: pctRate(qaN, total),
-    brandRate: pctRate(brandN, total),
-    innovationRate: pctRate(ideasN, total),
-    avgPerDay,
-    avgRevisionRounds: meanRevisionRounds(monthGrades),
-    editors,
-    withinCapRate: pctRate(monthGrades.filter(gradeWithinCap).length, total),
-  };
-}
+// Countries whose completion signal is Status (not Cat. Head QC) — mirrors the
+// SIMPLE set in the callable above.
+const SIMPLE_COUNTRIES = new Set(['IT', 'ES', 'PL']);
 
 // Per-campaign metrics: all grades linked to this campaign's assets, no date filter.
 function computeCampaignMetrics(campaign, campaignAssets, grades) {
@@ -524,6 +480,14 @@ function computeCampaignMetrics(campaign, campaignAssets, grades) {
   const ideasN = rows.filter((g) => g.newIdea).length;
   const revisionRounds = campaignAssets.map((a) => Number(a.revisionRounds) || 0);
   const avgRounds = revisionRounds.length ? revisionRounds.reduce((s, x) => s + x, 0) / revisionRounds.length : null;
+  const isSimple = SIMPLE_COUNTRIES.has(campaign.country);
+  const catHeadApproved = campaignAssets.filter((a) => isSimple ? a.status === 'Approved' : a.categoryHeadQc === 'Approved').length;
+  let newCount = 0, optimizedCount = 0;
+  campaignAssets.forEach((a) => {
+    const ct = detectContentType(a.name);
+    if (ct === 'Net New') newCount++;
+    else if (ct === 'Maintenance') optimizedCount++;
+  });
   return {
     total,
     qaRate: pctRate(qaN, total),
@@ -531,15 +495,17 @@ function computeCampaignMetrics(campaign, campaignAssets, grades) {
     innovationRate: pctRate(ideasN, total),
     avgRevisionRounds: avgRounds,
     editors: Array.from(new Set(campaignAssets.map((a) => a.editor).filter(Boolean))),
-    assetCount: campaignAssets.length,
-    approvedCount: campaignAssets.filter((a) => a.status === 'Approved').length,
+    logged: campaignAssets.length,
+    catHeadApproved,
+    newCount,
+    optimizedCount,
   };
 }
 
 function fmtPct(v) { return v == null ? '—' : (Math.round(v * 10) / 10) + '%'; }
 function fmtNum(v, digits) { if (v == null) return '—'; const p = Math.pow(10, digits || 1); return String(Math.round(v * p) / p); }
 
-function buildIssueBody(c, campaignAssets, camp, team) {
+function buildIssueBody(c, campaignAssets, camp) {
   const finishDate = campaignAssets.reduce((max, a) => (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max, '');
   const editorsList = camp.editors.length ? camp.editors.join(', ') : '—';
   return [
@@ -548,7 +514,8 @@ function buildIssueBody(c, campaignAssets, camp, team) {
     '- **Category:** ' + (c.category || '—'),
     '- **Type:** ' + (c.type || '—'),
     '- **Editors:** ' + editorsList,
-    '- **Assets:** ' + camp.approvedCount + ' approved / ' + camp.assetCount + ' total',
+    '- **Assets:** ' + camp.logged + ' Logged / ' + camp.catHeadApproved + ' Approved by Cat. Head',
+    '- **Content mix:** ' + camp.newCount + ' New / ' + camp.optimizedCount + ' Optimized',
     finishDate ? '- **Completed:** ' + finishDate : '',
     '',
     '## This campaign\'s KPI',
@@ -560,18 +527,5 @@ function buildIssueBody(c, campaignAssets, camp, team) {
     '| Brand | ' + fmtPct(camp.brandRate) + ' |',
     '| Innovation | ' + fmtPct(camp.innovationRate) + ' |',
     '| Speed — Avg revision rounds | ' + fmtNum(camp.avgRevisionRounds, 2) + ' |',
-    '',
-    '## Team snapshot (' + team.ym + ')',
-    'Pooled across ' + team.editors.length + ' editor(s), ' + team.total + ' graded asset(s) this month.',
-    '',
-    '| Metric | Value |',
-    '| --- | --- |',
-    '| QA | ' + fmtPct(team.qaRate) + ' |',
-    '| Brand | ' + fmtPct(team.brandRate) + ' |',
-    '| Innovation | ' + fmtPct(team.innovationRate) + ' |',
-    '| Speed — Avg output per day | ' + fmtNum(team.avgPerDay, 2) + ' |',
-    '| Speed — Avg revision rounds | ' + fmtNum(team.avgRevisionRounds, 2) + ' |',
-    '',
-    '_Auto-generated by the Tilt Creative Tracker._',
   ].filter(Boolean).join('\n');
 }
