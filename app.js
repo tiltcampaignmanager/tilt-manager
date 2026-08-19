@@ -16503,11 +16503,13 @@ var App = {
     var cards = GRADING_EDITORS.map(function(e) { return computeScorecard(e, qGrades, suggestedTarget); });
     var team = computeTeamComposite(cards);
 
-    // Time to Ship = mean of (dateApproved − assignedAt) in days, across assets that
-    // have a grade in this quarter AND have both timestamps. Assets missing either
-    // date drop out of the denominator rather than skewing the mean.
+    // Time to Ship Quality Edit = mean of (dateApproved − assignedAt) days across
+    // *first-pass* graded videos only: revision rounds === 0. Everything else (asset
+    // missing timestamps, revisions > 0) drops out of the denominator so the number
+    // measures a clean turnaround, not turnaround-including-rework.
     var shipDays = [];
     qGrades.forEach(function(g) {
+      if (gradeRounds(g) !== 0) return;   // exclude anything that needed revisions
       var a = findAssetById(g.assetId);
       if (!a || !a.assignedAt || !a.dateApproved) return;
       var s = parseDate(a.assignedAt), e = parseDate(a.dateApproved);
@@ -16536,7 +16538,7 @@ var App = {
       'Video Edits: ' + videos + ' (target 200) — ' + statusVs(videos, 200, true),
       '',
       'Source: Grading tab, team-pooled across ' + (team ? team.editorsWithData : 0) + ' editor' + (team && team.editorsWithData === 1 ? '' : 's') + '.',
-      'First-Pass Rate = Revisions pillar (share within cap). Time to Ship = mean(dateApproved − assignedAt) across ' + shipDays.length + ' graded video' + (shipDays.length === 1 ? '' : 's') + ' with both dates set.'
+      'First-Pass Rate = Revisions pillar (share within cap). Time to Ship = mean(dateApproved − assignedAt) across ' + shipDays.length + ' first-pass video' + (shipDays.length === 1 ? '' : 's') + ' (0 revision rounds, both dates set); revisions excluded.'
     ];
     copyToClipboard(lines.join('\n'), 'Quarterly KPI copied — ' + qLabel);
   },
