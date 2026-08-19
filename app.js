@@ -1662,6 +1662,9 @@ var STATE = {
   gradingShowDismissed: false,// true = also show dismissed videos in the grade list
   gradingType: 'all',         // 'all' | 'Paid Ads' | 'Organic' — paid/organic filter
   gradingWeek: null,          // null = whole month; else a Monday ISO ('YYYY-MM-DD') scoping to one week
+  gradingQuarter: null,       // null = auto (quarter of selected month); else '1'..'4' pinned to gradingYear.
+                              //   Used by the Quarterly KPI copy button so the export follows the picker.
+                              //   Auto-clears when the user changes month/year to something outside the pinned quarter.
   // Shared streak: which day grading last happened (UK date), the current consecutive-day
   // run, and the best run ever. Kept as data (persisted) so the "don't break the chain"
   // nudge survives reloads and is visible to whoever grades. See bumpGradingStreak.
@@ -7698,6 +7701,17 @@ function renderGradingView() {
       return '<option value="' + w + '"' + (w === week ? ' selected' : '') + '>' + escapeHtml(weekRangeLabel(w)) + '</option>';
     }).join('');
 
+  // Quarter filter — pins a quarter for the Quarterly KPI copy button, and snaps the
+  // Month picker to the first month of that quarter so the grading view moves with it.
+  // "— none —" means auto (quarter of selected month). The pinned quarter clears itself
+  // if the user then picks a month outside it — see setGradingMonth / setGradingYear.
+  var selQuarter = STATE.gradingQuarter ? String(STATE.gradingQuarter) : '';
+  var autoQuarter = String(Math.floor((parseInt(selMonth, 10) - 1) / 3) + 1);
+  var quarterOpts = '<option value=""' + (!selQuarter ? ' selected' : '') + '>Auto (Q' + autoQuarter + ' ' + selYear + ')</option>' +
+    ['1', '2', '3', '4'].map(function(q) {
+      return '<option value="' + q + '"' + (q === selQuarter ? ' selected' : '') + '>Q' + q + ' ' + selYear + '</option>';
+    }).join('');
+
   var controls =
     '<div class="grading-form-card">' +
       '<div class="grading-form-grid">' +
@@ -7713,6 +7727,8 @@ function renderGradingView() {
       '</div>' +
       '<div class="grading-form-grid gr-filter-row">' +
         '<div class="grading-field"><label class="form-label">Type</label>' + typeSeg + '</div>' +
+        '<div class="grading-field"><label class="form-label" title="Pins a quarter for the Quarterly KPI copy button and jumps the Month picker to its first month. Clears itself if you pick a month outside it.">Quarter</label>' +
+          '<select class="form-input" onchange="App.setGradingQuarter(this.value)">' + quarterOpts + '</select></div>' +
         '<div class="grading-field grading-field-grow"><label class="form-label">Week</label>' +
           '<select class="form-input" onchange="App.setGradingWeek(this.value)">' + weekOpts + '</select></div>' +
       '</div>' +
@@ -13288,8 +13304,22 @@ var App = {
   setGradingEditorFilter: function(e) { STATE.gradingEditorFilter = e; saveState(); render(); },
 
   // ── Grading controls: month / year / campaign ──
-  setGradingMonth: function(m) { STATE.gradingMonth = m || null; render(); },
-  setGradingYear: function(y) { STATE.gradingYear = y || null; render(); },
+  setGradingMonth: function(m) {
+    STATE.gradingMonth = m || null;
+    // If a quarter was pinned and the new month falls outside it, drop the pin so
+    // the picker's "Auto" state matches what the user just chose.
+    if (STATE.gradingQuarter && m) {
+      var mq = Math.floor((parseInt(m, 10) - 1) / 3) + 1;
+      if (String(mq) !== String(STATE.gradingQuarter)) STATE.gradingQuarter = null;
+    }
+    render();
+  },
+  setGradingYear: function(y) {
+    // Year change keeps the same quarter number (Q3 2025 → Q3 2026 on year flip),
+    // matching the picker's per-year quarter labels. No auto-clear needed here.
+    STATE.gradingYear = y || null;
+    render();
+  },
   setGradingCampaign: function(id) { STATE.gradingCampaignId = id || null; render(); },
   setGradingShowDismissed: function(on) { STATE.gradingShowDismissed = !!on; render(); },
   // Paid/Organic filter. Switching filters may make the current campaign invalid — clear
@@ -13297,6 +13327,19 @@ var App = {
   setGradingType: function(t) { STATE.gradingType = (t === 'Paid Ads' || t === 'Organic') ? t : 'all'; STATE.gradingCampaignId = null; render(); },
   // Weekly filter. Empty string ('Whole month') clears it.
   setGradingWeek: function(w) { STATE.gradingWeek = w || null; render(); },
+  // Quarter filter. Empty string ('Auto') clears the pin so the KPI export follows the
+  // quarter of the selected month. Picking Q1..Q4 snaps Month to the first month of that
+  // quarter so the grading view moves with the picker; the pin governs the copy button.
+  setGradingQuarter: function(q) {
+    var v = (q === '1' || q === '2' || q === '3' || q === '4') ? q : null;
+    STATE.gradingQuarter = v;
+    if (v) {
+      var firstMonth = String((parseInt(v, 10) - 1) * 3 + 1).padStart(2, '0');
+      STATE.gradingMonth = firstMonth;
+      STATE.gradingWeek = null;
+    }
+    render();
+  },
   // Copy the editor's Wrapped-style scorecard as a PNG to the clipboard (Slack paste).
   copyScorecardImage: copyScorecardImage,
   // DM the editor their Wrapped-style scorecard directly (Cloud Function upload).
@@ -16431,7 +16474,11 @@ var App = {
   // all campaigns and all editors so the number reads as "team, quarter".
   copyQuarterlyKpi: function() {
     var sel = resolveGradingYM();
-    var qIdx = Math.floor((parseInt(sel.month, 10) - 1) / 3);   // 0..3
+    // Quarter picker wins when pinned; otherwise use the quarter of the selected month.
+    var pinned = STATE.gradingQuarter;
+    var qIdx = pinned
+      ? (parseInt(pinned, 10) - 1)
+      : Math.floor((parseInt(sel.month, 10) - 1) / 3);   // 0..3
     var qLabel = 'Q' + (qIdx + 1) + ' ' + sel.year;
     var qMonths = [];
     for (var i = 0; i < 3; i++) {
