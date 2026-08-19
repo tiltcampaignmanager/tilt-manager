@@ -208,8 +208,9 @@ exports.pushCompletedCampaignsToLinear = onCall(
     const pushes = {};
     pushesSnap.forEach((d) => { pushes[d.id] = d.data(); });
 
-    // 4. Determine completed campaigns (c.done OR every non-cancelled asset Approved).
-    // Same signal as the Reporting tab (app.js:10238).
+    // 4. Determine which campaigns to push: completed OR ongoing (has at least
+    // one non-cancelled asset). Completed uses the Reporting-tab signal
+    // (c.done OR every non-cancelled asset Approved).
     const SIMPLE = new Set(['IT', 'ES', 'PL']);
     const campAssets = (cid) => assets.filter((a) => String(a.campaignId) === String(cid));
     const isCompleted = (c) => {
@@ -218,58 +219,70 @@ exports.pushCompletedCampaignsToLinear = onCall(
       if (active.length === 0) return false;
       return active.every((a) => SIMPLE.has(c.country) ? a.status === 'Approved' : a.categoryHeadQc === 'Approved');
     };
+    const hasActive = (c) => campAssets(c.id).some((a) => a.status !== 'Cancelled' && a.categoryHeadQc !== 'Cancelled');
     // Finish date = latest dateApproved across the campaign's assets. Used
-    // for both the title's Month token and the reporting-period filter.
+    // for the title's Month token and to date-filter completed campaigns.
     const finishOf = (c) => campAssets(c.id).reduce((max, a) => (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max, '');
-    // Apply the Reporting tab's filters. finishDate within [range.start, range.end]
-    // (inclusive), plus country / type / category — mirrors the client's Reporting UI.
-    const inRange = (iso) => !range || (iso && iso >= range.start && iso <= range.end);
+    // Start date = campaign.goneLive if set, else earliest estDelivery on its
+    // assets. Used to date-filter ongoing campaigns.
+    const startOf = (c) => {
+      if (c.goneLive) return c.goneLive;
+      return campAssets(c.id).reduce((min, a) => {
+        const d = a.estDelivery || '';
+        if (!d) return min;
+        return (!min || d < min) ? d : min;
+      }, '');
+    };
+    // Country/type/category filters mirror the Reporting UI. Date-filter is
+    // applied differently for completed vs ongoing:
+    //   completed: finishDate ∈ [start, end]
+    //   ongoing:   started on/before end (i.e., in-flight during the period)
     const matchesFilter = (c) => {
       if (wantCountry  && c.country !== wantCountry) return false;
       if (wantType     && (c.type || 'Paid Ads') !== wantType) return false;
       if (wantCategory && (c.category || 'Uncategorised') !== wantCategory) return false;
-      return inRange(finishOf(c));
+      if (!range) return true;
+      if (isCompleted(c)) {
+        const f = finishOf(c);
+        return f && f >= range.start && f <= range.end;
+      }
+      const s = startOf(c);
+      return s ? s <= range.end : true;
     };
-    const completed = campaigns.filter((c) => isCompleted(c) && matchesFilter(c));
+    const completed = campaigns.filter((c) => (isCompleted(c) || hasActive(c)) && matchesFilter(c));
 
-    // 5. Push each completed campaign — parallel with a concurrency cap so
-    // 100+ campaigns don't serialise into a 60s+ callable timeout, while
-    // staying under Linear's per-second burst limits.
+    // 5. Push each campaign — parallel with a concurrency cap so 100+
+    // campaigns don't serialise into a 60s+ callable timeout, while staying
+    // under Linear's per-second burst limits. Idempotent: campaigns that
+    // already have a live Linear issue are left untouched (no update).
     const created = [];
-    const updated = [];
+    const skipped = [];
     const errors = [];
     const CONCURRENCY = 8;
     async function pushOne(c) {
       try {
+        const existing = pushes[String(c.id)];
+        // Linear "delete" is a soft-delete: issueUpdate on a trashed issue
+        // still returns success:true, so a stored id may point at a tombstone.
+        // Verify the stored issue is alive; if it is, skip. If not, fall
+        // through to create a fresh issue and overwrite the push-history doc.
+        const alive = existing && existing.issueId ? await linearIsIssueAlive(existing.issueId) : false;
+        if (alive) {
+          skipped.push({ campaignId: c.id, issueId: existing.issueId, url: existing.url || null, identifier: existing.identifier || null });
+          return;
+        }
         const campMetrics = computeCampaignMetrics(c, campAssets(c.id), grades);
         const title = buildIssueTitle(c, finishOf(c));
         const body = buildIssueBody(c, campAssets(c.id), campMetrics);
-        const existing = pushes[String(c.id)];
-        // Linear "delete" is a soft-delete: issueUpdate on a trashed issue
-        // still returns success:true, so the modal would link to a tombstoned
-        // page. Verify the stored issue is alive before updating; if not,
-        // fall through to create and overwrite the push-history doc.
-        const alive = existing && existing.issueId ? await linearIsIssueAlive(existing.issueId) : false;
-        if (alive) {
-          await linearUpdateIssue(existing.issueId, { title, description: body, projectId: resolvedProjectId, assigneeId });
-          await db.doc('state/app/linearPushes/' + String(c.id)).set({
-            issueId: existing.issueId,
-            url: existing.url || null,
-            pushedAt: admin.firestore.FieldValue.serverTimestamp(),
-            title, campaignId: String(c.id),
-          }, { merge: true });
-          updated.push({ campaignId: c.id, issueId: existing.issueId, url: existing.url || null, identifier: existing.identifier || null });
-        } else {
-          const res = await linearCreateIssue({ teamId, projectId: resolvedProjectId, title, description: body, assigneeId });
-          await db.doc('state/app/linearPushes/' + String(c.id)).set({
-            issueId: res.id,
-            url: res.url,
-            identifier: res.identifier,
-            pushedAt: admin.firestore.FieldValue.serverTimestamp(),
-            title, campaignId: String(c.id),
-          });
-          created.push({ campaignId: c.id, issueId: res.id, url: res.url, identifier: res.identifier });
-        }
+        const res = await linearCreateIssue({ teamId, projectId: resolvedProjectId, title, description: body, assigneeId });
+        await db.doc('state/app/linearPushes/' + String(c.id)).set({
+          issueId: res.id,
+          url: res.url,
+          identifier: res.identifier,
+          pushedAt: admin.firestore.FieldValue.serverTimestamp(),
+          title, campaignId: String(c.id),
+        });
+        created.push({ campaignId: c.id, issueId: res.id, url: res.url, identifier: res.identifier });
       } catch (e) {
         errors.push({ campaignId: c.id, name: c.name, error: (e && e.message) || String(e) });
       }
@@ -281,12 +294,12 @@ exports.pushCompletedCampaignsToLinear = onCall(
     return {
       ok: errors.length === 0,
       created: created.length,
-      updated: updated.length,
-      skipped: campaigns.length - completed.length,
+      updated: 0,
+      skipped: skipped.length,
       completedTotal: completed.length,
       project: resolvedProject,
       errors,
-      details: { created, updated },
+      details: { created, skipped },
     };
   }
 );
@@ -505,6 +518,31 @@ function computeCampaignMetrics(campaign, campaignAssets, grades) {
 function fmtPct(v) { return v == null ? '—' : (Math.round(v * 10) / 10) + '%'; }
 function fmtNum(v, digits) { if (v == null) return '—'; const p = Math.pow(10, digits || 1); return String(Math.round(v * p) / p); }
 
+// Where each asset sits in the production funnel. Simple countries (IT/ES/PL)
+// stop at PM Approved; the rest also pass through Cat. Head QC after that.
+// Order matches the stage order the summary reports.
+const FUNNEL_STAGES = ['Draft', 'Editing', 'PM QC', 'PM revisions', 'Awaiting Cat. Head QC', 'Cat. Head QC', 'Cat. Head revisions', 'Approved', 'Cancelled'];
+function funnelStage(a, isSimple) {
+  if (a.status === 'Cancelled' || a.categoryHeadQc === 'Cancelled') return 'Cancelled';
+  if (isSimple) {
+    if (a.status === 'Approved') return 'Approved';
+    if (a.status === 'Needs Revisions') return 'PM revisions';
+    if (a.status === 'For Review') return 'PM QC';
+    if (a.status === 'In Progress' || a.status === 'Assigned') return 'Editing';
+    return 'Draft';
+  }
+  if (a.categoryHeadQc === 'Approved') return 'Approved';
+  if (a.status === 'Approved') {
+    if (a.categoryHeadQc === 'Needs Revisions') return 'Cat. Head revisions';
+    if (a.categoryHeadQc === 'For Review') return 'Cat. Head QC';
+    return 'Awaiting Cat. Head QC';
+  }
+  if (a.status === 'Needs Revisions') return 'PM revisions';
+  if (a.status === 'For Review') return 'PM QC';
+  if (a.status === 'In Progress' || a.status === 'Assigned') return 'Editing';
+  return 'Draft';
+}
+
 function buildIssueBody(c, campaignAssets, camp) {
   const finishDate = campaignAssets.reduce((max, a) => (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max, '');
   // Started = campaign's on-platform go-live date if set, otherwise the earliest
@@ -518,6 +556,30 @@ function buildIssueBody(c, campaignAssets, camp) {
     }, '');
   }
   const editorsList = camp.editors.length ? camp.editors.join(', ') : '—';
+
+  // ── Funnel breakdown ──
+  // Per-stage counts across every asset on the campaign, plus a row per
+  // still-in-flight asset (anything not Approved and not Cancelled) so the
+  // issue shows exactly where the video is sitting.
+  const isSimple = SIMPLE_COUNTRIES.has(c.country);
+  const stageCounts = Object.create(null);
+  const inflightRows = [];
+  campaignAssets.forEach((a) => {
+    const stage = funnelStage(a, isSimple);
+    stageCounts[stage] = (stageCounts[stage] || 0) + 1;
+    if (stage !== 'Approved' && stage !== 'Cancelled') {
+      inflightRows.push({ name: a.name || '(untitled)', editor: a.editor || '—', stage });
+    }
+  });
+  const activeAssets = campaignAssets.filter((a) => a.status !== 'Cancelled' && a.categoryHeadQc !== 'Cancelled');
+  const isComplete = activeAssets.length > 0 && activeAssets.every((a) => isSimple ? a.status === 'Approved' : a.categoryHeadQc === 'Approved');
+  const stageSummary = FUNNEL_STAGES.filter((s) => stageCounts[s]).map((s) => stageCounts[s] + ' ' + s).join(' · ');
+  const funnelLines = ['## Funnel', '- **Status:** ' + (isComplete ? 'Completed' : 'Ongoing'), '- **Stages:** ' + (stageSummary || '—')];
+  if (inflightRows.length) {
+    funnelLines.push('', '| Asset | Editor | Stage |', '| --- | --- | --- |');
+    inflightRows.forEach((r) => funnelLines.push('| ' + r.name + ' | ' + r.editor + ' | ' + r.stage + ' |'));
+  }
+
   return [
     '## Campaign',
     '- **Country:** ' + (c.country || '—'),
@@ -528,6 +590,8 @@ function buildIssueBody(c, campaignAssets, camp) {
     '- **Content mix:** ' + camp.newCount + ' New / ' + camp.optimizedCount + ' Optimized',
     startDate ? '- **Started:** ' + startDate : '',
     finishDate ? '- **Completed:** ' + finishDate : '',
+    '',
+    funnelLines.join('\n'),
     '',
     '## This campaign\'s KPI',
     'Across the campaign\'s ' + camp.total + ' graded asset(s):',

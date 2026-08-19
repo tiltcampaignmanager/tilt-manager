@@ -10504,7 +10504,7 @@ function renderReportingView() {
       '<div class="report-ctrl-divider"></div>' +
       '<button class="report-slack-copy-btn" onclick="App.copyReportingSlack()" title="Copy a Slack-formatted summary of this report to clipboard">📋 Copy for Slack</button>' +
       '<button class="report-slack-copy-btn" onclick="App.copyManagerReport()" title="Copy a plain-English report with filter explanations for management" style="margin-left:6px;">📊 Copy for Manager</button>' +
-      '<button class="report-slack-copy-btn" onclick="App.pushToLinear()" title="Create/update a Linear issue for every completed campaign with its KPI + a team snapshot" style="margin-left:6px;">↗ Push to Linear</button>' +
+      '<button class="report-slack-copy-btn" onclick="App.pushToLinear()" title="Create a Linear issue for every campaign in the period (completed + ongoing) with KPI and funnel breakdown. Campaigns already in Linear are skipped." style="margin-left:6px;">↗ Push to Linear</button>' +
     '</div>';
 
   var mainContent = view === 'kanban' ? kanbanHtml() : tableHtml();
@@ -14001,11 +14001,13 @@ var App = {
   },
 
   // --- Reporting Slack copy ---
-  // Push every completed campaign to Linear via the pushCompletedCampaignsToLinear
-  // callable. "Completed" = c.done OR every non-cancelled asset is Approved (matches
-  // the Reporting tab's Done chip). Idempotent: pushes are keyed by campaign id in
-  // Firestore's state/app/linearPushes, so re-clicking updates the existing issues
-  // instead of duplicating them.
+  // Push every campaign in the reporting window to Linear via the
+  // pushCompletedCampaignsToLinear callable. Includes both completed
+  // ("done" or every non-cancelled asset Approved — matches the Reporting
+  // tab's Done chip) and ongoing (any non-cancelled asset in flight).
+  // Idempotent: pushes are keyed by campaign id in Firestore's
+  // state/app/linearPushes, so campaigns already pushed to Linear are
+  // skipped — never re-updated or duplicated.
   pushToLinear: function() {
     var SIMPLE = ['IT','ES','PL'];
     function campAssets(cid) {
@@ -14017,9 +14019,22 @@ var App = {
       if (!active.length) return false;
       return active.every(function(a) { return SIMPLE.indexOf(c.country) >= 0 ? a.status === 'Approved' : a.categoryHeadQc === 'Approved'; });
     }
+    function hasActive(c) {
+      return campAssets(c.id).some(function(a) { return a.status !== 'Cancelled' && a.categoryHeadQc !== 'Cancelled'; });
+    }
     // finishOf = latest dateApproved on the campaign's assets — matches the server.
     function finishOf(c) {
       return campAssets(c.id).reduce(function(max, a) { return (a.dateApproved && a.dateApproved > max) ? a.dateApproved : max; }, '');
+    }
+    // startOf = goneLive if set, else earliest estDelivery — used to
+    // date-filter ongoing campaigns (they have no finish date yet).
+    function startOf(c) {
+      if (c.goneLive) return c.goneLive;
+      return campAssets(c.id).reduce(function(min, a) {
+        var d = a.estDelivery || '';
+        if (!d) return min;
+        return (!min || d < min) ? d : min;
+      }, '');
     }
     // Build the same date range the Reporting tab is showing so we scope
     // the push to the visible period. Weekly = current/selected week (Mon–Sun),
@@ -14052,19 +14067,31 @@ var App = {
     var country  = STATE.reportingCountry  || 'all';
     var type     = STATE.reportingType     || 'all';
     var category = STATE.reportingCategory || 'all';
+    // Completed campaigns are date-filtered by finish date; ongoing ones by
+    // start date (started on/before range.end — i.e., in flight during the
+    // period). Server mirrors this in matchesFilter.
     function matchesFilter(c) {
       if (country  !== 'all' && c.country !== country) return false;
       if (type     !== 'all' && (c.type || 'Paid Ads') !== type) return false;
       if (category !== 'all' && (c.category || 'Uncategorised') !== category) return false;
-      var f = finishOf(c);
-      return f && f >= range.start && f <= range.end;
+      if (isCompleted(c)) {
+        var f = finishOf(c);
+        return f && f >= range.start && f <= range.end;
+      }
+      var s = startOf(c);
+      return s ? s <= range.end : true;
     }
-    var completed = (STATE.campaigns || []).filter(function(c) { return isCompleted(c) && matchesFilter(c); });
-    if (!completed.length) {
-      if (typeof toast === 'function') toast('No completed campaigns in ' + periodLabel + '.', 'info');
+    var candidates = (STATE.campaigns || []).filter(function(c) {
+      return (isCompleted(c) || hasActive(c)) && matchesFilter(c);
+    });
+    if (!candidates.length) {
+      if (typeof toast === 'function') toast('No campaigns in ' + periodLabel + '.', 'info');
       return;
     }
-    if (!confirm('Push ' + completed.length + ' completed campaign' + (completed.length === 1 ? '' : 's') + ' from ' + periodLabel + ' to Linear?\n\nAlready-pushed campaigns will be updated, not duplicated.')) return;
+    var completedCount = candidates.filter(isCompleted).length;
+    var ongoingCount = candidates.length - completedCount;
+    var breakdown = completedCount + ' completed' + (ongoingCount ? ' + ' + ongoingCount + ' ongoing' : '');
+    if (!confirm('Push ' + candidates.length + ' campaign' + (candidates.length === 1 ? '' : 's') + ' (' + breakdown + ') from ' + periodLabel + ' to Linear?\n\nCampaigns already in Linear will be skipped — no updates, no duplicates.')) return;
     if (typeof toast === 'function') toast('Pushing to Linear…', 'info');
     try {
       var call = firebase.functions().httpsCallable('pushCompletedCampaignsToLinear', { timeout: 300000 });
@@ -14073,16 +14100,16 @@ var App = {
         if (d.ok) {
           var parts = [];
           if (d.created) parts.push(d.created + ' created');
-          if (d.updated) parts.push(d.updated + ' updated');
+          if (d.skipped) parts.push(d.skipped + ' skipped (already in Linear)');
           if (!parts.length) parts.push('no changes');
           var proj = d.project && d.project.name ? ' → ' + d.project.name : '';
           if (typeof toast === 'function') toast('Linear: ' + parts.join(', ') + proj + '.', 'success');
           console.log('[Linear push] response:', d);
           // Surface every touched issue as a clickable Linear link — toasts are
-          // text-only so we open a modal listing created + updated with their URLs.
+          // text-only so we open a modal listing created + skipped with their URLs.
           var det = d.details || {};
           var rows = (det.created || []).map(function(x) { return { kind: 'Created', item: x }; })
-            .concat((det.updated || []).map(function(x) { return { kind: 'Updated', item: x }; }));
+            .concat((det.skipped || []).map(function(x) { return { kind: 'Skipped', item: x }; }));
           if (rows.length) {
             var campById = {};
             (STATE.campaigns || []).forEach(function(c) { campById[String(c.id)] = c; });
@@ -14091,7 +14118,7 @@ var App = {
               var it = r.item; var c = campById[String(it.campaignId)] || {};
               var label = it.identifier ? esc(it.identifier) : ('issue ' + esc(String(it.issueId || '').slice(0, 6)));
               var name = esc((c.category || 'Uncategorised') + ' — ' + (c.name || 'Untitled'));
-              var badge = '<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;background:' + (r.kind === 'Created' ? '#d1fadf;color:#054f31' : '#e0e7ff;color:#312e81') + ';margin-right:8px;">' + r.kind + '</span>';
+              var badge = '<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;background:' + (r.kind === 'Created' ? '#d1fadf;color:#054f31' : '#f1f5f9;color:#475569') + ';margin-right:8px;">' + r.kind + '</span>';
               var link = it.url ? '<a href="' + esc(it.url) + '" target="_blank" rel="noopener" style="color:#4f46e5;text-decoration:none;font-family:monospace;">' + label + ' ↗</a>' : '<span style="font-family:monospace;color:#6b7280;">' + label + '</span>';
               return '<div style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid #eef2f7;">' + badge + link + '<span style="color:#374151;">' + name + '</span></div>';
             }).join('');
