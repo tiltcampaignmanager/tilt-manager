@@ -7596,6 +7596,7 @@ function renderGradingView() {
       '</div>' +
       '<div class="grading-top-actions">' +
         '<button class="run-btn" onclick="App.showGradingGuide()" title="Step-by-step: how to grade one video">📘 How to grade</button>' +
+        '<button class="run-btn" onclick="App.copyQuarterlyKpi()" title="Copy team quarterly KPIs: First-Pass Rate, Time to Ship, Video Edits">📋 Quarterly KPI</button>' +
         '<a class="run-btn" href="' + GRADING_FRAMEWORK_URL + '" target="_blank" rel="noopener" title="Open the KPI framework in Notion">↗ Framework</a>' +
       '</div>' +
     '</div>';
@@ -16420,6 +16421,77 @@ var App = {
     var url = extractSingleUrl(a.finalVideo) || extractSingleUrl(a.rawVideo);
     if (!url) { toast('No video link on this row yet', 'warn'); return; }
     window.open(url, '_blank', 'noopener');
+  },
+  // Grading header: copy the team's quarterly KPI card to the clipboard. Quarter is
+  // resolved from the currently selected grading month. Values map to the KPI
+  // framework: First-Pass Rate → Revisions pillar (team capRate), Time to Ship →
+  // avg (dateApproved - assignedAt) days across graded assets in the quarter (Output
+  // pillar covers only pace, so this is the natural proxy for the turnaround half),
+  // Video Edits → team-pooled count. Respects the Paid/Organic filter but always spans
+  // all campaigns and all editors so the number reads as "team, quarter".
+  copyQuarterlyKpi: function() {
+    var sel = resolveGradingYM();
+    var qIdx = Math.floor((parseInt(sel.month, 10) - 1) / 3);   // 0..3
+    var qLabel = 'Q' + (qIdx + 1) + ' ' + sel.year;
+    var qMonths = [];
+    for (var i = 0; i < 3; i++) {
+      qMonths.push(String(qIdx * 3 + i + 1).padStart(2, '0'));
+    }
+    function inQuarter(dateStr) {
+      if (!dateStr) return false;
+      var s = String(dateStr);
+      if (s.slice(0, 4) !== sel.year) return false;
+      return qMonths.indexOf(s.slice(5, 7)) !== -1;
+    }
+    var gradingType = STATE.gradingType || 'all';
+    var typeLabel = gradingType === 'all' ? 'All types' : gradingType;
+    var suggestedTarget = suggestedTargetForType(gradingType);
+
+    var qGrades = (STATE.grades || []).filter(function(g) {
+      if (!g || g.dismissed) return false;
+      if (!inQuarter(g.date)) return false;
+      if (gradingType !== 'all' && gradeCampaignType(g) !== gradingType) return false;
+      return true;
+    });
+    var cards = GRADING_EDITORS.map(function(e) { return computeScorecard(e, qGrades, suggestedTarget); });
+    var team = computeTeamComposite(cards);
+
+    // Time to Ship = mean of (dateApproved − assignedAt) in days, across assets that
+    // have a grade in this quarter AND have both timestamps. Assets missing either
+    // date drop out of the denominator rather than skewing the mean.
+    var shipDays = [];
+    qGrades.forEach(function(g) {
+      var a = findAssetById(g.assetId);
+      if (!a || !a.assignedAt || !a.dateApproved) return;
+      var s = parseDate(a.assignedAt), e = parseDate(a.dateApproved);
+      if (!s || !e) return;
+      var d = (e - s) / (1000 * 60 * 60 * 24);
+      if (isFinite(d) && d >= 0) shipDays.push(d);
+    });
+    var avgShip = shipDays.length ? (shipDays.reduce(function(x, y) { return x + y; }, 0) / shipDays.length) : null;
+
+    var videos = team ? team.total : 0;
+    var firstPass = team ? team.capRate : null;
+
+    function pct(n) { return n == null ? '—' : (Math.round(n * 10) / 10).toFixed(1) + '%'; }
+    function num1(n) { return n == null ? '—' : (Math.round(n * 10) / 10).toFixed(1); }
+    function statusVs(actual, target, higherIsBetter) {
+      if (actual == null) return 'no data';
+      var hit = higherIsBetter ? (actual >= target) : (actual <= target);
+      return hit ? 'on target' : 'below target';
+    }
+
+    var lines = [
+      'Editing Team — Quarterly KPI · ' + qLabel + ' · ' + typeLabel,
+      '',
+      'First-Pass Rate: ' + pct(firstPass) + ' (target 70%) — ' + statusVs(firstPass, 70, true),
+      'Time to Ship Quality Edit: ' + (avgShip == null ? '— (no assignedAt/dateApproved data)' : num1(avgShip) + ' days') + ' (target 2 days) — ' + statusVs(avgShip, 2, false),
+      'Video Edits: ' + videos + ' (target 200) — ' + statusVs(videos, 200, true),
+      '',
+      'Source: Grading tab, team-pooled across ' + (team ? team.editorsWithData : 0) + ' editor' + (team && team.editorsWithData === 1 ? '' : 's') + '.',
+      'First-Pass Rate = Revisions pillar (share within cap). Time to Ship = mean(dateApproved − assignedAt) across ' + shipDays.length + ' graded video' + (shipDays.length === 1 ? '' : 's') + ' with both dates set.'
+    ];
+    copyToClipboard(lines.join('\n'), 'Quarterly KPI copied — ' + qLabel);
   },
   // --- Cat Heads Review tab ---
   setCatReviewWindow: function(v) { STATE.catReviewWindow = v; render(); },
