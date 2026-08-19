@@ -7761,9 +7761,9 @@ function renderGradingView() {
     var roundsTag = isAuto
       ? '<span class="grading-rounds-tag is-auto" title="Auto from this video’s revision history (Needs Revisions kickbacks)">auto</span>'
       : '<button class="grading-rounds-revert" onclick="App.resetAssetGradeRoundsAuto(' + aid + ')" title="Revert to auto (live from revision history)">↺</button>';
-    // ▶ preview opens the same in-tracker video modal used elsewhere, so you can watch
-    // the cut while grading without leaving the tab.
-    var actions = '<button class="grading-play-btn" onclick="App.previewVideo(' + aid + ')" title="Preview video">▶</button>';
+    // ▶ opens the Final video link directly in a new tab (falls back to Raw if there's no
+    // Final yet). One-click access to the actual cut so grading doesn't require a modal.
+    var actions = '<button class="grading-play-btn" onclick="App.openFinalVideo(' + aid + ')" title="Open final video">▶</button>';
     actions += dismissed
       ? '<button class="grading-restore-btn" onclick="App.restoreAssetVideo(' + aid + ')" title="Restore — count it again">↩</button>'
       : '<button class="grading-dismiss-btn" onclick="App.dismissAssetVideo(' + aid + ')" title="Dismiss — exclude from the scorecard">⊘</button>';
@@ -16412,6 +16412,15 @@ var App = {
   toggleVideoWeeklyGroup: function() { STATE.videoWeeklyGroup = !STATE.videoWeeklyGroup; render(); },
   // Open the in-app video preview popup for a row.
   previewVideo: function(id) { showVideoPreviewModal(id); },
+  // Grading ▶ button: open the Final video link in a new tab. Falls back to Raw when
+  // there's no Final yet; toasts if neither is set so the user knows why nothing opened.
+  openFinalVideo: function(id) {
+    var a = findAssetById(id);
+    if (!a) { toast('Video not found', 'error'); return; }
+    var url = extractSingleUrl(a.finalVideo) || extractSingleUrl(a.rawVideo);
+    if (!url) { toast('No video link on this row yet', 'warn'); return; }
+    window.open(url, '_blank', 'noopener');
+  },
   // --- Cat Heads Review tab ---
   setCatReviewWindow: function(v) { STATE.catReviewWindow = v; render(); },
 
