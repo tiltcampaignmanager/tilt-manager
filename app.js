@@ -11568,6 +11568,26 @@ function renderClipLibraryConfigBlock() {
       'added ' + (stats.added || 0) + ', updated ' + (stats.updated || 0) + ', archived ' + (stats.archived || 0) +
     '</div>';
   }
+  // Surface any folders the last sync couldn't read — usually they need
+  // the service account re-added as a viewer.
+  var syncErrorsLine = '';
+  var syncErrors = (cfg && Array.isArray(cfg.lastSyncErrors)) ? cfg.lastSyncErrors : [];
+  if (syncErrors.length) {
+    var errRows = syncErrors.map(function(err) {
+      var id = err.folderId || '';
+      return '<div class="clip-cfg-err-row">' +
+        '<code class="clip-cfg-id">' + escapeHtml(id) + '</code>' +
+        '<a class="edit-btn" href="https://drive.google.com/drive/folders/' + escapeHtml(id) + '" target="_blank" rel="noopener">Open ↗</a>' +
+        '<span class="clip-cfg-err-reason">' + escapeHtml(err.reason || '') + '</span>' +
+      '</div>';
+    }).join('');
+    syncErrorsLine =
+      '<div class="clip-cfg-errs">' +
+        '<div class="clip-cfg-errs-title">⚠ ' + syncErrors.length + ' folder(s) couldn\'t be read on the last sync</div>' +
+        '<div class="clip-cfg-errs-hint">Usually means the service account (<code>broll-sync@tilt-project-tracker.iam.gserviceaccount.com</code>) isn\'t added as a Viewer on that folder. Open each folder → Share → add the email → Viewer → Send → hit ↻ Sync now again.</div>' +
+        errRows +
+      '</div>';
+  }
 
   var sellerList = (STATE.sellers || []).slice().sort();
   var productList = (STATE.products || []).slice().sort();
@@ -11596,6 +11616,7 @@ function renderClipLibraryConfigBlock() {
       '<div style="font-size:11.5px; color:var(--text3); margin-bottom:10px;">Paste one or many Drive folder links (or bare folder IDs) below — separated by spaces, commas, or newlines. The tracker extracts each ID automatically. The service account must have Viewer access on every folder you add.</div>' +
       '<div class="clip-cfg-rows">' + folderRows + '</div>' +
       lastSyncLine +
+      syncErrorsLine +
       '<div style="display:flex; flex-direction:column; gap:6px; margin-top:10px;">' +
         '<textarea id="clip-folder-add-input" class="form-input" rows="4" ' +
           'placeholder="Paste Drive folder links — one per line, or all in one go:&#10;https://drive.google.com/drive/folders/1ABC…&#10;https://drive.google.com/drive/folders/1DEF…&#10;https://drive.google.com/drive/folders/1GHI…" ' +
@@ -13904,9 +13925,13 @@ var App = {
     var callable = firebase.functions().httpsCallable('syncDriveClips');
     callable({}).then(function(res) {
       var stats = (res && res.data && res.data.stats) || null;
+      var errors = (stats && stats.errors) || [];
       STATE.brollLastSyncStats = stats;
+      STATE.brollLastSyncErrors = errors;
       if (typeof toast === 'function' && stats) {
-        toast('Sync complete — ' + stats.added + ' new · ' + stats.updated + ' updated · ' + stats.archived + ' archived', 'ok');
+        var msg = 'Sync complete — ' + stats.added + ' new · ' + stats.updated + ' updated · ' + stats.archived + ' archived';
+        if (errors.length > 0) msg += ' · ⚠ ' + errors.length + ' folder(s) skipped (see Config)';
+        toast(msg, errors.length ? 'error' : 'ok');
       }
     }).catch(function(e) {
       console.warn('[broll] sync failed:', e);

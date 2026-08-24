@@ -663,79 +663,94 @@ function driveClient() {
 }
 
 // Walk a set of parent folder IDs, breadth-first, collecting every video
-// file found in any descendant folder. Returns { files, folders } where
-// files is a flat list of Drive file resources with an added folderPath
-// (human-readable "Parent / Child / Grandchild"), and folders is the set
-// of visited folder ids (used only for reporting).
+// file found in any descendant folder. Skips inaccessible root folders and
+// records them as errors — a single mis-shared folder must NOT abort the
+// entire sync. Returns { files, folders, errors }.
 async function driveWalkFolders(drive, rootFolderIds) {
   const visited = new Set();
   const files = [];
-  // Queue holds { id, path } — path is the folder-name breadcrumb so far.
-  // Root folders are keyed by their id; we resolve their names lazily below.
+  const errors = []; // { folderId, reason }
+  // Try to resolve each root's name up front. Inaccessible roots go into
+  // the errors list and are dropped from the queue — the sync continues
+  // with everything else instead of throwing.
   const rootNames = {};
-  const rootMeta = await Promise.all(rootFolderIds.map(async (id) => {
+  const validRoots = [];
+  await Promise.all(rootFolderIds.map(async (id) => {
     try {
       const res = await drive.files.get({
         fileId: id,
         fields: 'id,name,mimeType',
         supportsAllDrives: true,
       });
-      return res.data;
+      if (res.data && res.data.id) {
+        rootNames[res.data.id] = res.data.name || res.data.id;
+        validRoots.push(id);
+      }
     } catch (e) {
-      throw new HttpsError('failed-precondition',
-        `Cannot read Drive folder "${id}" — is the service account added as a viewer? ` +
-        `Underlying error: ${e && e.message ? e.message : e}`);
+      errors.push({
+        folderId: id,
+        reason: (e && e.message ? e.message : String(e)),
+      });
     }
   }));
-  rootMeta.forEach((m) => { if (m && m.id) rootNames[m.id] = m.name || m.id; });
 
-  let queue = rootFolderIds.map((id) => ({ id, path: rootNames[id] || id }));
+  let queue = validRoots.map((id) => ({ id, path: rootNames[id] || id }));
   while (queue.length && visited.size < DRIVE_MAX_FOLDERS && files.length < DRIVE_MAX_FILES) {
     const { id: folderId, path } = queue.shift();
     if (visited.has(folderId)) continue;
     visited.add(folderId);
 
-    // 1. List all video files in this folder.
-    let pageToken = null;
-    do {
-      const res = await drive.files.list({
-        q: `'${folderId}' in parents and ${DRIVE_VIDEO_QUERY}`,
-        fields: DRIVE_FILE_FIELDS,
-        pageSize: 1000,
-        pageToken: pageToken || undefined,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        corpora: 'allDrives',
-      });
-      (res.data.files || []).forEach((f) => {
-        f.folderPath = path;
-        files.push(f);
-      });
-      pageToken = res.data.nextPageToken || null;
-      if (files.length >= DRIVE_MAX_FILES) break;
-    } while (pageToken);
+    try {
+      // 1. List all video files in this folder.
+      let pageToken = null;
+      do {
+        const res = await drive.files.list({
+          q: `'${folderId}' in parents and ${DRIVE_VIDEO_QUERY}`,
+          fields: DRIVE_FILE_FIELDS,
+          pageSize: 1000,
+          pageToken: pageToken || undefined,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+          corpora: 'allDrives',
+        });
+        (res.data.files || []).forEach((f) => {
+          f.folderPath = path;
+          files.push(f);
+        });
+        pageToken = res.data.nextPageToken || null;
+        if (files.length >= DRIVE_MAX_FILES) break;
+      } while (pageToken);
 
-    // 2. List subfolders and enqueue them.
-    pageToken = null;
-    do {
-      const res = await drive.files.list({
-        q: `'${folderId}' in parents and mimeType='${DRIVE_FOLDER_MIME}' and trashed=false`,
-        fields: DRIVE_FOLDER_FIELDS,
-        pageSize: 1000,
-        pageToken: pageToken || undefined,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        corpora: 'allDrives',
+      // 2. List subfolders and enqueue them.
+      pageToken = null;
+      do {
+        const res = await drive.files.list({
+          q: `'${folderId}' in parents and mimeType='${DRIVE_FOLDER_MIME}' and trashed=false`,
+          fields: DRIVE_FOLDER_FIELDS,
+          pageSize: 1000,
+          pageToken: pageToken || undefined,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+          corpora: 'allDrives',
+        });
+        (res.data.files || []).forEach((sub) => {
+          if (!visited.has(sub.id)) {
+            queue.push({ id: sub.id, path: path + ' / ' + (sub.name || sub.id) });
+          }
+        });
+        pageToken = res.data.nextPageToken || null;
+      } while (pageToken);
+    } catch (e) {
+      // Skip this subfolder and keep going. The overall sync stays resilient
+      // to per-folder issues (permissions, deletions, transient API errors).
+      errors.push({
+        folderId,
+        path,
+        reason: (e && e.message ? e.message : String(e)),
       });
-      (res.data.files || []).forEach((sub) => {
-        if (!visited.has(sub.id)) {
-          queue.push({ id: sub.id, path: path + ' / ' + (sub.name || sub.id) });
-        }
-      });
-      pageToken = res.data.nextPageToken || null;
-    } while (pageToken);
+    }
   }
-  return { files, folders: visited };
+  return { files, folders: visited, errors };
 }
 
 // Turn a Drive file resource into the doc we store in state/app/broll/{id}.
@@ -775,7 +790,7 @@ async function runDriveSync({ trigger, byEmail }) {
 
   // 2. Walk Drive.
   const drive = driveClient();
-  const { files: driveFiles, folders: foldersVisited } = await driveWalkFolders(drive, folderIds);
+  const { files: driveFiles, folders: foldersVisited, errors: walkErrors } = await driveWalkFolders(drive, folderIds);
 
   // 3. Load current broll subcollection so we can diff.
   const existingSnap = await db.collection('state/app/broll').get();
@@ -863,17 +878,21 @@ async function runDriveSync({ trigger, byEmail }) {
     unarchived,
     archived: archiveIds.length,
     foldersVisited: foldersVisited.size,
+    errorCount: walkErrors.length,
   };
 
   // 5. Stamp last-sync marker on config/broll so the UI can show it.
+  // Keep the first ~20 errors so the UI can show which folders need fixing
+  // without blowing up the doc size on a very-wrong config.
   await db.doc('config/broll').set({
     lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
     lastSyncStats: stats,
+    lastSyncErrors: (walkErrors || []).slice(0, 20),
     lastSyncTrigger: trigger || 'manual',
     lastSyncBy: byEmail || null,
   }, { merge: true });
 
-  return stats;
+  return Object.assign({}, stats, { errors: walkErrors });
 }
 
 // Read config/broll (folder IDs + last-sync stats). Callable so it works even
