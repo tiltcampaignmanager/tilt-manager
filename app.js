@@ -11548,7 +11548,13 @@ function renderClipLibraryConfigBlock() {
       }).join('')
     : '<div style="color:var(--text3); font-size:12px; padding:8px 0;">No folders configured yet. Paste a Drive folder ID below.</div>';
 
-  var lastSync = cfg && cfg.lastSyncAt && cfg.lastSyncAt.toDate ? cfg.lastSyncAt.toDate() : null;
+  // lastSyncAt arrives from getBrollConfig as an ISO string. Fall back to
+  // Firestore Timestamp shape in case a future path returns the raw doc.
+  var lastSync = null;
+  if (cfg && cfg.lastSyncAt) {
+    if (typeof cfg.lastSyncAt === 'string') { try { lastSync = new Date(cfg.lastSyncAt); } catch (_) {} }
+    else if (cfg.lastSyncAt.toDate) lastSync = cfg.lastSyncAt.toDate();
+  }
   var lastSyncLine = '';
   if (lastSync) {
     var stats = cfg.lastSyncStats || {};
@@ -13911,9 +13917,10 @@ var App = {
     });
   },
   // Config UI hooks for the folder-IDs / sellers / products lists.
-  // Bulk-add: accepts pasted Drive URLs (any format) OR raw folder IDs, one per
-  // line or space-separated. Extracts the folder ID from each and adds them all
-  // in one Firestore write. arrayUnion silently de-dupes against existing IDs.
+  // All config/broll reads and writes go through Cloud Functions because
+  // Firestore security rules block direct client access to config/*. The
+  // server-side function gates on requireTiltUser (@tilt.app) so only signed-in
+  // Tilt teammates can modify the list — same auth model as the Linear push.
   addBrollFolderId: function() {
     var input = document.getElementById('clip-folder-add-input');
     if (!input) return;
@@ -13931,40 +13938,52 @@ var App = {
       if (/^[A-Za-z0-9_-]{20,}$/.test(t)) { extracted.push(t); return; }
       rejected.push(t);
     });
-    // De-dupe within the paste itself (arrayUnion also de-dupes vs. Firestore).
     var seen = {};
     var ids = extracted.filter(function(id) { if (seen[id]) return false; seen[id] = true; return true; });
     if (!ids.length) {
       if (typeof toast === 'function') toast('No Drive folder links or IDs found in that paste.', 'error');
       return;
     }
-    fbDb.doc(Fb.BROLL_CONFIG_DOC).set({
-      folderIds: firebase.firestore.FieldValue.arrayUnion.apply(null, ids),
-    }, { merge: true }).then(function() {
+    var callable = firebase.functions().httpsCallable('addBrollFolders');
+    callable({ folderIds: ids }).then(function(res) {
       input.value = '';
       var msg = 'Added ' + ids.length + ' folder(s). Hit Sync now to index them.';
       if (rejected.length) msg += ' Skipped ' + rejected.length + ' unrecognised token(s).';
       if (typeof toast === 'function') toast(msg, 'ok');
+      // Cache the config response so the Config UI re-renders with the fresh folder list.
+      if (res && res.data) {
+        window._brollConfig = Object.assign({}, window._brollConfig || {}, { folderIds: res.data.folderIds || [] });
+        if (STATE.tab === 'config') render();
+      }
       App._loadBrollConfig();
     }).catch(function(e) {
       console.warn('[broll] add folder failed:', e);
-      if (typeof toast === 'function') toast('Save failed — check console.', 'error');
+      if (typeof toast === 'function') toast('Save failed: ' + ((e && e.message) || 'unknown'), 'error');
     });
   },
   removeBrollFolderId: function(folderId) {
     if (!folderId) return;
-    fbDb.doc(Fb.BROLL_CONFIG_DOC).set({
-      folderIds: firebase.firestore.FieldValue.arrayRemove(folderId),
-    }, { merge: true }).then(function() {
+    var callable = firebase.functions().httpsCallable('removeBrollFolder');
+    callable({ folderId: folderId }).then(function(res) {
       if (typeof toast === 'function') toast('Folder removed.', 'ok');
+      if (res && res.data) {
+        window._brollConfig = Object.assign({}, window._brollConfig || {}, { folderIds: res.data.folderIds || [] });
+        if (STATE.tab === 'config') render();
+      }
       App._loadBrollConfig();
+    }).catch(function(e) {
+      console.warn('[broll] remove folder failed:', e);
+      if (typeof toast === 'function') toast('Remove failed: ' + ((e && e.message) || 'unknown'), 'error');
     });
   },
   _loadBrollConfig: function() {
-    if (!fbDb) return;
-    fbDb.doc(Fb.BROLL_CONFIG_DOC).get().then(function(snap) {
-      window._brollConfig = snap.exists ? snap.data() : { folderIds: [] };
+    if (!firebase || !firebase.functions) return;
+    var callable = firebase.functions().httpsCallable('getBrollConfig');
+    callable({}).then(function(res) {
+      window._brollConfig = (res && res.data) ? res.data : { folderIds: [] };
       if (STATE.tab === 'config') render();
+    }).catch(function(e) {
+      console.warn('[broll] load config failed:', e);
     });
   },
   addSellerFromConfig: function() {

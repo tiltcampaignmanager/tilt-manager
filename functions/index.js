@@ -876,6 +876,54 @@ async function runDriveSync({ trigger, byEmail }) {
   return stats;
 }
 
+// Read config/broll (folder IDs + last-sync stats). Callable so it works even
+// when Firestore rules restrict client reads to config/*.
+exports.getBrollConfig = onCall(
+  { region: 'us-central1' },
+  async (request) => {
+    requireTiltUser(request);
+    const snap = await db.doc('config/broll').get();
+    if (!snap.exists) return { folderIds: [], lastSyncAt: null, lastSyncStats: null, lastSyncTrigger: null, lastSyncBy: null };
+    const data = snap.data() || {};
+    // Firestore Timestamps aren't JSON-serialisable — convert to ISO string.
+    if (data.lastSyncAt && data.lastSyncAt.toDate) data.lastSyncAt = data.lastSyncAt.toDate().toISOString();
+    return data;
+  }
+);
+
+// Add one or many folder IDs to config/broll (arrayUnion — de-dupes).
+exports.addBrollFolders = onCall(
+  { region: 'us-central1' },
+  async (request) => {
+    requireTiltUser(request);
+    const ids = Array.isArray(request.data && request.data.folderIds) ? request.data.folderIds : [];
+    const clean = ids.map((s) => String(s || '').trim()).filter(Boolean);
+    if (!clean.length) throw new HttpsError('invalid-argument', 'folderIds is required and must contain at least one id.');
+    await db.doc('config/broll').set({
+      folderIds: admin.firestore.FieldValue.arrayUnion.apply(null, clean),
+    }, { merge: true });
+    const after = await db.doc('config/broll').get();
+    const data = after.data() || {};
+    return { ok: true, folderIds: data.folderIds || [] };
+  }
+);
+
+// Remove one folder ID from config/broll.
+exports.removeBrollFolder = onCall(
+  { region: 'us-central1' },
+  async (request) => {
+    requireTiltUser(request);
+    const id = String((request.data && request.data.folderId) || '').trim();
+    if (!id) throw new HttpsError('invalid-argument', 'folderId is required.');
+    await db.doc('config/broll').set({
+      folderIds: admin.firestore.FieldValue.arrayRemove(id),
+    }, { merge: true });
+    const after = await db.doc('config/broll').get();
+    const data = after.data() || {};
+    return { ok: true, folderIds: data.folderIds || [] };
+  }
+);
+
 // Manual sync — called from the "Sync now" button in the Clips tab.
 exports.syncDriveClips = onCall(
   { secrets: [DRIVE_SERVICE_ACCOUNT_JSON], region: 'us-central1', timeoutSeconds: 540, memory: '1GiB' },
