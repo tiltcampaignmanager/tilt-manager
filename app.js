@@ -13922,7 +13922,11 @@ var App = {
     STATE.brollSyncBusy = true;
     saveState();
     render();
-    var callable = firebase.functions().httpsCallable('syncDriveClips');
+    // 540s to match the server-side timeout — walking many folders through
+    // Drive API can genuinely take a few minutes with the default rate limit.
+    // Without this override the Firebase SDK aborts the client at ~70s and
+    // you get "deadline exceeded" while the server is still working.
+    var callable = firebase.functions().httpsCallable('syncDriveClips', { timeout: 540000 });
     callable({}).then(function(res) {
       var stats = (res && res.data && res.data.stats) || null;
       var errors = (stats && stats.errors) || [];
