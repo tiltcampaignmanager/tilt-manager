@@ -18,6 +18,7 @@
 // =====================================================================
 
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 
@@ -26,6 +27,7 @@ const db = admin.firestore();
 
 const SLACK_BOT_TOKEN = defineSecret('SLACK_BOT_TOKEN');
 const LINEAR_API_KEY = defineSecret('LINEAR_API_KEY');
+const DRIVE_SERVICE_ACCOUNT_JSON = defineSecret('DRIVE_SERVICE_ACCOUNT_JSON');
 
 const ALLOWED_DOMAIN = 'tilt.app';
 
@@ -68,6 +70,12 @@ exports.sendSlackChatPostMessage = onCall(
       body: body.toString(),
     });
     const json = await res.json();
+    if (!json.ok) {
+      console.log('[slack.postMessage] failed', JSON.stringify({
+        channel: String(channel), threadTs: threadTs ? String(threadTs) : null,
+        status: res.status, error: json.error || 'unknown', response_metadata: json.response_metadata || null,
+      }));
+    }
     // Return the same shape the client's postToSlackThread expects.
     return { ok: !!json.ok, body: json.error || (json.ok ? 'ok' : 'unknown'), status: res.status };
   }
@@ -604,3 +612,298 @@ function buildIssueBody(c, campaignAssets, camp) {
     '| Speed — Avg revision rounds | ' + (camp.avgRevisionRounds == null ? '—' : String(Math.round(camp.avgRevisionRounds))) + ' |',
   ].filter(Boolean).join('\n');
 }
+
+// =====================================================================
+// Drive sync: index video files from Google Drive folders into the
+// broll subcollection. Files stay in Drive; we only mirror metadata +
+// thumbnail so the frontend can search/filter/tag.
+// ---------------------------------------------------------------------
+// Setup (one-off):
+//   1. Create a service account in GCP console (any name, e.g.
+//      broll-sync@tilt-project-tracker.iam.gserviceaccount.com).
+//   2. Create a JSON key for it and store it as a Firebase secret:
+//        firebase functions:secrets:set DRIVE_SERVICE_ACCOUNT_JSON
+//      (paste the full JSON contents when prompted).
+//   3. Grant the service-account email at least VIEWER on the Shared
+//      Drive(s) or folder(s) it needs to read.
+//   4. Write config/broll = { folderIds: ['<parent1>','<parent2>'] }
+//      via the Config UI in the tracker.
+// ---------------------------------------------------------------------
+// Called from client:
+//   firebase.functions().httpsCallable('syncDriveClips')({ dry: false })
+// Scheduled nightly by syncDriveClipsScheduled below.
+// =====================================================================
+
+const DRIVE_VIDEO_QUERY = "mimeType contains 'video/' and trashed=false";
+const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+// Fields we want Drive to return per file. Kept tight so page requests stay small.
+const DRIVE_FILE_FIELDS = 'files(id,name,mimeType,size,createdTime,modifiedTime,thumbnailLink,webViewLink,parents,hasThumbnail),nextPageToken';
+const DRIVE_FOLDER_FIELDS = 'files(id,name),nextPageToken';
+// Cap recursion so a misconfigured root can't infinitely spider.
+const DRIVE_MAX_FOLDERS = 5000;
+const DRIVE_MAX_FILES = 20000;
+
+// Load a Google Auth client for Drive using the service-account secret.
+// The secret value is the full JSON of the key file (single-line pasted in
+// via `firebase functions:secrets:set DRIVE_SERVICE_ACCOUNT_JSON`).
+function driveClient() {
+  const { google } = require('googleapis');
+  let keyJson;
+  try {
+    keyJson = JSON.parse(DRIVE_SERVICE_ACCOUNT_JSON.value());
+  } catch (e) {
+    throw new HttpsError('failed-precondition', 'DRIVE_SERVICE_ACCOUNT_JSON secret is missing or malformed JSON.');
+  }
+  const auth = new google.auth.JWT({
+    email: keyJson.client_email,
+    key: keyJson.private_key,
+    scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+  });
+  return google.drive({ version: 'v3', auth });
+}
+
+// Walk a set of parent folder IDs, breadth-first, collecting every video
+// file found in any descendant folder. Returns { files, folders } where
+// files is a flat list of Drive file resources with an added folderPath
+// (human-readable "Parent / Child / Grandchild"), and folders is the set
+// of visited folder ids (used only for reporting).
+async function driveWalkFolders(drive, rootFolderIds) {
+  const visited = new Set();
+  const files = [];
+  // Queue holds { id, path } — path is the folder-name breadcrumb so far.
+  // Root folders are keyed by their id; we resolve their names lazily below.
+  const rootNames = {};
+  const rootMeta = await Promise.all(rootFolderIds.map(async (id) => {
+    try {
+      const res = await drive.files.get({
+        fileId: id,
+        fields: 'id,name,mimeType',
+        supportsAllDrives: true,
+      });
+      return res.data;
+    } catch (e) {
+      throw new HttpsError('failed-precondition',
+        `Cannot read Drive folder "${id}" — is the service account added as a viewer? ` +
+        `Underlying error: ${e && e.message ? e.message : e}`);
+    }
+  }));
+  rootMeta.forEach((m) => { if (m && m.id) rootNames[m.id] = m.name || m.id; });
+
+  let queue = rootFolderIds.map((id) => ({ id, path: rootNames[id] || id }));
+  while (queue.length && visited.size < DRIVE_MAX_FOLDERS && files.length < DRIVE_MAX_FILES) {
+    const { id: folderId, path } = queue.shift();
+    if (visited.has(folderId)) continue;
+    visited.add(folderId);
+
+    // 1. List all video files in this folder.
+    let pageToken = null;
+    do {
+      const res = await drive.files.list({
+        q: `'${folderId}' in parents and ${DRIVE_VIDEO_QUERY}`,
+        fields: DRIVE_FILE_FIELDS,
+        pageSize: 1000,
+        pageToken: pageToken || undefined,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+        corpora: 'allDrives',
+      });
+      (res.data.files || []).forEach((f) => {
+        f.folderPath = path;
+        files.push(f);
+      });
+      pageToken = res.data.nextPageToken || null;
+      if (files.length >= DRIVE_MAX_FILES) break;
+    } while (pageToken);
+
+    // 2. List subfolders and enqueue them.
+    pageToken = null;
+    do {
+      const res = await drive.files.list({
+        q: `'${folderId}' in parents and mimeType='${DRIVE_FOLDER_MIME}' and trashed=false`,
+        fields: DRIVE_FOLDER_FIELDS,
+        pageSize: 1000,
+        pageToken: pageToken || undefined,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+        corpora: 'allDrives',
+      });
+      (res.data.files || []).forEach((sub) => {
+        if (!visited.has(sub.id)) {
+          queue.push({ id: sub.id, path: path + ' / ' + (sub.name || sub.id) });
+        }
+      });
+      pageToken = res.data.nextPageToken || null;
+    } while (pageToken);
+  }
+  return { files, folders: visited };
+}
+
+// Turn a Drive file resource into the doc we store in state/app/broll/{id}.
+// Only Drive-owned fields — user-tagged fields are preserved separately.
+function brollDocFromDriveFile(f) {
+  return {
+    id: f.id,
+    name: f.name || '(untitled)',
+    mimeType: f.mimeType || '',
+    size: f.size ? Number(f.size) : null,
+    createdTime: f.createdTime || null,
+    modifiedTime: f.modifiedTime || null,
+    // Public thumbnail URL that works when the viewer is signed in to a
+    // Google account with access to the file. Small (~w400) for grid speed.
+    thumbnailUrl: 'https://drive.google.com/thumbnail?id=' + f.id + '&sz=w400',
+    driveUrl: f.webViewLink || ('https://drive.google.com/file/d/' + f.id + '/view'),
+    folderPath: f.folderPath || '',
+    hasThumbnail: !!f.hasThumbnail,
+  };
+}
+
+// Shared implementation — called both by the callable and the scheduler.
+// Returns { scanned, added, updated, archived, unarchived, foldersVisited }.
+async function runDriveSync({ trigger, byEmail }) {
+  // 1. Load config.
+  const cfgSnap = await db.doc('config/broll').get();
+  if (!cfgSnap.exists) {
+    throw new HttpsError('failed-precondition',
+      'config/broll document is missing. Create it with { folderIds: [<driveFolderId>, ...] }.');
+  }
+  const cfg = cfgSnap.data() || {};
+  const folderIds = Array.isArray(cfg.folderIds) ? cfg.folderIds.filter(Boolean).map(String) : [];
+  if (!folderIds.length) {
+    throw new HttpsError('failed-precondition',
+      'config/broll.folderIds is empty. Add at least one Google Drive folder ID.');
+  }
+
+  // 2. Walk Drive.
+  const drive = driveClient();
+  const { files: driveFiles, folders: foldersVisited } = await driveWalkFolders(drive, folderIds);
+
+  // 3. Load current broll subcollection so we can diff.
+  const existingSnap = await db.collection('state/app/broll').get();
+  const existing = {};
+  existingSnap.forEach((d) => { existing[d.id] = d.data() || {}; });
+
+  const seen = new Set();
+  const writes = []; // { id, data, kind: 'added' | 'updated' | 'unarchived' }
+  driveFiles.forEach((f) => {
+    seen.add(f.id);
+    const driveDoc = brollDocFromDriveFile(f);
+    const prev = existing[f.id];
+    if (!prev) {
+      // New clip — full record, no tags yet.
+      writes.push({
+        id: f.id,
+        kind: 'added',
+        data: Object.assign({}, driveDoc, {
+          type: null,
+          category: null,
+          seller: null,
+          product: null,
+          tags: [],
+          notes: '',
+          taggedBy: null,
+          taggedAt: null,
+          archived: false,
+          discoveredAt: admin.firestore.FieldValue.serverTimestamp(),
+        }),
+      });
+      return;
+    }
+    // Existing clip — refresh Drive-owned fields, keep user tags. Only write
+    // if a Drive-owned field actually changed (avoid touching taggedAt).
+    const changed =
+      prev.name !== driveDoc.name ||
+      prev.size !== driveDoc.size ||
+      prev.modifiedTime !== driveDoc.modifiedTime ||
+      prev.folderPath !== driveDoc.folderPath ||
+      prev.thumbnailUrl !== driveDoc.thumbnailUrl ||
+      prev.driveUrl !== driveDoc.driveUrl ||
+      prev.archived === true;
+    if (changed) {
+      writes.push({
+        id: f.id,
+        kind: prev.archived ? 'unarchived' : 'updated',
+        data: Object.assign({}, prev, driveDoc, { archived: false }),
+      });
+    }
+  });
+
+  // Anything in Firestore that we didn't see in Drive → archive (don't delete).
+  const archiveIds = Object.keys(existing).filter((id) => !seen.has(id) && !existing[id].archived);
+
+  // 4. Write in batches (Firestore cap = 500 ops per batch).
+  const BATCH_MAX = 400;
+  let cursor = 0;
+  async function flushWrites(items, transform) {
+    while (cursor < items.length) {
+      const batch = db.batch();
+      const end = Math.min(cursor + BATCH_MAX, items.length);
+      for (let i = cursor; i < end; i++) transform(batch, items[i]);
+      await batch.commit();
+      cursor = end;
+    }
+    cursor = 0;
+  }
+  await flushWrites(writes, (batch, w) => {
+    batch.set(db.doc('state/app/broll/' + w.id), w.data, { merge: false });
+  });
+  await flushWrites(archiveIds, (batch, id) => {
+    batch.update(db.doc('state/app/broll/' + id), {
+      archived: true,
+      archivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+
+  const added = writes.filter((w) => w.kind === 'added').length;
+  const updated = writes.filter((w) => w.kind === 'updated').length;
+  const unarchived = writes.filter((w) => w.kind === 'unarchived').length;
+  const stats = {
+    scanned: driveFiles.length,
+    added,
+    updated,
+    unarchived,
+    archived: archiveIds.length,
+    foldersVisited: foldersVisited.size,
+  };
+
+  // 5. Stamp last-sync marker on config/broll so the UI can show it.
+  await db.doc('config/broll').set({
+    lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastSyncStats: stats,
+    lastSyncTrigger: trigger || 'manual',
+    lastSyncBy: byEmail || null,
+  }, { merge: true });
+
+  return stats;
+}
+
+// Manual sync — called from the "Sync now" button in the Clips tab.
+exports.syncDriveClips = onCall(
+  { secrets: [DRIVE_SERVICE_ACCOUNT_JSON], region: 'us-central1', timeoutSeconds: 540, memory: '1GiB' },
+  async (request) => {
+    requireTiltUser(request);
+    const email = request.auth && request.auth.token && request.auth.token.email;
+    const stats = await runDriveSync({ trigger: 'manual', byEmail: email });
+    return { ok: true, stats };
+  }
+);
+
+// Nightly scheduled sync — same work, no auth (scheduler-triggered).
+exports.syncDriveClipsScheduled = onSchedule(
+  {
+    schedule: 'every day 03:00',
+    timeZone: 'Europe/London',
+    secrets: [DRIVE_SERVICE_ACCOUNT_JSON],
+    region: 'us-central1',
+    timeoutSeconds: 540,
+    memory: '1GiB',
+  },
+  async () => {
+    try {
+      const stats = await runDriveSync({ trigger: 'scheduled', byEmail: null });
+      console.log('[syncDriveClipsScheduled] ok', JSON.stringify(stats));
+    } catch (e) {
+      console.error('[syncDriveClipsScheduled] failed:', e && e.message ? e.message : e);
+      throw e;
+    }
+  }
+);

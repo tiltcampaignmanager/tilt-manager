@@ -2,20 +2,34 @@
 # =====================================================================
 # deploy.sh — push the frontend to GitHub Pages.
 # ---------------------------------------------------------------------
-# Usage:   ./deploy.sh "optional commit message"
+# Usage:
+#   ./deploy.sh "optional commit message"
+#   ./deploy.sh --with-functions "optional commit message"
 #
 # What it does: stages every change, commits it, and pushes to the
 # `origin` remote. GitHub Pages rebuilds automatically on push, so a
 # few seconds after this finishes the live site is updated.
 #
-# This deploys the STATIC SITE only (index.html, styles.css, app.js,
-# firebase-config.js, etc.). It does NOT deploy Cloud Functions — those
-# change rarely and have their own command:
-#     firebase deploy --only functions
+# By default this deploys the STATIC SITE only (index.html, styles.css,
+# app.js, firebase-config.js, etc.). Pass --with-functions to ALSO run
+# `firebase deploy --only functions` after the git push — use this when
+# you've edited anything in functions/.
 # =====================================================================
 set -euo pipefail
 
 cd "$(dirname "$0")"
+
+# Parse flags. --with-functions triggers a `firebase deploy --only functions`
+# step after the git push. Everything else is treated as the commit message.
+WITH_FUNCTIONS=0
+COMMIT_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --with-functions|-f) WITH_FUNCTIONS=1 ;;
+    *) COMMIT_ARGS+=("$arg") ;;
+  esac
+done
+set -- "${COMMIT_ARGS[@]:-}"
 
 # 1. Must be a git repo with a remote, or there's nowhere to push.
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -84,3 +98,16 @@ fi
 
 echo
 echo "✓ Pushed to origin/$BRANCH. GitHub Pages will rebuild in ~30s."
+
+# Optional: also deploy Cloud Functions (kept behind a flag so a normal
+# frontend deploy doesn't wait ~2 minutes for the functions bundle to upload).
+if [ "$WITH_FUNCTIONS" -eq 1 ]; then
+  if ! command -v firebase >/dev/null 2>&1; then
+    echo "✗ --with-functions passed but 'firebase' CLI not found. Install it with:  npm i -g firebase-tools"
+    exit 1
+  fi
+  echo
+  echo "Deploying Cloud Functions…"
+  firebase deploy --only functions
+  echo "✓ Cloud Functions deployed."
+fi

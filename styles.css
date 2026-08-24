@@ -1777,3 +1777,92 @@
     .run-btn:active, .submit-btn:active, .action-btn:active, .edit-btn:active, .gr-seg-btn:active, .grading-play-btn:active, .grading-dismiss-btn:active, .grading-restore-btn:active, .grading-del-btn:active, .batch-flush-btn:active, .batch-copy-btn:active, .batch-clear-btn:active { transform: none; }
     .gr-hero:hover { transform: none; box-shadow: none; }
   }
+
+  /* ===================== CLIPS TAB (b-roll library) ===================== */
+  .clips-topbar { padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--bg2); }
+  .clips-topbar-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .clips-topbar-row .clips-search { flex: 1 1 260px; min-width: 200px; }
+  .clips-topbar-row select.form-select { min-width: 140px; }
+  .clips-sync-btn { white-space: nowrap; }
+  .clips-topbar-meta { display: flex; gap: 16px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--text3); flex-wrap: wrap; }
+  .clips-topbar-meta b { color: var(--amber-text); font-weight: 600; }
+  .clips-sync-summary { color: var(--text2); }
+  .clips-archived-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; cursor: pointer; }
+  .clips-archived-toggle input { margin: 0; }
+
+  .clips-bulkbar { display: flex; gap: 10px; align-items: center; padding: 10px 18px; background: var(--accent-dim); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .clips-bulkbar b { color: var(--accent2); }
+
+  .clips-body { display: grid; grid-template-columns: 1fr 360px; gap: 0; height: calc(100vh - 180px); }
+  .clips-grid-wrap { overflow-y: auto; padding: 18px; }
+  .clips-panel { border-left: 1px solid var(--border); background: var(--bg2); overflow-y: auto; display: flex; flex-direction: column; }
+
+  .clips-empty { text-align: center; padding: 60px 20px; color: var(--text3); }
+  .clips-empty-icon { font-size: 42px; margin-bottom: 12px; opacity: 0.5; }
+  .clips-empty-title { font-size: 15px; font-weight: 600; color: var(--text1); margin-bottom: 4px; }
+  .clips-empty-body { font-size: 13px; max-width: 480px; margin: 0 auto; }
+  .clips-empty-body a { color: var(--accent2); }
+
+  .clips-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .clip-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); overflow: hidden; cursor: pointer; transition: transform 0.08s, border-color 0.12s, box-shadow 0.12s; display: flex; flex-direction: column; }
+  .clip-card:hover { border-color: var(--border2); transform: translateY(-1px); }
+  .clip-card.clip-card-selected { border-color: var(--accent2); box-shadow: 0 0 0 1px var(--accent2); }
+  .clip-card.clip-card-bulk { border-color: var(--amber-text); box-shadow: inset 0 0 0 2px var(--amber-text); }
+  .clip-card.clip-card-archived { opacity: 0.5; }
+  .clip-thumb { position: relative; width: 100%; aspect-ratio: 16 / 9; background: var(--bg3); overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  .clip-thumb.no-thumb::before { content: '🎬'; font-size: 30px; opacity: 0.4; }
+  .clip-thumb-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .clip-untagged-dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--amber-text); box-shadow: 0 0 0 2px var(--bg2); }
+  .clip-card-name { font-size: 12px; padding: 6px 8px 2px; color: var(--text1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .clip-card-pills { display: flex; gap: 4px; padding: 0 8px 8px; flex-wrap: wrap; }
+  .clip-pill { font-size: 10px; padding: 2px 6px; border-radius: 3px; letter-spacing: 0.02em; font-weight: 500; white-space: nowrap; }
+  .pill-type    { background: var(--accent-dim); color: var(--accent2); }
+  .pill-cat     { background: var(--blue-bg); color: var(--blue-text); }
+  .pill-seller  { background: var(--green-bg); color: var(--green-text); }
+  .pill-product { background: var(--pink-bg); color: var(--pink-text); }
+
+  .clip-panel-nav { display: flex; gap: 6px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg2); z-index: 2; }
+  .clip-panel-pos { font-size: 11px; color: var(--text3); margin: 0 4px; }
+  .clip-panel-nav button:last-of-type { margin-left: auto; }
+  .clip-panel-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  .clip-preview-frame { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; overflow: hidden; }
+  .clip-preview-frame iframe, .clip-preview-frame video { width: 100%; height: 100%; border: 0; display: block; }
+  .clip-preview-empty { padding: 30px; background: var(--bg3); border-radius: 6px; text-align: center; color: var(--text3); font-size: 12px; }
+  .clip-preview-empty a { color: var(--accent2); }
+  .clip-panel-meta { font-size: 12px; }
+  .clip-panel-name { font-weight: 600; color: var(--text1); font-size: 13px; margin-bottom: 4px; word-break: break-word; }
+  .clip-panel-folder { color: var(--text3); font-size: 11px; word-break: break-word; margin-bottom: 8px; }
+  .clip-panel-links { display: flex; gap: 6px; }
+
+  .clip-field { display: flex; flex-direction: column; gap: 4px; }
+  .clip-field-label { font-size: 11px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; }
+  .clip-field-label kbd { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--bg4); border: 1px solid var(--border2); color: var(--text2); font-weight: 500; }
+  .clip-type-row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .clip-type-btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg3); color: var(--text2); font-size: 12px; cursor: pointer; font-family: inherit; }
+  .clip-type-btn:hover { background: var(--bg4); color: var(--text1); }
+  .clip-type-btn.active { background: var(--accent-dim); color: var(--accent2); border-color: var(--accent2); }
+  .clip-type-sc { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--bg2); border: 1px solid var(--border); color: var(--text3); }
+  .clip-type-btn.active .clip-type-sc { background: var(--bg); color: var(--accent2); border-color: var(--accent2); }
+
+  .clip-tag-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+  .clip-tag-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 8px; border-radius: 3px; background: var(--bg3); color: var(--text1); font-size: 12px; }
+  .clip-tag-remove { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
+  .clip-tag-remove:hover { color: var(--red-text); }
+
+  .clip-tagged-by { font-size: 11px; color: var(--text3); font-style: italic; }
+
+  .clips-panel-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 30px; text-align: center; color: var(--text3); font-size: 13px; gap: 8px; }
+  .clips-panel-empty-icon { font-size: 38px; opacity: 0.5; }
+  .clips-panel-empty-hint { font-size: 11px; margin-top: 10px; color: var(--text3); line-height: 1.6; }
+  .clips-panel-empty-hint kbd { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--bg4); border: 1px solid var(--border2); color: var(--text2); }
+
+  /* Clip Library config block */
+  .clip-cfg-rows { display: flex; flex-direction: column; gap: 4px; }
+  .clip-cfg-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--bg3); border-radius: 5px; }
+  .clip-cfg-id { flex: 1; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .clip-cfg-lastsync { font-size: 11px; color: var(--text3); margin-top: 8px; padding: 6px 8px; background: var(--bg3); border-radius: 5px; }
+
+  @media (max-width: 900px) {
+    .clips-body { grid-template-columns: 1fr; }
+    .clips-panel { border-left: none; border-top: 1px solid var(--border); }
+  }

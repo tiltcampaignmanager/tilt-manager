@@ -330,6 +330,8 @@ function bootApp() { /* replaced at end of script */ }
 var Fb = {
   STATE_DOC: 'state/app',
   ASSETS_COLL: 'state/app/assets',
+  BROLL_COLL: 'state/app/broll',
+  BROLL_CONFIG_DOC: 'config/broll',
   // Rolling 30-day snapshots of STATE.grades so an accidental wipe (a stale-snapshot
   // save overwriting ticks, someone unchecking in bulk) can be rolled back from the
   // Config tab. Docs are keyed by the London-civil date (yyyy-mm-dd). One write per
@@ -391,6 +393,8 @@ var Fb = {
       countries: STATE.countries,
       categories: STATE.categories,
       categoriesOrganic: STATE.categoriesOrganic,
+      sellers: Array.isArray(STATE.sellers) ? STATE.sellers : [],
+      products: Array.isArray(STATE.products) ? STATE.products : [],
       campaigns: STATE.campaigns,
       pendingBatches: STATE.pendingBatches,
       recentNotifKeys: Array.isArray(STATE.recentNotifKeys) ? STATE.recentNotifKeys.slice(0, 300) : [],
@@ -497,7 +501,22 @@ var Fb = {
         gradingMonth: true,
         gradingShowDismissed: true,
         gradingType: true,
-        gradingWeek: true
+        gradingWeek: true,
+        // Clips tab: per-user UI. `broll` (the array) is populated by
+        // Fb.subscribeBroll from the subcollection, so it must never be
+        // overwritten by an incoming main-doc snapshot either.
+        broll: true,
+        brollSearch: true,
+        brollTypeFilter: true,
+        brollCategoryFilter: true,
+        brollSellerFilter: true,
+        brollProductFilter: true,
+        brollTaggedFilter: true,
+        brollShowArchived: true,
+        brollSelectedId: true,
+        brollBulkSelection: true,
+        brollLastSyncStats: true,
+        brollSyncBusy: true
       };
       // Copy known fields onto STATE. Skip metadata fields prefixed with `_` and any
       // per-user UI field (so a teammate's tab/campaign/expansion choices don't override
@@ -1033,6 +1052,58 @@ var Fb = {
       });
     }
     writeChunk(0);
+  },
+
+  // Subscribe to the broll subcollection (Clips tab). Populated server-side by
+  // the syncDriveClips Cloud Function; the client only writes per-doc tag updates.
+  // Snapshots overwrite STATE.broll wholesale — safe because the client doesn't
+  // do a diff-write against this collection (each tag change is one doc.set).
+  subscribeBroll: function() {
+    if (Fb._brollUnsub) return; // already subscribed
+    Fb._brollUnsub = fbDb.collection(Fb.BROLL_COLL).onSnapshot(function(snapshot) {
+      if (snapshot.metadata.fromCache) return; // wait for the server copy
+      var clips = [];
+      snapshot.forEach(function(d) { clips.push(d.data()); });
+      STATE.broll = clips;
+      if (typeof render === 'function' && Auth._booted && STATE.tab === 'clips') render();
+    }, function(err) {
+      console.warn('[Fb] broll listener error:', err);
+    });
+  },
+
+  // Write per-clip tag updates. Bypasses uploadNow/buildSnapshot because broll
+  // docs live in a subcollection, not in the main state doc. Merges into the
+  // existing doc so server-managed Drive fields (name, folderPath, thumbnail…)
+  // aren't touched.
+  updateBrollTag: function(clipId, updates) {
+    if (!Auth.user) return Promise.reject(new Error('Not signed in'));
+    var patch = Object.assign({}, updates, {
+      taggedBy: (Auth.user && Auth.user.email) || null,
+      taggedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    return fbDb.doc(Fb.BROLL_COLL + '/' + String(clipId)).set(patch, { merge: true });
+  },
+
+  // Bulk tag: same fields on many clips in one atomic batch.
+  updateBrollTagBulk: function(clipIds, updates) {
+    if (!Auth.user) return Promise.reject(new Error('Not signed in'));
+    if (!Array.isArray(clipIds) || !clipIds.length) return Promise.resolve();
+    var patch = Object.assign({}, updates, {
+      taggedBy: (Auth.user && Auth.user.email) || null,
+      taggedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    // Firestore caps writes at 500 per batch — chunk to 400 to leave headroom.
+    var BATCH_MAX = 400;
+    var ids = clipIds.slice();
+    function flush(i) {
+      if (i >= ids.length) return Promise.resolve();
+      var batch = fbDb.batch();
+      ids.slice(i, i + BATCH_MAX).forEach(function(id) {
+        batch.set(fbDb.doc(Fb.BROLL_COLL + '/' + String(id)), patch, { merge: true });
+      });
+      return batch.commit().then(function() { return flush(i + BATCH_MAX); });
+    }
+    return flush(0);
   },
 
   // One-time migration: explicitly write current localStorage STATE up to Firestore.
@@ -1696,6 +1767,34 @@ var STATE = {
   // dropdown a campaign shows depends on its `type`. See categoriesForType().
   categories: DEFAULT_CATEGORIES.map(function(c) { return { name: c.name, color: c.color }; }),
   categoriesOrganic: DEFAULT_CATEGORIES.map(function(c) { return { name: c.name, color: c.color }; }),
+
+  // ── Clip Library (b-roll + all other clip footage) ────────────────────────
+  // sellers / products: growing dropdowns for the Clips tab tag panel. Auto-populate
+  // when a new value is typed while tagging (see App.setBrollTag). Managed in Config.
+  // Kept in the main snapshot so every teammate shares the same list.
+  sellers: [],
+  products: [],
+  // broll: mirror of the state/app/broll subcollection. Populated by Fb.subscribeBroll,
+  // NOT saved back through the main snapshot (docs live in the subcollection). Each
+  // clip: { id, name, size, mimeType, driveUrl, thumbnailUrl, folderPath, createdTime,
+  //   modifiedTime, type, category, seller, product, tags: [], notes, taggedBy,
+  //   taggedAt, archived }. Server-managed fields (name/size/mod/folderPath/
+  //   thumbnailUrl/driveUrl/archived) are refreshed by the syncDriveClips Cloud
+  //   Function; user-tagged fields (type/category/seller/product/tags/notes) are
+  //   written directly per-doc by the client.
+  broll: [],
+  // Per-user UI state for the Clips tab. Not synced.
+  brollSearch: '',
+  brollTypeFilter: 'all',
+  brollCategoryFilter: 'all',
+  brollSellerFilter: 'all',
+  brollProductFilter: 'all',
+  brollTaggedFilter: 'all',   // 'all' | 'tagged' | 'untagged'
+  brollShowArchived: false,
+  brollSelectedId: null,       // clip currently open in the tag panel (null = grid only)
+  brollBulkSelection: {},      // { <id>: true } — transient bulk-select state (shift-click)
+  brollLastSyncStats: null,    // last { added, updated, archived } stashed after Sync-now
+  brollSyncBusy: false,        // true while a manual sync is running
   campaigns: [
     { id: 1, country: 'UK', rank: 1, name: 'Privilege Supply \u2013 Luxury', brief: 'High-end product showcase, tone = aspirational', driveId: '1a2B3cD4eF5gH6iJ', category: 'Luxury', type: 'Paid Ads', slackOverride: '' },
     { id: 2, country: 'UK', rank: 2, name: 'Privilege Supply \u2013 Essentials', brief: 'Everyday essentials, tone = practical', driveId: '', category: 'Essentials', type: 'Paid Ads', slackOverride: '' },
@@ -4146,9 +4245,10 @@ var TAB_DEFS = {
   reporting:        { label: 'Reporting' },
   content:          { label: 'Content' },
   editorStats:      { label: 'Editor Stats' },
+  clips:            { label: 'Clips' },
   config:           { label: 'Config' }
 };
-var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'log', 'editingCalendar', 'grading', 'editorStats', 'automations', 'reporting', 'content', 'config'];
+var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'log', 'editingCalendar', 'grading', 'editorStats', 'automations', 'reporting', 'content', 'clips', 'config'];
 
 // Role-based tab visibility. Editors and PMs share the same day-to-day set
 // (Campaigns → Reporting, plus Notifications). Cat Head and Content Lead can open
@@ -4163,13 +4263,16 @@ var DEFAULT_TAB_ORDER = ['campaigns', 'notifications', 'today', 'catReview', 'lo
 // read-mostly set that excludes internal-ops tabs and the Strava page.
 var ALL_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'automations', 'reporting', 'content', 'config'];
 var VIEWER_TABS = ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'notifications', 'reporting', 'content'];
+// 'clips' is admin+editor only — intentionally NOT in ALL_TABS (so it doesn't
+// leak to catHead/contentLead, who otherwise mirror ALL_TABS). Added explicitly
+// to the editor and admin lists only.
 var ROLE_TAB_VISIBILITY = {
   viewer:      VIEWER_TABS.slice(),
-  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'editorStats', 'notifications', 'reporting', 'content'],
+  editor:      ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'editorStats', 'notifications', 'reporting', 'content', 'clips'],
   pm:          ['campaigns', 'today', 'catReview', 'editingCalendar', 'log', 'grading', 'notifications', 'reporting', 'content'],
   catHead:     ALL_TABS.slice(),
   contentLead: ALL_TABS.slice(),
-  admin:       ALL_TABS.concat(['editorStats'])
+  admin:       ALL_TABS.concat(['editorStats', 'clips'])
 };
 
 // Human-readable role labels (role keys are camelCase / short; these are what the
@@ -11423,6 +11526,431 @@ function renderCategoryManageBlock(listKey, title) {
   '</div>';
 }
 
+// Config section for the Clip Library (b-roll). Renders folder-ID manager,
+// seller list manager, and product list manager. Admin-only edit access.
+function renderClipLibraryConfigBlock() {
+  // Only admin/editor should see this block (matches Clips tab visibility).
+  if (!(roleAtLeast('editor'))) return '';
+
+  var cfg = window._brollConfig || null;
+  if (!cfg) {
+    // Fire the fetch lazily so subsequent renders have the data.
+    setTimeout(function() { App._loadBrollConfig(); }, 0);
+  }
+  var folderIds = (cfg && Array.isArray(cfg.folderIds)) ? cfg.folderIds : [];
+  var folderRows = folderIds.length
+    ? folderIds.map(function(id) {
+        return '<div class="clip-cfg-row">' +
+          '<code class="clip-cfg-id">' + escapeHtml(id) + '</code>' +
+          '<a class="edit-btn" href="https://drive.google.com/drive/folders/' + escapeHtml(id) + '" target="_blank" rel="noopener">Open ↗</a>' +
+          '<button class="edit-btn del-btn" onclick="App.removeBrollFolderId(\'' + escapeAttr(id) + '\')" title="Stop indexing this folder">✕</button>' +
+        '</div>';
+      }).join('')
+    : '<div style="color:var(--text3); font-size:12px; padding:8px 0;">No folders configured yet. Paste a Drive folder ID below.</div>';
+
+  var lastSync = cfg && cfg.lastSyncAt && cfg.lastSyncAt.toDate ? cfg.lastSyncAt.toDate() : null;
+  var lastSyncLine = '';
+  if (lastSync) {
+    var stats = cfg.lastSyncStats || {};
+    lastSyncLine = '<div class="clip-cfg-lastsync">' +
+      'Last sync: ' + lastSync.toLocaleString() +
+      ' · ' + (cfg.lastSyncTrigger || 'manual') +
+      (cfg.lastSyncBy ? ' by ' + escapeHtml(cfg.lastSyncBy) : '') +
+      ' · scanned ' + (stats.scanned || 0) + ', ' +
+      'added ' + (stats.added || 0) + ', updated ' + (stats.updated || 0) + ', archived ' + (stats.archived || 0) +
+    '</div>';
+  }
+
+  var sellerList = (STATE.sellers || []).slice().sort();
+  var productList = (STATE.products || []).slice().sort();
+  var sellerRows = sellerList.length
+    ? sellerList.map(function(n) {
+        return '<div class="clip-cfg-row">' +
+          '<span>' + escapeHtml(n) + '</span>' +
+          '<button class="edit-btn del-btn" onclick="App.removeSeller(\'' + escapeAttr(n) + '\')" title="Remove">✕</button>' +
+        '</div>';
+      }).join('')
+    : '<div style="color:var(--text3); font-size:12px; padding:8px 0;">No sellers yet. Add one below, or type a new one while tagging a clip.</div>';
+  var productRows = productList.length
+    ? productList.map(function(n) {
+        return '<div class="clip-cfg-row">' +
+          '<span>' + escapeHtml(n) + '</span>' +
+          '<button class="edit-btn del-btn" onclick="App.removeProduct(\'' + escapeAttr(n) + '\')" title="Remove">✕</button>' +
+        '</div>';
+      }).join('')
+    : '<div style="color:var(--text3); font-size:12px; padding:8px 0;">No products yet. Add one below, or type a new one while tagging a clip.</div>';
+
+  return '' +
+    '<div class="section-title">Clip Library</div>' +
+    '<div class="auto-card">' +
+      '<div class="auto-desc" style="margin-bottom:14px;">The Clips tab indexes video files that live in these Google Drive folders — subfolders are walked recursively. Files stay in Drive; the tracker only stores tags, thumbnails, and metadata. Nightly auto-sync runs at 03:00 UK time; hit Sync now on the Clips tab any time you add new clips.</div>' +
+      '<div style="font-size:12px; font-weight:600; color:var(--text2); margin-bottom:4px; letter-spacing:0.04em; text-transform:uppercase;">Drive folders to index</div>' +
+      '<div style="font-size:11.5px; color:var(--text3); margin-bottom:10px;">Paste one or many Drive folder links (or bare folder IDs) below — separated by spaces, commas, or newlines. The tracker extracts each ID automatically. The service account must have Viewer access on every folder you add.</div>' +
+      '<div class="clip-cfg-rows">' + folderRows + '</div>' +
+      lastSyncLine +
+      '<div style="display:flex; flex-direction:column; gap:6px; margin-top:10px;">' +
+        '<textarea id="clip-folder-add-input" class="form-input" rows="4" ' +
+          'placeholder="Paste Drive folder links — one per line, or all in one go:&#10;https://drive.google.com/drive/folders/1ABC…&#10;https://drive.google.com/drive/folders/1DEF…&#10;https://drive.google.com/drive/folders/1GHI…" ' +
+          'style="font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11.5px;"></textarea>' +
+        '<div style="display:flex; gap:6px; align-items:center; justify-content:flex-end;">' +
+          '<button class="save-btn" style="padding:8px 14px;" onclick="App.addBrollFolderId()">➕ Add folders</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
+    '<div class="auto-card">' +
+      '<div style="font-size:12px; font-weight:600; color:var(--text2); margin-bottom:4px; letter-spacing:0.04em; text-transform:uppercase;">Sellers</div>' +
+      '<div style="font-size:11.5px; color:var(--text3); margin-bottom:10px;">Shared dropdown values for the Seller field on clips. New sellers you type while tagging get auto-added here — this panel lets you clean up typos or duplicates.</div>' +
+      '<div class="clip-cfg-rows">' + sellerRows + '</div>' +
+      '<div style="display:flex; gap:6px; margin-top:10px; align-items:center;">' +
+        '<input id="clip-seller-add-input" class="form-input" placeholder="e.g. RStreetwear" style="flex:1;" ' +
+          'onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addSellerFromConfig();}">' +
+        '<button class="save-btn" style="padding:8px 14px;" onclick="App.addSellerFromConfig()">➕ Add seller</button>' +
+      '</div>' +
+    '</div>' +
+
+    '<div class="auto-card">' +
+      '<div style="font-size:12px; font-weight:600; color:var(--text2); margin-bottom:4px; letter-spacing:0.04em; text-transform:uppercase;">Products</div>' +
+      '<div style="font-size:11.5px; color:var(--text3); margin-bottom:10px;">Shared dropdown values for the Product field on clips. Same growing-list behavior as sellers.</div>' +
+      '<div class="clip-cfg-rows">' + productRows + '</div>' +
+      '<div style="display:flex; gap:6px; margin-top:10px; align-items:center;">' +
+        '<input id="clip-product-add-input" class="form-input" placeholder="e.g. Jordan 4 Bred" style="flex:1;" ' +
+          'onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addProductFromConfig();}">' +
+        '<button class="save-btn" style="padding:8px 14px;" onclick="App.addProductFromConfig()">➕ Add product</button>' +
+      '</div>' +
+    '</div>';
+}
+
+// ============================================================================
+//  CLIPS TAB (b-roll library)
+// ============================================================================
+// Fixed set of clip types — matches the taxonomy in the launch plan. The number
+// on the left is the keyboard shortcut (1-5) that sets that type on the active
+// clip in the tag panel.
+var BROLL_TYPES = [
+  { key: 'broll',        label: 'B-Roll',       shortcut: '1' },
+  { key: 'talking-head', label: 'Talking Head', shortcut: '2' },
+  { key: 'product',      label: 'Product',      shortcut: '3' },
+  { key: 'bts',          label: 'BTS',          shortcut: '4' },
+  { key: 'other',        label: 'Other',        shortcut: '5' }
+];
+function brollTypeLabel(k) {
+  for (var i = 0; i < BROLL_TYPES.length; i++) if (BROLL_TYPES[i].key === k) return BROLL_TYPES[i].label;
+  return '';
+}
+
+// Full list of categories offered in the Clips tag panel. Reuse the shared Paid
+// Ads category taxonomy so seller/category coverage stays consistent with the
+// rest of the tracker.
+function brollCategoryOptions() {
+  var list = categoriesForType('Paid Ads') || [];
+  return list.map(function(c) { return c.name; });
+}
+
+// Predicate: does a clip match the current top-bar filters?
+function brollClipMatches(c) {
+  if (c.archived && !STATE.brollShowArchived) return false;
+  if (STATE.brollTypeFilter !== 'all') {
+    if (STATE.brollTypeFilter === 'untyped') { if (c.type) return false; }
+    else if (c.type !== STATE.brollTypeFilter) return false;
+  }
+  if (STATE.brollCategoryFilter !== 'all') {
+    if (STATE.brollCategoryFilter === 'uncategorised') { if (c.category) return false; }
+    else if (c.category !== STATE.brollCategoryFilter) return false;
+  }
+  if (STATE.brollSellerFilter !== 'all') {
+    if (STATE.brollSellerFilter === 'unset') { if (c.seller) return false; }
+    else if (c.seller !== STATE.brollSellerFilter) return false;
+  }
+  if (STATE.brollProductFilter !== 'all') {
+    if (STATE.brollProductFilter === 'unset') { if (c.product) return false; }
+    else if (c.product !== STATE.brollProductFilter) return false;
+  }
+  if (STATE.brollTaggedFilter === 'tagged' && !c.type && !c.category && !c.seller && !c.product && !(c.tags && c.tags.length)) return false;
+  if (STATE.brollTaggedFilter === 'untagged' && (c.type || c.category || c.seller || c.product || (c.tags && c.tags.length))) return false;
+  var q = (STATE.brollSearch || '').trim().toLowerCase();
+  if (q) {
+    var hay = [c.name || '', c.folderPath || '', c.seller || '', c.product || '',
+               c.category || '', brollTypeLabel(c.type), (c.tags || []).join(' '),
+               c.notes || ''].join(' ').toLowerCase();
+    var tokens = q.split(/\s+/).filter(Boolean);
+    for (var i = 0; i < tokens.length; i++) if (hay.indexOf(tokens[i]) < 0) return false;
+  }
+  return true;
+}
+
+// Sort visible clips: newest Drive-modification first (matches how editors think
+// about their own recent work). Archived slide to the bottom.
+function brollSortedClips() {
+  var list = (STATE.broll || []).filter(brollClipMatches);
+  list.sort(function(a, b) {
+    if (!!a.archived !== !!b.archived) return a.archived ? 1 : -1;
+    var am = a.modifiedTime || a.createdTime || '';
+    var bm = b.modifiedTime || b.createdTime || '';
+    if (am === bm) return 0;
+    return am < bm ? 1 : -1;
+  });
+  return list;
+}
+
+function renderClipsView() {
+  // Numbers for the top bar. Use the raw list (unfiltered) for "total" so users
+  // see how many clips exist overall vs. how many match their current filter.
+  var all = (STATE.broll || []).filter(function(c) { return STATE.brollShowArchived || !c.archived; });
+  var visible = brollSortedClips();
+  var untagged = all.filter(function(c) { return !c.type && !c.category && !c.seller && !c.product && !(c.tags && c.tags.length); }).length;
+
+  // Assemble filter dropdowns. Category list also gets an "Uncategorised" special.
+  function opt(v, cur, label) {
+    return '<option value="' + escapeHtml(v) + '"' + (String(cur) === String(v) ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }
+  var typeOptions = [ opt('all', STATE.brollTypeFilter, 'All types'),
+                      opt('untyped', STATE.brollTypeFilter, '— No type yet —') ]
+    .concat(BROLL_TYPES.map(function(t) { return opt(t.key, STATE.brollTypeFilter, t.label); })).join('');
+  var catOptions = [ opt('all', STATE.brollCategoryFilter, 'All categories'),
+                     opt('uncategorised', STATE.brollCategoryFilter, '— No category —') ]
+    .concat(brollCategoryOptions().map(function(n) { return opt(n, STATE.brollCategoryFilter, n); })).join('');
+  var sellerList = (STATE.sellers || []).slice().sort();
+  var sellerOptions = [ opt('all', STATE.brollSellerFilter, 'All sellers'),
+                        opt('unset', STATE.brollSellerFilter, '— No seller —') ]
+    .concat(sellerList.map(function(n) { return opt(n, STATE.brollSellerFilter, n); })).join('');
+  var productList = (STATE.products || []).slice().sort();
+  var productOptions = [ opt('all', STATE.brollProductFilter, 'All products'),
+                         opt('unset', STATE.brollProductFilter, '— No product —') ]
+    .concat(productList.map(function(n) { return opt(n, STATE.brollProductFilter, n); })).join('');
+  var taggedOptions = ['all', 'tagged', 'untagged'].map(function(v) {
+    var lbl = v === 'all' ? 'All' : (v === 'tagged' ? 'Tagged only' : 'Untagged only');
+    return opt(v, STATE.brollTaggedFilter, lbl);
+  }).join('');
+
+  // Sync summary line (empty until you've hit "Sync now" this session).
+  var syncSummary = '';
+  if (STATE.brollLastSyncStats) {
+    var s = STATE.brollLastSyncStats;
+    syncSummary = 'Synced ' + s.scanned + ' clip(s) · ' + s.added + ' new, ' + s.updated + ' updated, ' + s.archived + ' archived';
+  }
+
+  var topBar =
+    '<div class="clips-topbar">' +
+      '<div class="clips-topbar-row">' +
+        '<input class="form-input clips-search" placeholder="Search clips, folders, tags…" ' +
+          'value="' + escapeHtml(STATE.brollSearch || '') + '" ' +
+          'oninput="App.setBrollFilter(\'search\', this.value)">' +
+        '<select class="form-select" onchange="App.setBrollFilter(\'type\', this.value)">' + typeOptions + '</select>' +
+        '<select class="form-select" onchange="App.setBrollFilter(\'category\', this.value)">' + catOptions + '</select>' +
+        '<select class="form-select" onchange="App.setBrollFilter(\'seller\', this.value)">' + sellerOptions + '</select>' +
+        '<select class="form-select" onchange="App.setBrollFilter(\'product\', this.value)">' + productOptions + '</select>' +
+        '<select class="form-select" onchange="App.setBrollFilter(\'tagged\', this.value)">' + taggedOptions + '</select>' +
+        '<button class="save-btn clips-sync-btn" ' + (STATE.brollSyncBusy ? 'disabled' : '') + ' ' +
+          'onclick="App.syncBrollNow()" title="Pull the latest clips from Google Drive">' +
+          (STATE.brollSyncBusy ? '⏳ Syncing…' : '↻ Sync now') +
+        '</button>' +
+      '</div>' +
+      '<div class="clips-topbar-meta">' +
+        '<span>' + visible.length + ' of ' + all.length + ' clip(s)' +
+          (untagged > 0 ? ' · <b>' + untagged + ' untagged</b>' : '') +
+        '</span>' +
+        (syncSummary ? '<span class="clips-sync-summary">' + escapeHtml(syncSummary) + '</span>' : '') +
+        '<label class="clips-archived-toggle"><input type="checkbox"' + (STATE.brollShowArchived ? ' checked' : '') +
+          ' onchange="App.setBrollFilter(\'archived\', this.checked)"> Show archived</label>' +
+      '</div>' +
+    '</div>';
+
+  // Bulk-action toolbar (only visible when clips are shift-selected).
+  var bulkIds = Object.keys(STATE.brollBulkSelection || {}).filter(function(k) { return STATE.brollBulkSelection[k]; });
+  var bulkBar = '';
+  if (bulkIds.length > 0) {
+    var bulkTypeOpts = ['<option value="">— Set type… —</option>'].concat(
+      BROLL_TYPES.map(function(t) { return '<option value="' + t.key + '">' + escapeHtml(t.label) + '</option>'; })).join('');
+    var bulkCatOpts = ['<option value="">— Set category… —</option>'].concat(
+      brollCategoryOptions().map(function(n) { return '<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + '</option>'; })).join('');
+    var bulkSellerOpts = ['<option value="">— Set seller… —</option>'].concat(
+      sellerList.map(function(n) { return '<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + '</option>'; })).join('');
+    bulkBar =
+      '<div class="clips-bulkbar">' +
+        '<b>' + bulkIds.length + ' selected</b>' +
+        '<select class="form-select" onchange="App.bulkSetBrollField(\'type\', this.value); this.selectedIndex=0;">' + bulkTypeOpts + '</select>' +
+        '<select class="form-select" onchange="App.bulkSetBrollField(\'category\', this.value); this.selectedIndex=0;">' + bulkCatOpts + '</select>' +
+        '<select class="form-select" onchange="App.bulkSetBrollField(\'seller\', this.value); this.selectedIndex=0;">' + bulkSellerOpts + '</select>' +
+        '<button class="edit-btn" onclick="App.clearBrollBulkSelection()">Clear selection</button>' +
+      '</div>';
+  }
+
+  // Grid.
+  var gridHtml;
+  if (all.length === 0) {
+    gridHtml = '<div class="clips-empty">' +
+      '<div class="clips-empty-icon">🎬</div>' +
+      '<div class="clips-empty-title">No clips synced yet</div>' +
+      '<div class="clips-empty-body">Set your Drive folders in <a href="#" onclick="App.setTab(\'config\'); return false;">Config → Clip Library</a> and hit ↻ Sync now above to index every video in those folders.</div>' +
+    '</div>';
+  } else if (visible.length === 0) {
+    gridHtml = '<div class="clips-empty">' +
+      '<div class="clips-empty-icon">🔍</div>' +
+      '<div class="clips-empty-title">No clips match your filters</div>' +
+      '<div class="clips-empty-body">Try clearing the search or a filter above.</div>' +
+    '</div>';
+  } else {
+    gridHtml = '<div class="clips-grid">' + visible.map(renderClipCard).join('') + '</div>';
+  }
+
+  // Tag panel (sticky sidebar). Empty state when nothing selected.
+  var panelHtml;
+  var selected = STATE.brollSelectedId ? (STATE.broll || []).filter(function(c) { return c.id === STATE.brollSelectedId; })[0] : null;
+  if (selected) {
+    panelHtml = renderClipTagPanel(selected, visible);
+  } else {
+    panelHtml = '<div class="clips-panel-empty">' +
+      '<div class="clips-panel-empty-icon">🎞️</div>' +
+      '<div>Click a clip to preview and tag it.</div>' +
+      '<div class="clips-panel-empty-hint">Shift-click to bulk-select multiple.<br>Once open, use <kbd>J</kbd>/<kbd>K</kbd> to move between clips and <kbd>1</kbd>–<kbd>5</kbd> to set type.</div>' +
+    '</div>';
+  }
+
+  return topBar + bulkBar +
+    '<div class="clips-body">' +
+      '<div class="clips-grid-wrap">' + gridHtml + '</div>' +
+      '<div class="clips-panel">' + panelHtml + '</div>' +
+    '</div>';
+}
+
+// One card in the grid. Compact — thumbnail + name + up to 3 tag pills.
+function renderClipCard(c) {
+  var selected = STATE.brollSelectedId === c.id;
+  var bulk = !!(STATE.brollBulkSelection || {})[c.id];
+  var pills = [];
+  if (c.type)     pills.push('<span class="clip-pill pill-type">' + escapeHtml(brollTypeLabel(c.type)) + '</span>');
+  if (c.category) pills.push('<span class="clip-pill pill-cat">' + escapeHtml(c.category) + '</span>');
+  if (c.seller)   pills.push('<span class="clip-pill pill-seller">' + escapeHtml(c.seller) + '</span>');
+  if (c.product)  pills.push('<span class="clip-pill pill-product">' + escapeHtml(c.product) + '</span>');
+  var thumb = c.thumbnailUrl
+    ? '<img class="clip-thumb-img" src="' + escapeHtml(c.thumbnailUrl) + '" referrerpolicy="no-referrer" loading="lazy" onerror="this.style.display=\'none\'; this.parentNode.classList.add(\'no-thumb\');">'
+    : '';
+  var untaggedFlag = (!c.type && !c.category && !c.seller && !c.product && !(c.tags && c.tags.length))
+    ? '<span class="clip-untagged-dot" title="Untagged"></span>' : '';
+  return '<div class="clip-card' + (selected ? ' clip-card-selected' : '') + (bulk ? ' clip-card-bulk' : '') +
+    (c.archived ? ' clip-card-archived' : '') + '" ' +
+    'onclick="App.onClipCardClick(event, \'' + escapeAttr(c.id) + '\')" ' +
+    'title="' + escapeHtml((c.folderPath || '') + ' / ' + (c.name || '')) + '">' +
+    '<div class="clip-thumb">' + thumb + untaggedFlag + '</div>' +
+    '<div class="clip-card-name">' + escapeHtml(c.name || '(untitled)') + '</div>' +
+    (pills.length ? '<div class="clip-card-pills">' + pills.join('') + '</div>' : '') +
+    '</div>';
+}
+
+// escapeAttr: same-quote safety for onclick payloads that carry file IDs. Drive
+// IDs are [A-Za-z0-9_-]+ so this mostly no-ops, but a defensive escape keeps
+// the pattern robust if IDs ever contain a stray quote.
+function escapeAttr(s) { return String(s == null ? '' : s).replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+// The right-hand tag panel with preview + editable fields.
+function renderClipTagPanel(c, visibleList) {
+  var idx = -1;
+  for (var i = 0; i < visibleList.length; i++) if (visibleList[i].id === c.id) { idx = i; break; }
+  var prevId = idx > 0 ? visibleList[idx - 1].id : null;
+  var nextId = idx >= 0 && idx < visibleList.length - 1 ? visibleList[idx + 1].id : null;
+
+  var embed = videoEmbedInfo(c.driveUrl);
+  var playerHtml;
+  if (embed && embed.kind === 'iframe') {
+    playerHtml = '<div class="clip-preview-frame"><iframe src="' + escapeHtml(embed.src) + '" allow="autoplay; fullscreen" allowfullscreen></iframe></div>';
+  } else if (embed && embed.kind === 'video') {
+    playerHtml = '<div class="clip-preview-frame"><video src="' + escapeHtml(embed.src) + '" controls playsinline></video></div>';
+  } else {
+    playerHtml = '<div class="clip-preview-empty">Preview unavailable — <a href="' + escapeHtml(c.driveUrl) + '" target="_blank" rel="noopener">open in Drive ↗</a></div>';
+  }
+
+  // Type buttons (segmented; shows the shortcut number).
+  var typeButtons = BROLL_TYPES.map(function(t) {
+    var active = c.type === t.key;
+    return '<button class="clip-type-btn' + (active ? ' active' : '') + '" ' +
+      'onclick="App.setBrollField(\'' + escapeAttr(c.id) + '\', \'type\', \'' + t.key + '\')" ' +
+      'title="Shortcut: ' + t.shortcut + '"><span class="clip-type-sc">' + t.shortcut + '</span>' + escapeHtml(t.label) + '</button>';
+  }).join('');
+
+  // Category dropdown.
+  var catOpts = '<option value="">— No category —</option>' +
+    brollCategoryOptions().map(function(n) {
+      return '<option value="' + escapeHtml(n) + '"' + (c.category === n ? ' selected' : '') + '>' + escapeHtml(n) + '</option>';
+    }).join('');
+
+  // Seller: combobox — datalist auto-completes existing sellers, but any new
+  // value is accepted and auto-added to STATE.sellers.
+  var sellerListId = 'clip-sellers-datalist';
+  var productListId = 'clip-products-datalist';
+
+  var tagsHtml = (c.tags || []).map(function(t, i) {
+    return '<span class="clip-tag-chip">' + escapeHtml(t) +
+      '<button class="clip-tag-remove" onclick="App.removeBrollTag(\'' + escapeAttr(c.id) + '\', ' + i + ')" title="Remove">×</button></span>';
+  }).join('');
+
+  var navBar =
+    '<div class="clip-panel-nav">' +
+      '<button class="edit-btn" ' + (prevId ? '' : 'disabled') +
+        (prevId ? ' onclick="App.selectBrollClip(\'' + escapeAttr(prevId) + '\')"' : '') + '>← K</button>' +
+      '<span class="clip-panel-pos">' + (idx + 1) + ' / ' + visibleList.length + '</span>' +
+      '<button class="edit-btn" ' + (nextId ? '' : 'disabled') +
+        (nextId ? ' onclick="App.selectBrollClip(\'' + escapeAttr(nextId) + '\')"' : '') + '>J →</button>' +
+      '<button class="edit-btn" onclick="App.selectBrollClip(null)" title="Close panel">Close ✕</button>' +
+    '</div>';
+
+  var meta =
+    '<div class="clip-panel-meta">' +
+      '<div class="clip-panel-name">' + escapeHtml(c.name || '(untitled)') + '</div>' +
+      '<div class="clip-panel-folder">' + escapeHtml(c.folderPath || '') + '</div>' +
+      '<div class="clip-panel-links">' +
+        '<a class="edit-btn" href="' + escapeHtml(c.driveUrl) + '" target="_blank" rel="noopener">Open in Drive ↗</a>' +
+      '</div>' +
+    '</div>';
+
+  return navBar +
+    '<div class="clip-panel-body">' +
+      playerHtml +
+      meta +
+      '<datalist id="' + sellerListId + '">' +
+        (STATE.sellers || []).map(function(n) { return '<option value="' + escapeHtml(n) + '"></option>'; }).join('') +
+      '</datalist>' +
+      '<datalist id="' + productListId + '">' +
+        (STATE.products || []).map(function(n) { return '<option value="' + escapeHtml(n) + '"></option>'; }).join('') +
+      '</datalist>' +
+      '<div class="clip-field">' +
+        '<div class="clip-field-label">Type <kbd>1-5</kbd></div>' +
+        '<div class="clip-type-row">' + typeButtons + '</div>' +
+      '</div>' +
+      '<div class="clip-field">' +
+        '<div class="clip-field-label">Category <kbd>C</kbd></div>' +
+        '<select id="clip-field-category" class="form-select" onchange="App.setBrollField(\'' + escapeAttr(c.id) + '\', \'category\', this.value)">' + catOpts + '</select>' +
+      '</div>' +
+      '<div class="clip-field">' +
+        '<div class="clip-field-label">Seller <kbd>S</kbd> · type or pick</div>' +
+        '<input id="clip-field-seller" class="form-input" list="' + sellerListId + '" ' +
+          'value="' + escapeHtml(c.seller || '') + '" ' +
+          'onchange="App.setBrollField(\'' + escapeAttr(c.id) + '\', \'seller\', this.value)" ' +
+          'placeholder="e.g. RStreetwear">' +
+      '</div>' +
+      '<div class="clip-field">' +
+        '<div class="clip-field-label">Product <kbd>P</kbd> · type or pick</div>' +
+        '<input id="clip-field-product" class="form-input" list="' + productListId + '" ' +
+          'value="' + escapeHtml(c.product || '') + '" ' +
+          'onchange="App.setBrollField(\'' + escapeAttr(c.id) + '\', \'product\', this.value)" ' +
+          'placeholder="e.g. Jordan 4 Bred">' +
+      '</div>' +
+      '<div class="clip-field">' +
+        '<div class="clip-field-label">Freeform tags <kbd>T</kbd> · press Enter to add</div>' +
+        '<div class="clip-tag-chips">' + tagsHtml + '</div>' +
+        '<input id="clip-field-tag-add" class="form-input" placeholder="mood, motion, location…" ' +
+          'onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addBrollTag(\'' + escapeAttr(c.id) + '\', this.value); this.value=\'\';}">' +
+      '</div>' +
+      '<div class="clip-field">' +
+        '<div class="clip-field-label">Notes</div>' +
+        '<textarea class="form-input" rows="2" ' +
+          'onchange="App.setBrollField(\'' + escapeAttr(c.id) + '\', \'notes\', this.value)" ' +
+          'placeholder="Anything worth remembering (used in ad X, seller was on-set, etc.)">' + escapeHtml(c.notes || '') + '</textarea>' +
+      '</div>' +
+      (c.taggedBy ? '<div class="clip-tagged-by">Last tagged by ' + escapeHtml(c.taggedBy) + '</div>' : '') +
+    '</div>';
+}
+
 function renderConfigView() {
   var counts = {};
   EDITORS.forEach(function(e) { counts[e] = STATE.assets.filter(function(a) { return a.editor === e; }).length; });
@@ -11682,6 +12210,8 @@ function renderConfigView() {
         '<button class="save-btn" style="padding:8px 14px;" onclick="App.syncAllAssetCategoriesToCampaigns()">\u{1F3F7}\ufe0f Sync all videos to their campaign category</button>' +
       '</div>' +
     '</div>' +
+
+    renderClipLibraryConfigBlock() +
 
     '<div class="section-title">Schema Overview</div>' +
     '<div class="auto-card">' +
@@ -13106,6 +13636,7 @@ function render() {
   else if (STATE.tab === 'automations') body = renderAutomationsView();
   else if (STATE.tab === 'reporting') body = renderReportingView();
   else if (STATE.tab === 'content') body = renderContentView();
+  else if (STATE.tab === 'clips') body = renderClipsView();
   else body = renderConfigView();
   document.getElementById('app').innerHTML = renderTopbar() + '<div class="main">' + body + '</div>';
   // Context menu layer \u2014 empty if nothing is open; a positioned popup if ContextMenuState is set
@@ -13215,6 +13746,275 @@ function restoreScrollPositions(snap) {
 // ===================== EVENTS =====================
 var App = {
   setTab: function(t) { STATE.tab = t; Presence.update(); render(); },
+
+  // ===== Clips (b-roll library) =====
+  setBrollFilter: function(kind, value) {
+    switch (kind) {
+      case 'search':   STATE.brollSearch = value || ''; break;
+      case 'type':     STATE.brollTypeFilter = value; break;
+      case 'category': STATE.brollCategoryFilter = value; break;
+      case 'seller':   STATE.brollSellerFilter = value; break;
+      case 'product':  STATE.brollProductFilter = value; break;
+      case 'tagged':   STATE.brollTaggedFilter = value; break;
+      case 'archived': STATE.brollShowArchived = !!value; break;
+    }
+    saveState();
+    render();
+  },
+  selectBrollClip: function(id) {
+    STATE.brollSelectedId = id || null;
+    saveState();
+    render();
+  },
+  onClipCardClick: function(evt, id) {
+    if (evt && evt.shiftKey) {
+      if (!STATE.brollBulkSelection) STATE.brollBulkSelection = {};
+      if (STATE.brollBulkSelection[id]) delete STATE.brollBulkSelection[id];
+      else STATE.brollBulkSelection[id] = true;
+      saveState();
+      render();
+      return;
+    }
+    App.selectBrollClip(id);
+  },
+  clearBrollBulkSelection: function() {
+    STATE.brollBulkSelection = {};
+    saveState();
+    render();
+  },
+  // Write a single field on a single clip. Also learns new seller/product
+  // values into the growing dropdown lists (STATE.sellers / STATE.products).
+  setBrollField: function(id, field, value) {
+    if (!id || !field) return;
+    var val = (typeof value === 'string') ? value.trim() : value;
+    if (val === '') val = null;
+
+    // Learn new seller/product values.
+    if (field === 'seller' && val) {
+      if (!Array.isArray(STATE.sellers)) STATE.sellers = [];
+      var lower = String(val).toLowerCase();
+      var known = STATE.sellers.some(function(s) { return String(s).toLowerCase() === lower; });
+      if (!known) STATE.sellers.push(val);
+    }
+    if (field === 'product' && val) {
+      if (!Array.isArray(STATE.products)) STATE.products = [];
+      var lowerP = String(val).toLowerCase();
+      var knownP = STATE.products.some(function(p) { return String(p).toLowerCase() === lowerP; });
+      if (!knownP) STATE.products.push(val);
+    }
+
+    // Optimistic local update so the UI reflects the change immediately.
+    var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
+    if (clip) {
+      clip[field] = val;
+      clip.taggedBy = (Auth && Auth.user && Auth.user.email) || clip.taggedBy;
+      clip.taggedAt = Date.now();
+    }
+    saveState();
+    render();
+
+    // Persist to Firestore. Snapshot listener will confirm (no-op re-render).
+    var patch = {};
+    patch[field] = val;
+    Fb.updateBrollTag(id, patch).catch(function(e) {
+      console.warn('[broll] tag update failed:', e);
+      if (typeof toast === 'function') toast('Tag save failed — check console.', 'error');
+    });
+  },
+  addBrollTag: function(id, value) {
+    var v = String(value || '').trim();
+    if (!v) return;
+    var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
+    if (!clip) return;
+    var tags = Array.isArray(clip.tags) ? clip.tags.slice() : [];
+    // De-dupe case-insensitive; keep first-seen casing.
+    var lower = v.toLowerCase();
+    if (tags.some(function(t) { return String(t).toLowerCase() === lower; })) return;
+    tags.push(v);
+    clip.tags = tags;
+    saveState();
+    render();
+    Fb.updateBrollTag(id, { tags: tags }).catch(function(e) {
+      console.warn('[broll] tag update failed:', e);
+      if (typeof toast === 'function') toast('Tag save failed — check console.', 'error');
+    });
+  },
+  removeBrollTag: function(id, index) {
+    var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
+    if (!clip || !Array.isArray(clip.tags)) return;
+    var tags = clip.tags.slice();
+    tags.splice(index, 1);
+    clip.tags = tags;
+    saveState();
+    render();
+    Fb.updateBrollTag(id, { tags: tags }).catch(function(e) {
+      console.warn('[broll] tag update failed:', e);
+    });
+  },
+  bulkSetBrollField: function(field, value) {
+    if (!field || value === '' || value == null) return;
+    var ids = Object.keys(STATE.brollBulkSelection || {}).filter(function(k) { return STATE.brollBulkSelection[k]; });
+    if (!ids.length) return;
+
+    // Learn seller/product values into growing lists (same rule as single-clip).
+    if (field === 'seller' && value) {
+      if (!Array.isArray(STATE.sellers)) STATE.sellers = [];
+      var lower = String(value).toLowerCase();
+      if (!STATE.sellers.some(function(s) { return String(s).toLowerCase() === lower; })) STATE.sellers.push(value);
+    }
+
+    // Optimistic local updates.
+    ids.forEach(function(id) {
+      var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
+      if (clip) {
+        clip[field] = value;
+        clip.taggedBy = (Auth && Auth.user && Auth.user.email) || clip.taggedBy;
+        clip.taggedAt = Date.now();
+      }
+    });
+    saveState();
+    render();
+
+    var patch = {};
+    patch[field] = value;
+    Fb.updateBrollTagBulk(ids, patch).then(function() {
+      if (typeof toast === 'function') toast('Applied to ' + ids.length + ' clip(s)', 'ok');
+    }).catch(function(e) {
+      console.warn('[broll] bulk update failed:', e);
+      if (typeof toast === 'function') toast('Bulk update failed — see console.', 'error');
+    });
+  },
+  syncBrollNow: function() {
+    if (STATE.brollSyncBusy) return;
+    if (!firebase || !firebase.functions) {
+      if (typeof toast === 'function') toast('Cloud Functions unavailable.', 'error');
+      return;
+    }
+    STATE.brollSyncBusy = true;
+    saveState();
+    render();
+    var callable = firebase.functions().httpsCallable('syncDriveClips');
+    callable({}).then(function(res) {
+      var stats = (res && res.data && res.data.stats) || null;
+      STATE.brollLastSyncStats = stats;
+      if (typeof toast === 'function' && stats) {
+        toast('Sync complete — ' + stats.added + ' new · ' + stats.updated + ' updated · ' + stats.archived + ' archived', 'ok');
+      }
+    }).catch(function(e) {
+      console.warn('[broll] sync failed:', e);
+      var msg = (e && e.message) ? e.message : 'Sync failed';
+      if (typeof toast === 'function') toast('Drive sync failed: ' + msg, 'error');
+    }).then(function() {
+      STATE.brollSyncBusy = false;
+      saveState();
+      render();
+    });
+  },
+  // Config UI hooks for the folder-IDs / sellers / products lists.
+  // Bulk-add: accepts pasted Drive URLs (any format) OR raw folder IDs, one per
+  // line or space-separated. Extracts the folder ID from each and adds them all
+  // in one Firestore write. arrayUnion silently de-dupes against existing IDs.
+  addBrollFolderId: function() {
+    var input = document.getElementById('clip-folder-add-input');
+    if (!input) return;
+    var text = String(input.value || '').trim();
+    if (!text) return;
+    // Split on any whitespace/newlines/commas — accept whatever format the user pastes.
+    var tokens = text.split(/[\s,]+/).filter(Boolean);
+    var extracted = [];
+    var rejected = [];
+    tokens.forEach(function(t) {
+      // Prefer the `/folders/<id>` pattern in Drive URLs.
+      var m = t.match(/\/folders\/([A-Za-z0-9_-]+)/);
+      if (m) { extracted.push(m[1]); return; }
+      // Also accept a bare folder ID (Drive IDs are typically 25+ chars, [A-Za-z0-9_-]).
+      if (/^[A-Za-z0-9_-]{20,}$/.test(t)) { extracted.push(t); return; }
+      rejected.push(t);
+    });
+    // De-dupe within the paste itself (arrayUnion also de-dupes vs. Firestore).
+    var seen = {};
+    var ids = extracted.filter(function(id) { if (seen[id]) return false; seen[id] = true; return true; });
+    if (!ids.length) {
+      if (typeof toast === 'function') toast('No Drive folder links or IDs found in that paste.', 'error');
+      return;
+    }
+    fbDb.doc(Fb.BROLL_CONFIG_DOC).set({
+      folderIds: firebase.firestore.FieldValue.arrayUnion.apply(null, ids),
+    }, { merge: true }).then(function() {
+      input.value = '';
+      var msg = 'Added ' + ids.length + ' folder(s). Hit Sync now to index them.';
+      if (rejected.length) msg += ' Skipped ' + rejected.length + ' unrecognised token(s).';
+      if (typeof toast === 'function') toast(msg, 'ok');
+      App._loadBrollConfig();
+    }).catch(function(e) {
+      console.warn('[broll] add folder failed:', e);
+      if (typeof toast === 'function') toast('Save failed — check console.', 'error');
+    });
+  },
+  removeBrollFolderId: function(folderId) {
+    if (!folderId) return;
+    fbDb.doc(Fb.BROLL_CONFIG_DOC).set({
+      folderIds: firebase.firestore.FieldValue.arrayRemove(folderId),
+    }, { merge: true }).then(function() {
+      if (typeof toast === 'function') toast('Folder removed.', 'ok');
+      App._loadBrollConfig();
+    });
+  },
+  _loadBrollConfig: function() {
+    if (!fbDb) return;
+    fbDb.doc(Fb.BROLL_CONFIG_DOC).get().then(function(snap) {
+      window._brollConfig = snap.exists ? snap.data() : { folderIds: [] };
+      if (STATE.tab === 'config') render();
+    });
+  },
+  addSellerFromConfig: function() {
+    var input = document.getElementById('clip-seller-add-input');
+    if (!input) return;
+    var v = String(input.value || '').trim();
+    if (!v) return;
+    if (!Array.isArray(STATE.sellers)) STATE.sellers = [];
+    var lower = v.toLowerCase();
+    if (STATE.sellers.some(function(s) { return String(s).toLowerCase() === lower; })) {
+      if (typeof toast === 'function') toast('Seller already in list.', 'error');
+      return;
+    }
+    STATE.sellers.push(v);
+    saveState();
+    Fb.uploadNow();
+    input.value = '';
+    render();
+  },
+  removeSeller: function(name) {
+    if (!Array.isArray(STATE.sellers)) return;
+    STATE.sellers = STATE.sellers.filter(function(s) { return s !== name; });
+    saveState();
+    Fb.uploadNow();
+    render();
+  },
+  addProductFromConfig: function() {
+    var input = document.getElementById('clip-product-add-input');
+    if (!input) return;
+    var v = String(input.value || '').trim();
+    if (!v) return;
+    if (!Array.isArray(STATE.products)) STATE.products = [];
+    var lower = v.toLowerCase();
+    if (STATE.products.some(function(p) { return String(p).toLowerCase() === lower; })) {
+      if (typeof toast === 'function') toast('Product already in list.', 'error');
+      return;
+    }
+    STATE.products.push(v);
+    saveState();
+    Fb.uploadNow();
+    input.value = '';
+    render();
+  },
+  removeProduct: function(name) {
+    if (!Array.isArray(STATE.products)) return;
+    STATE.products = STATE.products.filter(function(p) { return p !== name; });
+    saveState();
+    Fb.uploadNow();
+    render();
+  },
 
   // ===== Editor Stats (Strava-for-editors) =====
   setEditorStatsSelected: function(name) {
@@ -16921,6 +17721,49 @@ document.addEventListener('keydown', function(e) {
       input.select();
     }
   }
+  // Clips tab keyboard shortcuts. Only fire when the Clips tab is active AND no
+  // input/textarea/select is focused (so typing in the search box or tag chip input
+  // still works normally). J/K walks the visible list; 1–5 sets type on the selected
+  // clip; T/C/S/P focus the corresponding field.
+  if (STATE.tab === 'clips') {
+    var ae = document.activeElement;
+    var typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable);
+    if (typing) return;
+    var visible = brollSortedClips();
+    var curIdx = -1;
+    if (STATE.brollSelectedId) {
+      for (var vi = 0; vi < visible.length; vi++) if (visible[vi].id === STATE.brollSelectedId) { curIdx = vi; break; }
+    }
+    if (e.key === 'j' || e.key === 'J') {
+      var next = curIdx < 0 ? (visible[0] && visible[0].id) : (visible[curIdx + 1] && visible[curIdx + 1].id);
+      if (next) { App.selectBrollClip(next); e.preventDefault(); }
+      return;
+    }
+    if (e.key === 'k' || e.key === 'K') {
+      var prev = curIdx > 0 ? visible[curIdx - 1].id : null;
+      if (prev) { App.selectBrollClip(prev); e.preventDefault(); }
+      return;
+    }
+    if (STATE.brollSelectedId) {
+      var scMap = { '1': BROLL_TYPES[0].key, '2': BROLL_TYPES[1].key, '3': BROLL_TYPES[2].key, '4': BROLL_TYPES[3].key, '5': BROLL_TYPES[4].key };
+      if (scMap[e.key]) {
+        App.setBrollField(STATE.brollSelectedId, 'type', scMap[e.key]);
+        e.preventDefault();
+        return;
+      }
+      var focusMap = { t: 'clip-field-tag-add', T: 'clip-field-tag-add',
+                       c: 'clip-field-category', C: 'clip-field-category',
+                       s: 'clip-field-seller',   S: 'clip-field-seller',
+                       p: 'clip-field-product',  P: 'clip-field-product' };
+      var focusId = focusMap[e.key];
+      if (focusId) {
+        var el = document.getElementById(focusId);
+        if (el) { el.focus(); if (el.select) try { el.select(); } catch (_) {} }
+        e.preventDefault();
+        return;
+      }
+    }
+  }
 });
 // Dismiss the right-click menu on any click outside it. Listener is in the capture phase
 // so it runs before the menu-item's onclick (which uses bubble phase) \u2014 but we check the
@@ -17280,6 +18123,13 @@ bootApp = function() {
 
   // Subscribe to the assets subcollection (separate from the main state doc).
   Fb.subscribeAssets();
+
+  // Subscribe to the broll subcollection (Clips tab). Only fetches for roles that
+  // can see the tab (admin/editor) — saves quota + listener count for viewers/PMs.
+  var _role = (Auth.user && Auth.user.role) || 'viewer';
+  if (_role === 'admin' || _role === 'editor') {
+    Fb.subscribeBroll();
+  }
 
   // Subscribe to the canonical state doc. The first snapshot drives initial load.
   Fb.subscribe(function(hadData) {
