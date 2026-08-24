@@ -11539,8 +11539,10 @@ function renderClipLibraryConfigBlock() {
   }
   var folderIds = (cfg && Array.isArray(cfg.folderIds)) ? cfg.folderIds : [];
   var folderRows = folderIds.length
-    ? folderIds.map(function(id) {
+    ? '<div class="clip-cfg-count">' + folderIds.length + ' folder(s) indexed</div>' +
+      folderIds.map(function(id, i) {
         return '<div class="clip-cfg-row">' +
+          '<span class="clip-cfg-num">' + (i + 1) + '</span>' +
           '<code class="clip-cfg-id">' + escapeHtml(id) + '</code>' +
           '<a class="edit-btn" href="https://drive.google.com/drive/folders/' + escapeHtml(id) + '" target="_blank" rel="noopener">Open ↗</a>' +
           '<button class="edit-btn del-btn" onclick="App.removeBrollFolderId(\'' + escapeAttr(id) + '\')" title="Stop indexing this folder">✕</button>' +

@@ -1858,7 +1858,9 @@
 
   /* Clip Library config block */
   .clip-cfg-rows { display: flex; flex-direction: column; gap: 4px; }
+  .clip-cfg-count { font-size: 11px; color: var(--text2); font-weight: 600; margin-bottom: 6px; padding: 4px 8px; }
   .clip-cfg-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--bg3); border-radius: 5px; }
+  .clip-cfg-num { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--text3); min-width: 24px; text-align: right; font-variant-numeric: tabular-nums; }
   .clip-cfg-id { flex: 1; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .clip-cfg-lastsync { font-size: 11px; color: var(--text3); margin-top: 8px; padding: 6px 8px; background: var(--bg3); border-radius: 5px; }
 
