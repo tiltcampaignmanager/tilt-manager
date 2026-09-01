@@ -1070,6 +1070,10 @@ var Fb = {
       console.warn('[Fb] broll listener error:', err);
     });
   },
+  unsubscribeBroll: function() {
+    if (Fb._brollUnsub) { try { Fb._brollUnsub(); } catch (_) {} Fb._brollUnsub = null; }
+    STATE.broll = [];
+  },
 
   // Write per-clip tag updates. Bypasses uploadNow/buildSnapshot because broll
   // docs live in a subcollection, not in the main state doc. Merges into the
@@ -1170,6 +1174,18 @@ var Fb = {
         Fb.subscribeAllUsers();
       } else if (Auth.user.role !== 'admin' && prevRole === 'admin') {
         Fb.unsubscribeAllUsers();
+      }
+      // Same dynamic attach for the broll (Clips) listener: admin + editor
+      // can see the tab, so subscribe when the role enters that set and
+      // release the listener when it leaves. Handles the boot-time race where
+      // Auth.user.role is still undefined when bootAfterAuth's synchronous
+      // subscribeBroll gate at ~line 18180 first evaluates.
+      var canSeeClips = Auth.user.role === 'admin' || Auth.user.role === 'editor';
+      var couldSeeClips = prevRole === 'admin' || prevRole === 'editor';
+      if (canSeeClips && !couldSeeClips) {
+        Fb.subscribeBroll();
+      } else if (!canSeeClips && couldSeeClips) {
+        Fb.unsubscribeBroll();
       }
       // If the role actually changed and the app is booted, re-render so tab
       // visibility / role chip update immediately.
