@@ -517,6 +517,8 @@ var Fb = {
         brollTaggedFilter: true,
         brollShowArchived: true,
         brollShowDismissed: true,
+        brollLeftW: true,
+        brollRightW: true,
         brollSelectedId: true,
         brollBulkSelection: true,
         brollLastSyncStats: true,
@@ -1881,6 +1883,8 @@ var STATE = {
   brollTaggedFilter: 'all',   // 'all' | 'tagged' | 'untagged'
   brollShowArchived: false,
   brollShowDismissed: false,   // true = also show clips the tagger marked unusable
+  brollLeftW: 260,             // width (px) of the left "Done" sidebar — user-draggable
+  brollRightW: 420,            // width (px) of the right tag panel — user-draggable
   brollSelectedId: null,       // clip currently open in the tag panel (null = grid only)
   brollBulkSelection: {},      // { <id>: true } — transient bulk-select state (shift-click)
   brollLastSyncStats: null,    // last { added, updated, archived } stashed after Sync-now
@@ -11861,6 +11865,14 @@ function brollCategoryOptions() {
 }
 
 // Predicate: does a clip match the current top-bar filters?
+// True iff every required tagging field is populated. The Tag 'em button gates
+// on this — a clip only qualifies to move into the "Done" sidebar once type,
+// category, seller, and product are all set. Free-form tags and notes are
+// optional and don't gate.
+function isBrollFullyTagged(c) {
+  return !!(c && c.type && c.category && c.seller && c.product);
+}
+
 function brollClipMatches(c) {
   if (c.archived && !STATE.brollShowArchived) return false;
   if (c.dismissed && !STATE.brollShowDismissed) return false;
@@ -12000,13 +12012,31 @@ function renderClipsView() {
       '</div>';
   }
 
-  // Grid.
+  // Partition visible clips into two piles:
+  //   activeList — in-progress or untagged, shown in the main center grid
+  //   doneList   — user hit "Tag 'em" and every required field is filled,
+  //                shown compactly in the LEFT sidebar so the tagger can
+  //                see their progress build up.
+  var doneList = [];
+  var activeList = [];
+  visible.forEach(function(c) {
+    if (c.taggedComplete && isBrollFullyTagged(c)) doneList.push(c);
+    else activeList.push(c);
+  });
+
   var gridHtml;
   if (all.length === 0) {
     gridHtml = '<div class="clips-empty">' +
       '<div class="clips-empty-icon">🎬</div>' +
       '<div class="clips-empty-title">No clips synced yet</div>' +
       '<div class="clips-empty-body">Set your Drive folders in <a href="#" onclick="App.setTab(\'config\'); return false;">Config → Clip Library</a> and hit ↻ Sync now above to index every video in those folders.</div>' +
+    '</div>';
+  } else if (activeList.length === 0 && visible.length > 0) {
+    // Everything visible is already tagged — nothing left in the working pile.
+    gridHtml = '<div class="clips-empty">' +
+      '<div class="clips-empty-icon">✅</div>' +
+      '<div class="clips-empty-title">All caught up</div>' +
+      '<div class="clips-empty-body">Every clip in this view is tagged. See the "Done" panel on the left, or clear a filter to pull more clips in.</div>' +
     '</div>';
   } else if (visible.length === 0) {
     gridHtml = '<div class="clips-empty">' +
@@ -12015,7 +12045,22 @@ function renderClipsView() {
       '<div class="clips-empty-body">Try clearing the search or a filter above.</div>' +
     '</div>';
   } else {
-    gridHtml = '<div class="clips-grid">' + visible.map(renderClipCard).join('') + '</div>';
+    gridHtml = '<div class="clips-grid">' + activeList.map(renderClipCard).join('') + '</div>';
+  }
+
+  // Left "Done" sidebar: medium grid of tagged clips. Cards are the same as
+  // the main grid so the FLIP animation slides one card to the other with no
+  // visual jump. Empty state coaches the user on how to fill it.
+  var doneSidebarHtml;
+  if (doneList.length === 0) {
+    doneSidebarHtml = '<div class="clips-done-header">Done <span class="clips-done-count">0</span></div>' +
+      '<div class="clips-done-empty">' +
+        '<div class="clips-done-empty-icon">📦</div>' +
+        '<div>Fully-tagged clips will pile up here after you hit <b>✓ Tag \'em</b> in the panel.</div>' +
+      '</div>';
+  } else {
+    doneSidebarHtml = '<div class="clips-done-header">Done <span class="clips-done-count">' + doneList.length + '</span></div>' +
+      '<div class="clips-done-grid">' + doneList.map(renderClipCard).join('') + '</div>';
   }
 
   // Tag panel (sticky sidebar). Empty state when nothing selected.
@@ -12031,9 +12076,18 @@ function renderClipsView() {
     '</div>';
   }
 
+  // Read persisted column widths so a resized layout survives re-renders and
+  // reloads. Widths get clamped in App.onBrollResize so we can trust them here.
+  var leftW = Math.max(160, Math.min(600, Number(STATE.brollLeftW) || 260));
+  var rightW = Math.max(280, Math.min(720, Number(STATE.brollRightW) || 420));
+  var bodyStyle = 'grid-template-columns: ' + leftW + 'px 6px 1fr 6px ' + rightW + 'px;';
+
   return topBar + bulkBar +
-    '<div class="clips-body">' +
+    '<div class="clips-body" style="' + bodyStyle + '">' +
+      '<div class="clips-done-wrap">' + doneSidebarHtml + '</div>' +
+      '<div class="clips-resize-handle" data-side="left" onmousedown="App.onBrollResizeStart(event, \'left\')" title="Drag to resize"></div>' +
       '<div class="clips-grid-wrap">' + gridHtml + '</div>' +
+      '<div class="clips-resize-handle" data-side="right" onmousedown="App.onBrollResizeStart(event, \'right\')" title="Drag to resize"></div>' +
       '<div class="clips-panel">' + panelHtml + '</div>' +
     '</div>';
 }
@@ -12053,7 +12107,9 @@ function renderClipCard(c) {
   var untaggedFlag = (!c.type && !c.category && !c.seller && !c.product && !(c.tags && c.tags.length))
     ? '<span class="clip-untagged-dot" title="Untagged"></span>' : '';
   return '<div class="clip-card' + (selected ? ' clip-card-selected' : '') + (bulk ? ' clip-card-bulk' : '') +
-    (c.archived ? ' clip-card-archived' : '') + (c.dismissed ? ' clip-card-dismissed' : '') + '" ' +
+    (c.archived ? ' clip-card-archived' : '') + (c.dismissed ? ' clip-card-dismissed' : '') +
+    (c.taggedComplete ? ' clip-card-done' : '') + '" ' +
+    'data-clip-id="' + escapeAttr(c.id) + '" ' +
     'onclick="App.onClipCardClick(event, \'' + escapeAttr(c.id) + '\')" ' +
     'title="' + escapeHtml((c.folderPath || '') + ' / ' + (c.name || '')) + '">' +
     '<div class="clip-thumb">' + thumb + untaggedFlag + '</div>' +
@@ -12172,12 +12228,32 @@ function renderClipTagPanel(c, visibleList) {
           'placeholder="Anything worth remembering (used in ad X, seller was on-set, etc.)">' + escapeHtml(c.notes || '') + '</textarea>' +
       '</div>' +
       (c.taggedBy ? '<div class="clip-tagged-by">Last tagged by ' + escapeHtml(c.taggedBy) + '</div>' : '') +
-      '<div class="clip-panel-actions">' +
-        (c.dismissed
-          ? '<button class="clip-restore-btn" onclick="App.setBrollDismissed(\'' + escapeAttr(c.id) + '\', false)">↺ Restore clip</button>' +
-            (c.dismissedBy ? '<span class="clip-dismissed-by">Dismissed by ' + escapeHtml(c.dismissedBy) + '</span>' : '')
-          : '<button class="clip-dismiss-btn" onclick="App.setBrollDismissed(\'' + escapeAttr(c.id) + '\', true)" title="Mark this clip as not usable for b-roll — hides it from the grid.">⊘ Dismiss (not usable)</button>') +
-      '</div>' +
+      (function() {
+        // Tag 'em button — commits the clip into the "Done" sidebar. Requires
+        // type + category + seller + product. If any are missing, the button
+        // reads out what's missing so the tagger knows what to fill.
+        var missing = [];
+        if (!c.type) missing.push('type');
+        if (!c.category) missing.push('category');
+        if (!c.seller) missing.push('seller');
+        if (!c.product) missing.push('product');
+        var tagemHtml;
+        if (c.taggedComplete) {
+          tagemHtml = '<button class="clip-untag-btn" onclick="App.setBrollTaggedComplete(\'' + escapeAttr(c.id) + '\', false)" title="Move this clip back to the working grid.">↶ Un-tag</button>';
+        } else if (missing.length) {
+          tagemHtml = '<button class="clip-tagem-btn clip-tagem-disabled" disabled title="Fill in every required field first">✓ Tag \'em</button>' +
+            '<span class="clip-tagem-missing">Missing: ' + missing.join(', ') + '</span>';
+        } else {
+          tagemHtml = '<button class="clip-tagem-btn" onclick="App.setBrollTaggedComplete(\'' + escapeAttr(c.id) + '\', true)" title="Mark tagging complete — the clip slides into the Done sidebar.">✓ Tag \'em</button>';
+        }
+        return '<div class="clip-panel-actions">' +
+          tagemHtml +
+          (c.dismissed
+            ? '<button class="clip-restore-btn" onclick="App.setBrollDismissed(\'' + escapeAttr(c.id) + '\', false)">↺ Restore clip</button>' +
+              (c.dismissedBy ? '<span class="clip-dismissed-by">Dismissed by ' + escapeHtml(c.dismissedBy) + '</span>' : '')
+            : '<button class="clip-dismiss-btn" onclick="App.setBrollDismissed(\'' + escapeAttr(c.id) + '\', true)" title="Mark this clip as not usable for b-roll — hides it from the grid.">⊘ Dismiss (not usable)</button>') +
+        '</div>';
+      })() +
     '</div>';
 }
 
@@ -13973,7 +14049,7 @@ function captureRenderSnapshot() {
     }
     // Capture scroll positions of known-scrollable containers. Add more selectors here
     // if other scroll-preserve candidates appear.
-    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap', '.grading-wrap', '.grading-scroll-videos', '.grading-scroll-scorecard', '.clips-grid-wrap', '.clips-panel'].forEach(function(sel) {
+    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap', '.grading-wrap', '.grading-scroll-videos', '.grading-scroll-scorecard', '.clips-grid-wrap', '.clips-panel', '.clips-done-wrap'].forEach(function(sel) {
       var el = document.querySelector(sel);
       if (el) snap.scrolls[sel] = { top: el.scrollTop, left: el.scrollLeft };
     });
@@ -14189,6 +14265,132 @@ var App = {
       console.warn('[broll] dismiss failed:', e);
       if (typeof toast === 'function') toast('Dismiss save failed — see console.', 'error');
     });
+  },
+  // Flip a clip between "in the working grid" and "in the Done sidebar" via a
+  // FLIP animation: measure the card's screen rect BEFORE state changes, flip
+  // the boolean and re-render (card now lives in its new slot), then reverse
+  // the delta on the new card with a transform, and animate that transform
+  // back to zero. Net effect: the card visually slides from center → sidebar.
+  setBrollTaggedComplete: function(id, complete) {
+    if (!id) return;
+    complete = !!complete;
+    var first = null;
+    try {
+      var oldCard = document.querySelector('.clip-card[data-clip-id="' + id + '"]');
+      if (oldCard) first = oldCard.getBoundingClientRect();
+    } catch (_) { /* selector may fail on invalid id chars — best-effort only */ }
+
+    var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
+    // Auto-advance to the next in-progress clip so a batch-tagging flow doesn't
+    // stall on the clip we just finalized. Only when we're marking done (not
+    // un-tagging) and the tagged clip is the currently-open one.
+    if (complete && clip && STATE.brollSelectedId === id) {
+      var vis = brollSortedClips();
+      var nextActive = null;
+      var seenSelf = false;
+      for (var i = 0; i < vis.length; i++) {
+        var v = vis[i];
+        if (v.id === id) { seenSelf = true; continue; }
+        // Prefer the next active clip AFTER the current one; if we haven't
+        // passed it yet keep looking, otherwise take the first active-post-self.
+        var isActive = !(v.taggedComplete && isBrollFullyTagged(v));
+        if (isActive && seenSelf) { nextActive = v.id; break; }
+      }
+      // Fallback: no active clip after this one — pick the first active in the
+      // list, or clear the selection if the working pile is empty.
+      if (!nextActive) {
+        for (var j = 0; j < vis.length; j++) {
+          var w = vis[j];
+          if (w.id === id) continue;
+          if (!(w.taggedComplete && isBrollFullyTagged(w))) { nextActive = w.id; break; }
+        }
+      }
+      STATE.brollSelectedId = nextActive; // may be null → panel shows empty state
+    }
+    if (clip) {
+      clip.taggedComplete = complete;
+      clip.taggedBy = (Auth && Auth.user && Auth.user.email) || clip.taggedBy;
+      clip.taggedAt = Date.now();
+    }
+    saveState();
+    render();
+
+    // "Last" position: measure the same card after re-render, animate delta.
+    try {
+      var newCard = document.querySelector('.clip-card[data-clip-id="' + id + '"]');
+      if (newCard && first) {
+        var last = newCard.getBoundingClientRect();
+        var dx = first.left - last.left;
+        var dy = first.top - last.top;
+        if (dx || dy) {
+          newCard.style.transformOrigin = 'top left';
+          newCard.style.transition = 'none';
+          newCard.style.transform = 'translate(' + dx + 'px, ' + dy + 'px) scale(' + (first.width / last.width) + ')';
+          // Force a reflow so the browser paints the "old" position before we
+          // start the animation — without this the transition never fires.
+          void newCard.offsetHeight;
+          newCard.style.transition = 'transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1)';
+          newCard.style.transform = 'translate(0, 0) scale(1)';
+          newCard.addEventListener('transitionend', function _end(e) {
+            if (e.propertyName !== 'transform') return;
+            newCard.style.transition = '';
+            newCard.style.transform = '';
+            newCard.style.transformOrigin = '';
+            newCard.removeEventListener('transitionend', _end);
+          });
+        }
+      }
+    } catch (_) { /* animation is best-effort — the state change already landed */ }
+
+    Fb.updateBrollTag(id, { taggedComplete: complete }).catch(function(e) {
+      console.warn('[broll] tag-complete save failed:', e);
+      if (typeof toast === 'function') toast('Tag \'em save failed — see console.', 'error');
+    });
+  },
+  // Column resize handles. Live update via CSS grid-template-columns on the
+  // .clips-body element (no re-render mid-drag — much smoother). Persist final
+  // widths to STATE so a refresh keeps the layout.
+  onBrollResizeStart: function(evt, side) {
+    if (!evt || !side) return;
+    var body = document.querySelector('.clips-body');
+    if (!body) return;
+    evt.preventDefault();
+    var startX = evt.clientX;
+    var startLeft = Math.max(160, Math.min(600, Number(STATE.brollLeftW) || 260));
+    var startRight = Math.max(280, Math.min(720, Number(STATE.brollRightW) || 420));
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    function apply(l, r) {
+      body.style.gridTemplateColumns = l + 'px 6px 1fr 6px ' + r + 'px';
+    }
+    function onMove(ev) {
+      var dx = ev.clientX - startX;
+      var l = startLeft, r = startRight;
+      if (side === 'left') {
+        l = Math.max(160, Math.min(600, startLeft + dx));
+      } else {
+        r = Math.max(280, Math.min(720, startRight - dx));
+      }
+      apply(l, r);
+    }
+    function onUp(ev) {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      // Read the current widths out of the live grid-template-columns so we
+      // persist exactly what the user let go of.
+      var dx = ev.clientX - startX;
+      if (side === 'left') {
+        STATE.brollLeftW = Math.max(160, Math.min(600, startLeft + dx));
+      } else {
+        STATE.brollRightW = Math.max(280, Math.min(720, startRight - dx));
+      }
+      saveState();
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   },
   bulkSetBrollDismissed: function(dismissed) {
     dismissed = !!dismissed;
