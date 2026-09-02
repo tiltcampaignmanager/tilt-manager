@@ -514,6 +514,7 @@ var Fb = {
         brollProductFilter: true,
         brollTaggedFilter: true,
         brollShowArchived: true,
+        brollShowDismissed: true,
         brollSelectedId: true,
         brollBulkSelection: true,
         brollLastSyncStats: true,
@@ -1109,6 +1110,41 @@ var Fb = {
       taggedAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
     // Firestore caps writes at 500 per batch — chunk to 400 to leave headroom.
+    var BATCH_MAX = 400;
+    var ids = clipIds.slice();
+    function flush(i) {
+      if (i >= ids.length) return Promise.resolve();
+      var batch = fbDb.batch();
+      ids.slice(i, i + BATCH_MAX).forEach(function(id) {
+        batch.set(fbDb.doc(Fb.BROLL_COLL + '/' + String(id)), patch, { merge: true });
+      });
+      return batch.commit().then(function() { return flush(i + BATCH_MAX); });
+    }
+    return flush(0);
+  },
+
+  // Mark a clip as unusable (dismiss) or unmark it (restore). Kept separate
+  // from updateBrollTag so a dismiss action doesn't clobber the taggedBy /
+  // taggedAt stamp of whoever actually tagged the clip.
+  setBrollDismissed: function(clipId, dismissed) {
+    if (!Auth.user) return Promise.reject(new Error('Not signed in'));
+    var patch = {
+      dismissed: !!dismissed,
+      dismissedBy: dismissed ? ((Auth.user && Auth.user.email) || null) : null,
+      dismissedAt: dismissed ? firebase.firestore.FieldValue.serverTimestamp() : null,
+    };
+    return fbDb.doc(Fb.BROLL_COLL + '/' + String(clipId)).set(patch, { merge: true });
+  },
+
+  // Bulk dismiss / restore. Same semantics, batched.
+  setBrollDismissedBulk: function(clipIds, dismissed) {
+    if (!Auth.user) return Promise.reject(new Error('Not signed in'));
+    if (!Array.isArray(clipIds) || !clipIds.length) return Promise.resolve();
+    var patch = {
+      dismissed: !!dismissed,
+      dismissedBy: dismissed ? ((Auth.user && Auth.user.email) || null) : null,
+      dismissedAt: dismissed ? firebase.firestore.FieldValue.serverTimestamp() : null,
+    };
     var BATCH_MAX = 400;
     var ids = clipIds.slice();
     function flush(i) {
@@ -1823,6 +1859,7 @@ var STATE = {
   brollProductFilter: 'all',
   brollTaggedFilter: 'all',   // 'all' | 'tagged' | 'untagged'
   brollShowArchived: false,
+  brollShowDismissed: false,   // true = also show clips the tagger marked unusable
   brollSelectedId: null,       // clip currently open in the tag panel (null = grid only)
   brollBulkSelection: {},      // { <id>: true } — transient bulk-select state (shift-click)
   brollLastSyncStats: null,    // last { added, updated, archived } stashed after Sync-now
@@ -11734,6 +11771,7 @@ function brollCategoryOptions() {
 // Predicate: does a clip match the current top-bar filters?
 function brollClipMatches(c) {
   if (c.archived && !STATE.brollShowArchived) return false;
+  if (c.dismissed && !STATE.brollShowDismissed) return false;
   if (STATE.brollTypeFilter !== 'all') {
     if (STATE.brollTypeFilter === 'untyped') { if (c.type) return false; }
     else if (c.type !== STATE.brollTypeFilter) return false;
@@ -11769,6 +11807,7 @@ function brollSortedClips() {
   var list = (STATE.broll || []).filter(brollClipMatches);
   list.sort(function(a, b) {
     if (!!a.archived !== !!b.archived) return a.archived ? 1 : -1;
+    if (!!a.dismissed !== !!b.dismissed) return a.dismissed ? 1 : -1;
     var am = a.modifiedTime || a.createdTime || '';
     var bm = b.modifiedTime || b.createdTime || '';
     if (am === bm) return 0;
@@ -11780,9 +11819,12 @@ function brollSortedClips() {
 function renderClipsView() {
   // Numbers for the top bar. Use the raw list (unfiltered) for "total" so users
   // see how many clips exist overall vs. how many match their current filter.
-  var all = (STATE.broll || []).filter(function(c) { return STATE.brollShowArchived || !c.archived; });
+  var all = (STATE.broll || []).filter(function(c) {
+    return (STATE.brollShowArchived || !c.archived) && (STATE.brollShowDismissed || !c.dismissed);
+  });
   var visible = brollSortedClips();
   var untagged = all.filter(function(c) { return !c.type && !c.category && !c.seller && !c.product && !(c.tags && c.tags.length); }).length;
+  var dismissedCount = (STATE.broll || []).filter(function(c) { return c.dismissed && !c.archived; }).length;
 
   // Assemble filter dropdowns. Category list also gets an "Uncategorised" special.
   function opt(v, cur, label) {
@@ -11837,6 +11879,10 @@ function renderClipsView() {
         (syncSummary ? '<span class="clips-sync-summary">' + escapeHtml(syncSummary) + '</span>' : '') +
         '<label class="clips-archived-toggle"><input type="checkbox"' + (STATE.brollShowArchived ? ' checked' : '') +
           ' onchange="App.setBrollFilter(\'archived\', this.checked)"> Show archived</label>' +
+        '<label class="clips-archived-toggle"><input type="checkbox"' + (STATE.brollShowDismissed ? ' checked' : '') +
+          ' onchange="App.setBrollFilter(\'dismissed\', this.checked)"> Show dismissed' +
+          (dismissedCount > 0 ? ' <span class="clips-dismissed-count">(' + dismissedCount + ')</span>' : '') +
+        '</label>' +
       '</div>' +
     '</div>';
 
@@ -11856,6 +11902,8 @@ function renderClipsView() {
         '<select class="form-select" onchange="App.bulkSetBrollField(\'type\', this.value); this.selectedIndex=0;">' + bulkTypeOpts + '</select>' +
         '<select class="form-select" onchange="App.bulkSetBrollField(\'category\', this.value); this.selectedIndex=0;">' + bulkCatOpts + '</select>' +
         '<select class="form-select" onchange="App.bulkSetBrollField(\'seller\', this.value); this.selectedIndex=0;">' + bulkSellerOpts + '</select>' +
+        '<button class="edit-btn clip-bulk-dismiss" onclick="App.bulkSetBrollDismissed(true)" title="Mark all selected clips as not usable for b-roll.">⊘ Dismiss</button>' +
+        '<button class="edit-btn clip-bulk-restore" onclick="App.bulkSetBrollDismissed(false)" title="Restore all selected clips from dismissed.">↺ Restore</button>' +
         '<button class="edit-btn" onclick="App.clearBrollBulkSelection()">Clear selection</button>' +
       '</div>';
   }
@@ -11913,7 +11961,7 @@ function renderClipCard(c) {
   var untaggedFlag = (!c.type && !c.category && !c.seller && !c.product && !(c.tags && c.tags.length))
     ? '<span class="clip-untagged-dot" title="Untagged"></span>' : '';
   return '<div class="clip-card' + (selected ? ' clip-card-selected' : '') + (bulk ? ' clip-card-bulk' : '') +
-    (c.archived ? ' clip-card-archived' : '') + '" ' +
+    (c.archived ? ' clip-card-archived' : '') + (c.dismissed ? ' clip-card-dismissed' : '') + '" ' +
     'onclick="App.onClipCardClick(event, \'' + escapeAttr(c.id) + '\')" ' +
     'title="' + escapeHtml((c.folderPath || '') + ' / ' + (c.name || '')) + '">' +
     '<div class="clip-thumb">' + thumb + untaggedFlag + '</div>' +
@@ -12032,6 +12080,12 @@ function renderClipTagPanel(c, visibleList) {
           'placeholder="Anything worth remembering (used in ad X, seller was on-set, etc.)">' + escapeHtml(c.notes || '') + '</textarea>' +
       '</div>' +
       (c.taggedBy ? '<div class="clip-tagged-by">Last tagged by ' + escapeHtml(c.taggedBy) + '</div>' : '') +
+      '<div class="clip-panel-actions">' +
+        (c.dismissed
+          ? '<button class="clip-restore-btn" onclick="App.setBrollDismissed(\'' + escapeAttr(c.id) + '\', false)">↺ Restore clip</button>' +
+            (c.dismissedBy ? '<span class="clip-dismissed-by">Dismissed by ' + escapeHtml(c.dismissedBy) + '</span>' : '')
+          : '<button class="clip-dismiss-btn" onclick="App.setBrollDismissed(\'' + escapeAttr(c.id) + '\', true)" title="Mark this clip as not usable for b-roll — hides it from the grid.">⊘ Dismiss (not usable)</button>') +
+      '</div>' +
     '</div>';
 }
 
@@ -13845,6 +13899,7 @@ var App = {
       case 'product':  STATE.brollProductFilter = value; break;
       case 'tagged':   STATE.brollTaggedFilter = value; break;
       case 'archived': STATE.brollShowArchived = !!value; break;
+      case 'dismissed': STATE.brollShowDismissed = !!value; break;
     }
     saveState();
     render();
@@ -13970,6 +14025,61 @@ var App = {
     }).catch(function(e) {
       console.warn('[broll] bulk update failed:', e);
       if (typeof toast === 'function') toast('Bulk update failed — see console.', 'error');
+    });
+  },
+  // Mark one clip as unusable-for-broll (dismissed=true) or restore it. Optimistic
+  // local update + Firestore persist. When dismissing the currently-open clip,
+  // auto-advance to the next visible one so a "dismiss + move on" flow doesn't
+  // stall on an empty tag panel.
+  setBrollDismissed: function(id, dismissed) {
+    if (!id) return;
+    dismissed = !!dismissed;
+    var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
+    var nextId = null;
+    if (clip) {
+      // Compute the next clip BEFORE we mutate — the current list order still
+      // reflects the pre-dismiss view, which is what the user is looking at.
+      if (dismissed && STATE.brollSelectedId === id && !STATE.brollShowDismissed) {
+        var vis = brollSortedClips();
+        for (var i = 0; i < vis.length; i++) {
+          if (vis[i].id === id) { nextId = (vis[i + 1] || null) && vis[i + 1].id; break; }
+        }
+      }
+      clip.dismissed = dismissed;
+      clip.dismissedBy = dismissed ? ((Auth && Auth.user && Auth.user.email) || null) : null;
+      clip.dismissedAt = dismissed ? Date.now() : null;
+    }
+    if (nextId) STATE.brollSelectedId = nextId;
+    saveState();
+    render();
+    Fb.setBrollDismissed(id, dismissed).catch(function(e) {
+      console.warn('[broll] dismiss failed:', e);
+      if (typeof toast === 'function') toast('Dismiss save failed — see console.', 'error');
+    });
+  },
+  bulkSetBrollDismissed: function(dismissed) {
+    dismissed = !!dismissed;
+    var ids = Object.keys(STATE.brollBulkSelection || {}).filter(function(k) { return STATE.brollBulkSelection[k]; });
+    if (!ids.length) return;
+    var email = (Auth && Auth.user && Auth.user.email) || null;
+    ids.forEach(function(id) {
+      var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
+      if (clip) {
+        clip.dismissed = dismissed;
+        clip.dismissedBy = dismissed ? email : null;
+        clip.dismissedAt = dismissed ? Date.now() : null;
+      }
+    });
+    // Clear the selection after a bulk dismiss so the toolbar closes — the
+    // clips just dropped out of view.
+    STATE.brollBulkSelection = {};
+    saveState();
+    render();
+    Fb.setBrollDismissedBulk(ids, dismissed).then(function() {
+      if (typeof toast === 'function') toast((dismissed ? 'Dismissed ' : 'Restored ') + ids.length + ' clip(s)', 'ok');
+    }).catch(function(e) {
+      console.warn('[broll] bulk dismiss failed:', e);
+      if (typeof toast === 'function') toast('Bulk dismiss failed — see console.', 'error');
     });
   },
   syncBrollNow: function() {
