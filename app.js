@@ -12080,9 +12080,9 @@ function renderClipsView() {
   // trust them here without re-clamping (still guarded for stray legacy state).
   var rightW = Math.max(280, Math.min(720, Number(STATE.brollRightW) || 420));
   var doneH = Math.max(80, Math.min(500, Number(STATE.brollDoneH) || 180));
-  // Body loses vertical room to the Done strip + its handle (6px).
-  var bodyStyle = 'grid-template-columns: 1fr 6px ' + rightW + 'px;' +
-    ' height: calc(100vh - 180px - ' + doneH + 'px - 6px);';
+  // Body is a flex child of .clips-wrap now, so its height comes from the
+  // remaining space after topbar + Done strip + bulk bar. No calc() needed.
+  var bodyStyle = 'grid-template-columns: 1fr 6px ' + rightW + 'px;';
 
   // Done strip: horizontal shelf of completed clips right beneath the topbar.
   // Always rendered (empty state coaches the user) so the resize handle is
@@ -12093,12 +12093,17 @@ function renderClipsView() {
     '</div>' +
     '<div class="clips-done-resize" onmousedown="App.onBrollResizeStart(event, \'done\')" title="Drag to resize the Done shelf"></div>';
 
-  return topBar + doneStripHtml + bulkBar +
+  // Wrap everything in a single flex-column container so .main (which is
+  // display:flex row) treats us as ONE child and our internal rows stack
+  // vertically like every other tab.
+  return '<div class="clips-wrap">' +
+    topBar + doneStripHtml + bulkBar +
     '<div class="clips-body" style="' + bodyStyle + '">' +
       '<div class="clips-grid-wrap">' + gridHtml + '</div>' +
       '<div class="clips-resize-handle" data-side="right" onmousedown="App.onBrollResizeStart(event, \'right\')" title="Drag to resize"></div>' +
       '<div class="clips-panel">' + panelHtml + '</div>' +
-    '</div>';
+    '</div>' +
+  '</div>';
 }
 
 // One card in the grid. Compact — thumbnail + name + up to 3 tag pills.
@@ -14379,8 +14384,9 @@ var App = {
       body.style.gridTemplateColumns = '1fr 6px ' + r + 'px';
     }
     function applyDone(h) {
+      // Only the strip height needs to move — body is flex:1 in .clips-wrap so
+      // it auto-adjusts to fill whatever's left.
       if (strip) strip.style.height = h + 'px';
-      body.style.height = 'calc(100vh - 180px - ' + h + 'px - 6px)';
     }
     function onMove(ev) {
       if (side === 'done') {
