@@ -1812,6 +1812,12 @@
   .clips-resize-handle { cursor: col-resize; background: var(--border); position: relative; user-select: none; transition: background 0.12s; }
   .clips-resize-handle:hover, .clips-resize-handle:active { background: var(--accent2); }
   .clips-resize-handle::before { content: ''; position: absolute; inset: 0 -4px; }
+  /* Horizontal counterpart — sits between the topbar and the body. Grip dots
+     hint that it's draggable; the hover state matches the vertical handles. */
+  .clips-topbar-resize { cursor: row-resize; background: var(--border); border-bottom: 1px solid var(--border); user-select: none; position: relative; transition: background 0.12s; }
+  .clips-topbar-resize:hover, .clips-topbar-resize:active { background: var(--accent2); }
+  .clips-topbar-resize::after { content: '⋯'; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 14px; letter-spacing: 2px; color: var(--text3); line-height: 1; pointer-events: none; }
+  .clips-topbar-resize:hover::after { color: var(--bg); }
 
   .clips-empty { text-align: center; padding: 60px 20px; color: var(--text3); }
   .clips-empty-icon { font-size: 42px; margin-bottom: 12px; opacity: 0.5; }

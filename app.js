@@ -519,6 +519,7 @@ var Fb = {
         brollShowDismissed: true,
         brollLeftW: true,
         brollRightW: true,
+        brollTopExtra: true,
         brollSelectedId: true,
         brollBulkSelection: true,
         brollLastSyncStats: true,
@@ -1885,6 +1886,7 @@ var STATE = {
   brollShowDismissed: false,   // true = also show clips the tagger marked unusable
   brollLeftW: 260,             // width (px) of the left "Done" sidebar — user-draggable
   brollRightW: 420,            // width (px) of the right tag panel — user-draggable
+  brollTopExtra: 0,            // extra vertical space (px) between topbar and body — user-draggable via the horizontal handle beneath the topbar
   brollSelectedId: null,       // clip currently open in the tag panel (null = grid only)
   brollBulkSelection: {},      // { <id>: true } — transient bulk-select state (shift-click)
   brollLastSyncStats: null,    // last { added, updated, archived } stashed after Sync-now
@@ -12080,9 +12082,16 @@ function renderClipsView() {
   // reloads. Widths get clamped in App.onBrollResize so we can trust them here.
   var leftW = Math.max(160, Math.min(600, Number(STATE.brollLeftW) || 260));
   var rightW = Math.max(280, Math.min(720, Number(STATE.brollRightW) || 420));
-  var bodyStyle = 'grid-template-columns: ' + leftW + 'px 6px 1fr 6px ' + rightW + 'px;';
+  var topExtra = Math.max(0, Math.min(240, Number(STATE.brollTopExtra) || 0));
+  var bodyStyle = 'grid-template-columns: ' + leftW + 'px 6px 1fr 6px ' + rightW + 'px;' +
+    ' height: calc(100vh - 180px - ' + topExtra + 'px);';
+  // Horizontal resize handle right beneath the topbar. Same visual language as
+  // the vertical column handles — dragging up/down grows or shrinks the extra
+  // gap between the topbar and the body.
+  var topResizeHandle = '<div class="clips-topbar-resize" onmousedown="App.onBrollResizeStart(event, \'top\')" title="Drag to resize the top bar area" ' +
+    'style="height: ' + (6 + topExtra) + 'px;"></div>';
 
-  return topBar + bulkBar +
+  return topBar + topResizeHandle + bulkBar +
     '<div class="clips-body" style="' + bodyStyle + '">' +
       '<div class="clips-done-wrap">' + doneSidebarHtml + '</div>' +
       '<div class="clips-resize-handle" data-side="left" onmousedown="App.onBrollResizeStart(event, \'left\')" title="Drag to resize"></div>' +
@@ -14353,39 +14362,52 @@ var App = {
   onBrollResizeStart: function(evt, side) {
     if (!evt || !side) return;
     var body = document.querySelector('.clips-body');
+    var topHandle = document.querySelector('.clips-topbar-resize');
     if (!body) return;
     evt.preventDefault();
     var startX = evt.clientX;
+    var startY = evt.clientY;
     var startLeft = Math.max(160, Math.min(600, Number(STATE.brollLeftW) || 260));
     var startRight = Math.max(280, Math.min(720, Number(STATE.brollRightW) || 420));
+    var startTopExtra = Math.max(0, Math.min(240, Number(STATE.brollTopExtra) || 0));
     document.body.style.userSelect = 'none';
-    document.body.style.cursor = 'col-resize';
+    document.body.style.cursor = (side === 'top') ? 'row-resize' : 'col-resize';
 
-    function apply(l, r) {
+    function applyCols(l, r) {
       body.style.gridTemplateColumns = l + 'px 6px 1fr 6px ' + r + 'px';
     }
+    function applyTop(extra) {
+      body.style.height = 'calc(100vh - 180px - ' + extra + 'px)';
+      if (topHandle) topHandle.style.height = (6 + extra) + 'px';
+    }
     function onMove(ev) {
-      var dx = ev.clientX - startX;
-      var l = startLeft, r = startRight;
-      if (side === 'left') {
-        l = Math.max(160, Math.min(600, startLeft + dx));
+      if (side === 'top') {
+        var dy = ev.clientY - startY;
+        var t = Math.max(0, Math.min(240, startTopExtra + dy));
+        applyTop(t);
       } else {
-        r = Math.max(280, Math.min(720, startRight - dx));
+        var dx = ev.clientX - startX;
+        var l = startLeft, r = startRight;
+        if (side === 'left') l = Math.max(160, Math.min(600, startLeft + dx));
+        else r = Math.max(280, Math.min(720, startRight - dx));
+        applyCols(l, r);
       }
-      apply(l, r);
     }
     function onUp(ev) {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
-      // Read the current widths out of the live grid-template-columns so we
-      // persist exactly what the user let go of.
-      var dx = ev.clientX - startX;
-      if (side === 'left') {
-        STATE.brollLeftW = Math.max(160, Math.min(600, startLeft + dx));
+      if (side === 'top') {
+        var dy = ev.clientY - startY;
+        STATE.brollTopExtra = Math.max(0, Math.min(240, startTopExtra + dy));
       } else {
-        STATE.brollRightW = Math.max(280, Math.min(720, startRight - dx));
+        var dx = ev.clientX - startX;
+        if (side === 'left') {
+          STATE.brollLeftW = Math.max(160, Math.min(600, startLeft + dx));
+        } else {
+          STATE.brollRightW = Math.max(280, Math.min(720, startRight - dx));
+        }
       }
       saveState();
     }
