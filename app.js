@@ -517,9 +517,8 @@ var Fb = {
         brollTaggedFilter: true,
         brollShowArchived: true,
         brollShowDismissed: true,
-        brollLeftW: true,
+        brollDoneH: true,
         brollRightW: true,
-        brollTopExtra: true,
         brollSelectedId: true,
         brollBulkSelection: true,
         brollLastSyncStats: true,
@@ -1884,9 +1883,8 @@ var STATE = {
   brollTaggedFilter: 'all',   // 'all' | 'tagged' | 'untagged'
   brollShowArchived: false,
   brollShowDismissed: false,   // true = also show clips the tagger marked unusable
-  brollLeftW: 260,             // width (px) of the left "Done" sidebar — user-draggable
+  brollDoneH: 180,             // height (px) of the horizontal "Done" strip beneath the topbar — user-draggable
   brollRightW: 420,            // width (px) of the right tag panel — user-draggable
-  brollTopExtra: 0,            // extra vertical space (px) between topbar and body — user-draggable via the horizontal handle beneath the topbar
   brollSelectedId: null,       // clip currently open in the tag panel (null = grid only)
   brollBulkSelection: {},      // { <id>: true } — transient bulk-select state (shift-click)
   brollLastSyncStats: null,    // last { added, updated, archived } stashed after Sync-now
@@ -12078,23 +12076,25 @@ function renderClipsView() {
     '</div>';
   }
 
-  // Read persisted column widths so a resized layout survives re-renders and
-  // reloads. Widths get clamped in App.onBrollResize so we can trust them here.
-  var leftW = Math.max(160, Math.min(600, Number(STATE.brollLeftW) || 260));
+  // Read persisted layout sizes. Clamped in App.onBrollResizeStart so we can
+  // trust them here without re-clamping (still guarded for stray legacy state).
   var rightW = Math.max(280, Math.min(720, Number(STATE.brollRightW) || 420));
-  var topExtra = Math.max(0, Math.min(240, Number(STATE.brollTopExtra) || 0));
-  var bodyStyle = 'grid-template-columns: ' + leftW + 'px 6px 1fr 6px ' + rightW + 'px;' +
-    ' height: calc(100vh - 180px - ' + topExtra + 'px);';
-  // Horizontal resize handle right beneath the topbar. Same visual language as
-  // the vertical column handles — dragging up/down grows or shrinks the extra
-  // gap between the topbar and the body.
-  var topResizeHandle = '<div class="clips-topbar-resize" onmousedown="App.onBrollResizeStart(event, \'top\')" title="Drag to resize the top bar area" ' +
-    'style="height: ' + (6 + topExtra) + 'px;"></div>';
+  var doneH = Math.max(80, Math.min(500, Number(STATE.brollDoneH) || 180));
+  // Body loses vertical room to the Done strip + its handle (6px).
+  var bodyStyle = 'grid-template-columns: 1fr 6px ' + rightW + 'px;' +
+    ' height: calc(100vh - 180px - ' + doneH + 'px - 6px);';
 
-  return topBar + topResizeHandle + bulkBar +
+  // Done strip: horizontal shelf of completed clips right beneath the topbar.
+  // Always rendered (empty state coaches the user) so the resize handle is
+  // available immediately. Height is user-draggable via the handle below it.
+  var doneStripHtml =
+    '<div class="clips-done-strip" style="height: ' + doneH + 'px;">' +
+      doneSidebarHtml +
+    '</div>' +
+    '<div class="clips-done-resize" onmousedown="App.onBrollResizeStart(event, \'done\')" title="Drag to resize the Done shelf"></div>';
+
+  return topBar + doneStripHtml + bulkBar +
     '<div class="clips-body" style="' + bodyStyle + '">' +
-      '<div class="clips-done-wrap">' + doneSidebarHtml + '</div>' +
-      '<div class="clips-resize-handle" data-side="left" onmousedown="App.onBrollResizeStart(event, \'left\')" title="Drag to resize"></div>' +
       '<div class="clips-grid-wrap">' + gridHtml + '</div>' +
       '<div class="clips-resize-handle" data-side="right" onmousedown="App.onBrollResizeStart(event, \'right\')" title="Drag to resize"></div>' +
       '<div class="clips-panel">' + panelHtml + '</div>' +
@@ -14058,7 +14058,7 @@ function captureRenderSnapshot() {
     }
     // Capture scroll positions of known-scrollable containers. Add more selectors here
     // if other scroll-preserve candidates appear.
-    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap', '.grading-wrap', '.grading-scroll-videos', '.grading-scroll-scorecard', '.clips-grid-wrap', '.clips-panel', '.clips-done-wrap'].forEach(function(sel) {
+    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap', '.grading-wrap', '.grading-scroll-videos', '.grading-scroll-scorecard', '.clips-grid-wrap', '.clips-panel', '.clips-done-grid'].forEach(function(sel) {
       var el = document.querySelector(sel);
       if (el) snap.scrolls[sel] = { top: el.scrollTop, left: el.scrollLeft };
     });
@@ -14359,38 +14359,36 @@ var App = {
   // Column resize handles. Live update via CSS grid-template-columns on the
   // .clips-body element (no re-render mid-drag — much smoother). Persist final
   // widths to STATE so a refresh keeps the layout.
+  // side: 'done' resizes the horizontal Done strip vertically; 'right' resizes
+  // the tag panel horizontally. Live-updates via inline styles during drag so
+  // there's no re-render churn, then persists on mouseup.
   onBrollResizeStart: function(evt, side) {
     if (!evt || !side) return;
     var body = document.querySelector('.clips-body');
-    var topHandle = document.querySelector('.clips-topbar-resize');
+    var strip = document.querySelector('.clips-done-strip');
     if (!body) return;
     evt.preventDefault();
     var startX = evt.clientX;
     var startY = evt.clientY;
-    var startLeft = Math.max(160, Math.min(600, Number(STATE.brollLeftW) || 260));
     var startRight = Math.max(280, Math.min(720, Number(STATE.brollRightW) || 420));
-    var startTopExtra = Math.max(0, Math.min(240, Number(STATE.brollTopExtra) || 0));
+    var startDoneH = Math.max(80, Math.min(500, Number(STATE.brollDoneH) || 180));
     document.body.style.userSelect = 'none';
-    document.body.style.cursor = (side === 'top') ? 'row-resize' : 'col-resize';
+    document.body.style.cursor = (side === 'done') ? 'row-resize' : 'col-resize';
 
-    function applyCols(l, r) {
-      body.style.gridTemplateColumns = l + 'px 6px 1fr 6px ' + r + 'px';
+    function applyRight(r) {
+      body.style.gridTemplateColumns = '1fr 6px ' + r + 'px';
     }
-    function applyTop(extra) {
-      body.style.height = 'calc(100vh - 180px - ' + extra + 'px)';
-      if (topHandle) topHandle.style.height = (6 + extra) + 'px';
+    function applyDone(h) {
+      if (strip) strip.style.height = h + 'px';
+      body.style.height = 'calc(100vh - 180px - ' + h + 'px - 6px)';
     }
     function onMove(ev) {
-      if (side === 'top') {
+      if (side === 'done') {
         var dy = ev.clientY - startY;
-        var t = Math.max(0, Math.min(240, startTopExtra + dy));
-        applyTop(t);
+        applyDone(Math.max(80, Math.min(500, startDoneH + dy)));
       } else {
         var dx = ev.clientX - startX;
-        var l = startLeft, r = startRight;
-        if (side === 'left') l = Math.max(160, Math.min(600, startLeft + dx));
-        else r = Math.max(280, Math.min(720, startRight - dx));
-        applyCols(l, r);
+        applyRight(Math.max(280, Math.min(720, startRight - dx)));
       }
     }
     function onUp(ev) {
@@ -14398,16 +14396,12 @@ var App = {
       document.removeEventListener('mouseup', onUp);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
-      if (side === 'top') {
+      if (side === 'done') {
         var dy = ev.clientY - startY;
-        STATE.brollTopExtra = Math.max(0, Math.min(240, startTopExtra + dy));
+        STATE.brollDoneH = Math.max(80, Math.min(500, startDoneH + dy));
       } else {
         var dx = ev.clientX - startX;
-        if (side === 'left') {
-          STATE.brollLeftW = Math.max(160, Math.min(600, startLeft + dx));
-        } else {
-          STATE.brollRightW = Math.max(280, Math.min(720, startRight - dx));
-        }
+        STATE.brollRightW = Math.max(280, Math.min(720, startRight - dx));
       }
       saveState();
     }
