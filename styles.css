@@ -1780,10 +1780,10 @@
 
   /* ===================== CLIPS TAB (b-roll library) ===================== */
   .clips-topbar { padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--bg2); }
-  .clips-topbar-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .clips-topbar-row .clips-search { flex: 1 1 260px; min-width: 200px; }
-  .clips-topbar-row select.form-select { min-width: 140px; }
-  .clips-sync-btn { white-space: nowrap; }
+  .clips-topbar-row { display: flex; gap: 8px 10px; align-items: center; flex-wrap: wrap; row-gap: 8px; }
+  .clips-topbar-row .clips-search { flex: 2 1 240px; min-width: 200px; }
+  .clips-topbar-row select.form-select { flex: 1 1 130px; min-width: 120px; max-width: 180px; }
+  .clips-sync-btn { white-space: nowrap; margin-left: auto; flex: 0 0 auto; }
   .clips-topbar-meta { display: flex; gap: 16px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--text3); flex-wrap: wrap; }
   .clips-topbar-meta b { color: var(--amber-text); font-weight: 600; }
   .clips-sync-summary { color: var(--text2); }
@@ -1795,7 +1795,7 @@
   .clips-bulkbar { display: flex; gap: 10px; align-items: center; padding: 10px 18px; background: var(--accent-dim); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   .clips-bulkbar b { color: var(--accent2); }
 
-  .clips-body { display: grid; grid-template-columns: 1fr 360px; gap: 0; height: calc(100vh - 180px); }
+  .clips-body { display: grid; grid-template-columns: 1fr 420px; gap: 0; height: calc(100vh - 180px); }
   .clips-grid-wrap { overflow-y: auto; padding: 18px; }
   .clips-panel { border-left: 1px solid var(--border); background: var(--bg2); overflow-y: auto; display: flex; flex-direction: column; }
 
@@ -1829,7 +1829,7 @@
   .clip-panel-pos { font-size: 11px; color: var(--text3); margin: 0 4px; }
   .clip-panel-nav button:last-of-type { margin-left: auto; }
   .clip-panel-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
-  .clip-preview-frame { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; overflow: hidden; }
+  .clip-preview-frame { width: 60%; max-width: 260px; aspect-ratio: 9 / 16; background: #000; border-radius: 6px; overflow: hidden; margin: 0 auto; }
   .clip-preview-frame iframe, .clip-preview-frame video { width: 100%; height: 100%; border: 0; display: block; }
   .clip-preview-empty { padding: 30px; background: var(--bg3); border-radius: 6px; text-align: center; color: var(--text3); font-size: 12px; }
   .clip-preview-empty a { color: var(--accent2); }

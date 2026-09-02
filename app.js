@@ -391,6 +391,8 @@ var Fb = {
       catHeadDailyThreadHistory: STATE.catHeadDailyThreadHistory,
       intlDailyThread: STATE.intlDailyThread,
       intlDailyThreadHistory: STATE.intlDailyThreadHistory,
+      contentLeadDailyThreads: STATE.contentLeadDailyThreads,
+      contentLeadDailyThreadHistory: STATE.contentLeadDailyThreadHistory,
       countries: STATE.countries,
       categories: STATE.categories,
       categoriesOrganic: STATE.categoriesOrganic,
@@ -556,6 +558,13 @@ var Fb = {
       }
       var _savedIntlThread = (STATE.intlDailyThread && STATE.intlDailyThread.date === _todayUK)
         ? STATE.intlDailyThread : null;
+      var _savedContentLeadThreads = {};
+      if (STATE.contentLeadDailyThreads) {
+        Object.keys(STATE.contentLeadDailyThreads).forEach(function(lead) {
+          var t = STATE.contentLeadDailyThreads[lead];
+          if (t && t.date === _todayUK) _savedContentLeadThreads[lead] = t;
+        });
+      }
 
       Object.keys(data).forEach(function(k) {
         if (k === '_lastEditedAt' || k === '_lastEditedBy' || k === '_lastEditedByName') return;
@@ -634,6 +643,11 @@ var Fb = {
         var ri = reconcileSlot(_savedIntlThread, STATE.intlDailyThread);
         if (ri.changed) { STATE.intlDailyThread = ri.win; _threadsRescued = true; }
       }
+      Object.keys(_savedContentLeadThreads).forEach(function(lead) {
+        if (!STATE.contentLeadDailyThreads) STATE.contentLeadDailyThreads = {};
+        var rc = reconcileSlot(_savedContentLeadThreads[lead], STATE.contentLeadDailyThreads[lead]);
+        if (rc.changed) { STATE.contentLeadDailyThreads[lead] = rc.win; _threadsRescued = true; }
+      });
       // Push a correction upload so Firestore reflects the rescued threads.
       if (_threadsRescued) {
         setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
@@ -1756,6 +1770,13 @@ var STATE = {
   // shape as per-editor threads: { date, url, channelId, threadTs }.
   intlDailyThread: null,
   intlDailyThreadHistory: [],
+  // Daily Slack threads per Content Lead (Millie, Rivers). Used ONLY for Organic
+  // sub-campaign QC reports — each Organic sub-campaign carries a `contentLead`
+  // field (Millie/Rivers/''); Send routes the QC report as a reply into that
+  // lead's thread when set today, else falls back to the ORG webhook chain.
+  // Same shape as intlDailyThread: { date, url, channelId, threadTs }.
+  contentLeadDailyThreads: { Millie: null, Rivers: null },
+  contentLeadDailyThreadHistory: { Millie: [], Rivers: [] },
   schedulerDate: todayISO(),
   schedulerIncludeWeekends: false,
   // Daily Log tab: remembered editor selection so it survives re-renders and sessions.
@@ -8576,12 +8597,45 @@ function renderNotificationsView() {
         // Skip cards that were dismissed (via send or the dismiss button). qcDismissed is
         // persisted to Firestore so dismissals survive page reloads.
         if (STATE.qcDismissed && STATE.qcDismissed[camp.id]) return '';
+        var isOrganic = (camp.type || DEFAULT_CAMPAIGN_TYPE) === 'Organic';
+        var qcThread = resolveQcThreadForCampaign(camp.id);
         var qcUrl = resolveQcWebhookForCampaign(camp.id);
         var hasUrl = webhookValid(qcUrl);
-        var canSend = hasUrl && (totalMissing > 0 || ready.length > 0);
+        var hasRoute = !!qcThread || hasUrl;
+        var canSend = hasRoute && (totalMissing > 0 || ready.length > 0);
+        var routeTitle = qcThread
+          ? ('Send QC report \u2192 ' + (camp.contentLead || '') + '\u2019s daily thread')
+          : (hasUrl ? 'Send QC report for this campaign' : ('No QC route resolves for ' + camp.country + ' \u2014 set a webhook or assign a Content Lead'));
         var sendAttrs = canSend
-          ? 'class="sent-copy-btn" title="Send QC report for this campaign"'
-          : 'class="sent-copy-btn" title="' + (hasUrl ? 'No QC activity to report for this campaign' : 'No QC webhook resolves for ' + camp.country + ' \u2014 set one in Automations') + '" disabled style="opacity:0.45; cursor:not-allowed;"';
+          ? 'class="sent-copy-btn" title="' + escapeHtml(routeTitle) + '"'
+          : 'class="sent-copy-btn" title="' + escapeHtml(hasRoute ? 'No QC activity to report for this campaign' : routeTitle) + '" disabled style="opacity:0.45; cursor:not-allowed;"';
+        // Content Lead picker \u2014 only shown for Organic sub-campaigns. Changing the
+        // selection routes future sends into that lead's thread (or the webhook when '').
+        var contentLeadPickerHtml = '';
+        if (isOrganic) {
+          var currentLead = (camp.contentLead || '').trim();
+          var leadOptions = ['<option value="">\u2014 Content Lead \u2014</option>'].concat(CONTENT_LEADS.map(function(l) {
+            var t = STATE.contentLeadDailyThreads && STATE.contentLeadDailyThreads[l];
+            var live = t && t.date === todayUK() && t.channelId;
+            var suffix = live ? ' (thread live)' : ' (no thread today)';
+            return '<option value="' + escapeHtml(l) + '"' + (l === currentLead ? ' selected' : '') + '>' + escapeHtml(l) + suffix + '</option>';
+          })).join('');
+          var pickerTitle = qcThread
+            ? 'Routes to ' + currentLead + '\u2019s daily thread'
+            : (currentLead ? currentLead + ' assigned, but their thread isn\u2019t set for today \u2014 will use the ORG webhook' : 'Unassigned \u2014 will use the ORG webhook');
+          contentLeadPickerHtml =
+            '<div style="margin-top:6px; display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text3);">' +
+              '<span title="' + escapeHtml(pickerTitle) + '">Route:</span>' +
+              '<select class="qc-lead-picker" style="font-size:11px; padding:2px 6px;" ' +
+                'onchange="App.setCampaignContentLead(\'' + camp.id + '\', this.value)" ' +
+                'title="' + escapeHtml(pickerTitle) + '">' +
+                leadOptions +
+              '</select>' +
+              (qcThread
+                ? '<span style="color:var(--green-text);" title="' + escapeHtml(qcThread.url) + '">\u2022 thread live</span>'
+                : (currentLead ? '<span style="color:var(--amber-text);">\u2022 no thread today \u2192 ORG webhook</span>' : '<span>\u2022 ORG webhook</span>')) +
+            '</div>';
+        }
         var listParts = [];
         if (missingFiles.length) {
           listParts.push('<div style="margin-top:6px; font-size:11px; color:var(--amber-text);"><strong>Missing files:</strong> ' + missingFiles.map(function(a) { return escapeHtml(a.name); }).join(', ') + '</div>');
@@ -8606,6 +8660,7 @@ function renderNotificationsView() {
             '<button class="sent-copy-btn" title="Dismiss this QC card" onclick="App.dismissQcReport(\'' + camp.id + '\')" style="opacity:0.6;">&#x2715;</button>' +
           '</div>' +
           missingList +
+          contentLeadPickerHtml +
         '</div>';
       }).filter(function(s) { return s.length > 0; }).join('');
       if (!qcCards) {
@@ -8811,6 +8866,42 @@ function renderAutomationsView() {
     '</div>';
   }
 
+  function renderContentLeadThreadCard() {
+    var today = todayUK();
+    var rows = CONTENT_LEADS.map(function(lead) {
+      var t = (STATE.contentLeadDailyThreads && STATE.contentLeadDailyThreads[lead]) || null;
+      var url = t ? t.url : '';
+      var dot = '', dotTitle = 'No thread set — Organic QC falls back to the ORG webhook';
+      if (t) {
+        if (t.date === today) { dot = 'ok'; dotTitle = 'Thread set for today'; }
+        else { dot = 'bad'; dotTitle = 'Thread is from ' + t.date + ' (stale) — will reset at UK midnight'; }
+      }
+      var hist = (STATE.contentLeadDailyThreadHistory && STATE.contentLeadDailyThreadHistory[lead]) || [];
+      var histHtml = hist.length === 0 ? '' :
+        '<div style="font-size:11px; color:var(--text3); margin-top:4px;">Recent: ' +
+        hist.slice(0, 3).map(function(h) {
+          return '<a href="' + escapeHtml(h.url) + '" target="_blank" style="color:var(--text3);">' + h.date + '</a>';
+        }).join(' · ') + '</div>';
+      return '<div style="margin-top:10px;">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">' +
+          '<span style="font-weight:600;font-size:13px;color:var(--text1);">' + lead + '</span>' +
+          '<span style="font-size:12px;color:var(--text3);">Content Lead · Organic</span>' +
+          '<span class="webhook-dot ' + dot + '" title="' + escapeHtml(dotTitle) + '" style="margin-left:auto;"></span>' +
+        '</div>' +
+        '<div class="webhook-row">' +
+          '<input type="text" id="content-lead-thread-input-' + lead + '" value="' + escapeHtml(url) + '" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="https://workspace.slack.com/archives/Cxxxxx/pxxxxxxxxxxxxxx" style="flex:1;">' +
+          '<button class="save-btn" onclick="App.saveContentLeadDailyThread(\'' + lead + '\')">Set</button>' +
+          (t ? '<button class="edit-btn" onclick="App.clearContentLeadDailyThread(\'' + lead + '\')" style="margin-left:4px;">Clear</button>' : '') +
+        '</div>' + histHtml +
+      '</div>';
+    }).join('');
+    return '<div class="auto-card">' +
+      '<div class="auto-header"><div class="auto-icon">\u{1F4AC}</div><div><div class="auto-title">Daily Slack threads (per Content Lead)</div><div class="auto-sub">paste each Content Lead\'s daily thread URL — Organic QC reports post as replies</div></div></div>' +
+      '<div class="auto-desc">Each Content Lead has their own daily Slack thread for Organic-campaign QC reports. Assign an Organic sub-campaign to a Content Lead from its QC card in the Notifications tab; when Send fires, the QC report posts as a reply into that lead\'s thread instead of the ORG webhook. Threads reset at UK midnight. Falls back to the ORG webhook when no assignment is set or the thread is stale.</div>' +
+      rows +
+    '</div>';
+  }
+
   function renderCatHeadThreadCard() {
     var today = todayUK();
     // Every category that has a head assigned — merges Config-added categories +
@@ -8858,6 +8949,7 @@ function renderAutomationsView() {
 
     renderDailyThreadCard() +
     renderIntlDailyThreadCard() +
+    renderContentLeadThreadCard() +
     renderCatHeadThreadCard() +
 
     (function() {
@@ -12778,6 +12870,33 @@ function resolveDailyThreadForCategory(category) {
   return t;
 }
 
+// Content Leads that own Organic sub-campaigns. Used for the per-lead QC daily thread
+// picker and the routing map. Keep the list in the STATE default in sync when changing.
+var CONTENT_LEADS = ['Millie', 'Rivers'];
+
+// Returns the Content Lead daily thread descriptor IFF it's set and dated today.
+// Stale entries (date != today) return null so the caller falls back to the ORG webhook.
+function resolveDailyThreadForContentLead(lead) {
+  if (!lead) return null;
+  var t = STATE.contentLeadDailyThreads && STATE.contentLeadDailyThreads[lead];
+  if (!t) return null;
+  if (t.date !== todayUK()) return null;
+  if (!t.channelId || !t.threadTs) return null;
+  return t;
+}
+
+// For an Organic sub-campaign with a `contentLead` assignment, returns that lead's
+// daily thread IFF it's set today. Non-Organic campaigns, missing assignments, or
+// stale threads all return null (→ caller uses the webhook resolver instead).
+function resolveQcThreadForCampaign(campaignId) {
+  var camp = findCampaignById(campaignId);
+  if (!camp) return null;
+  if ((camp.type || DEFAULT_CAMPAIGN_TYPE) !== 'Organic') return null;
+  var lead = (camp.contentLead || '').trim();
+  if (!lead) return null;
+  return resolveDailyThreadForContentLead(lead);
+}
+
 // International country codes — videos from these campaigns share the intl thread.
 var INTL_COUNTRIES = ['IT', 'ES', 'PL', 'US'];
 
@@ -12873,6 +12992,20 @@ function sweepStaleDailyThreads() {
       logAction('updated', 'Intl daily thread reset (was ' + ti.date + ')');
       changed = true;
     }
+  }
+  if (STATE.contentLeadDailyThreads) {
+    Object.keys(STATE.contentLeadDailyThreads).forEach(function(lead) {
+      var t = STATE.contentLeadDailyThreads[lead];
+      if (!t) return;
+      if (t.date === today) return;
+      if (!STATE.contentLeadDailyThreadHistory) STATE.contentLeadDailyThreadHistory = {};
+      if (!STATE.contentLeadDailyThreadHistory[lead]) STATE.contentLeadDailyThreadHistory[lead] = [];
+      STATE.contentLeadDailyThreadHistory[lead].unshift({ date: t.date, url: t.url });
+      while (STATE.contentLeadDailyThreadHistory[lead].length > 7) STATE.contentLeadDailyThreadHistory[lead].pop();
+      STATE.contentLeadDailyThreads[lead] = null;
+      logAction('updated', 'Content Lead thread reset for ' + lead + ' (was ' + t.date + ')');
+      changed = true;
+    });
   }
   return changed;
 }
@@ -13840,7 +13973,7 @@ function captureRenderSnapshot() {
     }
     // Capture scroll positions of known-scrollable containers. Add more selectors here
     // if other scroll-preserve candidates appear.
-    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap', '.grading-wrap', '.grading-scroll-videos', '.grading-scroll-scorecard'].forEach(function(sel) {
+    ['.table-wrap', '.sidebar-scroll', '.scheduler-panel', '.notif-panel', '.automation-panel', '.config-panel', '.today-wrap', '.log-wrap', '.cal-wrap', '.grading-wrap', '.grading-scroll-videos', '.grading-scroll-scorecard', '.clips-grid-wrap', '.clips-panel'].forEach(function(sel) {
       var el = document.querySelector(sel);
       if (el) snap.scrolls[sel] = { top: el.scrollTop, left: el.scrollLeft };
     });
@@ -17437,41 +17570,49 @@ var App = {
     });
   },
 
-  // Send a QC report for one sub-campaign to its country's QC webhook. Manual only.
-  // On success, logs to the Sent Notifications history so there's an audit trail.
+  // Send a QC report for one sub-campaign. Routing:
+  //   1. Organic + campaign.contentLead set + that lead's daily thread is set today
+  //        \u2192 post as a reply into the Content Lead's thread via chat.postMessage
+  //   2. otherwise \u2192 post to the QC webhook resolved by resolveQcWebhookForCampaign
+  //     (campaign override \u2192 Organic webhook when Organic \u2192 country webhook \u2192 global)
+  // Manual only. On success, logs to Sent Notifications for audit.
   sendQcReport: function(campaignId) {
     var camp = findCampaignById(campaignId);
     if (!camp) return;
-    var url = resolveQcWebhookForCampaign(campaignId);
-    if (!webhookValid(url)) {
+    var msg = buildQcReportMessage(campaignId);
+    if (!msg) { toast('No QC activity in this campaign yet', 'error'); return; }
+
+    var thread = resolveQcThreadForCampaign(campaignId);
+    var url = thread ? '' : resolveQcWebhookForCampaign(campaignId);
+    if (!thread && !webhookValid(url)) {
       toast('No QC webhook resolves for ' + camp.country + ' \u2014 set one in Automations (or a per-campaign override)', 'error');
       return;
     }
-    var msg = buildQcReportMessage(campaignId);
-    if (!msg) { toast('No QC activity in this campaign yet', 'error'); return; }
-    toast('Sending QC report for ' + camp.name + '...', '');
-    // Multi-browser dedupe: claim the send slot so two PMs clicking simultaneously
-    // don't both POST the same QC report.
+
+    var routeLabel = thread ? ('Content Lead thread \u2014 ' + (camp.contentLead || '')) : ('QC webhook \u2014 ' + camp.country);
+    toast('Sending QC report for ' + camp.name + ' \u2192 ' + routeLabel + '...', '');
     var slotKey = 'qc:' + campaignId;
     claimSendSlot(slotKey).then(function(wonClaim) {
       if (!wonClaim) {
         toast('QC report for ' + camp.name + ' was just sent by another browser', '');
         return;
       }
-      return postToSlack(url, msg).then(function(r) {
+      var sendP = thread
+        ? postToSlackThread(thread.channelId, thread.threadTs, msg)
+        : postToSlack(url, msg);
+      return sendP.then(function(r) {
         if (r.ok) {
-          // Append to sent log so the QC report has the same audit trail as other sends.
-          // Synthesize a recipient key 'QC:<country>' and a 'manual' reason.
+          var recipientKey = thread
+            ? 'CLQ:' + (camp.contentLead || 'Organic')
+            : 'QC:' + camp.country;
           STATE.sentNotifications.unshift({
             time: timeStamp(), sentAt: Date.now(),
-            editor: 'QC:' + camp.country, items: [], reason: 'sent-live', body: msg
+            editor: recipientKey, items: [], reason: 'sent-live', body: msg
           });
           if (STATE.sentNotifications.length > 20) STATE.sentNotifications.pop();
-          // Dismiss this sub-campaign's QC card. Non-persisted \u2014 card reappears on page
-          // refresh, or if any QC value in this sub-campaign changes (handled in setAssetQc).
           if (!STATE.qcDismissed) STATE.qcDismissed = {};
           STATE.qcDismissed[camp.id] = Date.now();
-          logAction('notified', 'QC report sent for ' + camp.country + ' \u00B7 ' + camp.name);
+          logAction('notified', 'QC report sent for ' + camp.country + ' \u00B7 ' + camp.name + ' \u2192 ' + routeLabel);
           toast('\u2713 QC report sent for ' + camp.name, 'success');
           render();
         } else {
@@ -17482,6 +17623,60 @@ var App = {
         toast('Network error sending QC report: ' + (e && e.message ? e.message : 'unknown'), 'error');
       });
     });
+  },
+
+  // Set/clear the Content Lead ownership on a sub-campaign. Only meaningful for
+  // Organic campaigns; used to route QC reports into the lead's daily thread.
+  setCampaignContentLead: function(campaignId, lead) {
+    var camp = findCampaignById(campaignId);
+    if (!camp) return;
+    var val = (lead || '').trim();
+    if (val && CONTENT_LEADS.indexOf(val) < 0) { toast('Unknown Content Lead: ' + val, 'error'); return; }
+    if ((camp.contentLead || '') === val) return;
+    camp.contentLead = val;
+    saveState();
+    logAction('updated', 'Content Lead ' + (val ? 'set to ' + val : 'cleared') + ' for ' + camp.name);
+    render();
+  },
+
+  // Save/clear the daily Slack thread URL for a Content Lead (Millie / Rivers).
+  saveContentLeadDailyThread: function(lead) {
+    if (CONTENT_LEADS.indexOf(lead) < 0) { toast('Unknown Content Lead: ' + lead, 'error'); return; }
+    if (!STATE.contentLeadDailyThreads) STATE.contentLeadDailyThreads = { Millie: null, Rivers: null };
+    var input = document.getElementById('content-lead-thread-input-' + lead);
+    if (!input) return;
+    var url = (input.value || '').trim();
+    if (!url) {
+      STATE.contentLeadDailyThreads[lead] = null;
+      saveState();
+      logAction('updated', 'Cleared Content Lead daily thread for ' + lead);
+      toast('Cleared', 'success');
+      render();
+      return;
+    }
+    var parsed = parseSlackThreadUrl(url);
+    if (!parsed) { toast('Not a valid Slack thread URL', 'error'); return; }
+    STATE.contentLeadDailyThreads[lead] = {
+      date: todayUK(), url: url,
+      channelId: parsed.channelId, threadTs: parsed.threadTs,
+      setAt: Date.now()
+    };
+    saveState();
+    logAction('updated', 'Content Lead daily thread set for ' + lead + ' (channel ' + parsed.channelId + ')');
+    toast('\u2713 Thread set for ' + lead, 'success');
+    render();
+  },
+  clearContentLeadDailyThread: function(lead) {
+    if (!STATE.contentLeadDailyThreads || !STATE.contentLeadDailyThreads[lead]) return;
+    var t = STATE.contentLeadDailyThreads[lead];
+    if (!STATE.contentLeadDailyThreadHistory) STATE.contentLeadDailyThreadHistory = { Millie: [], Rivers: [] };
+    if (!STATE.contentLeadDailyThreadHistory[lead]) STATE.contentLeadDailyThreadHistory[lead] = [];
+    STATE.contentLeadDailyThreadHistory[lead].unshift({ date: t.date, url: t.url });
+    while (STATE.contentLeadDailyThreadHistory[lead].length > 7) STATE.contentLeadDailyThreadHistory[lead].pop();
+    STATE.contentLeadDailyThreads[lead] = null;
+    saveState();
+    logAction('updated', 'Cleared Content Lead daily thread for ' + lead);
+    render();
   },
 
   dismissQcReport: function(campaignId) {
