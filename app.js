@@ -1062,13 +1062,24 @@ var Fb = {
   subscribeBroll: function() {
     if (Fb._brollUnsub) return; // already subscribed
     Fb._brollUnsub = fbDb.collection(Fb.BROLL_COLL).onSnapshot(function(snapshot) {
-      if (snapshot.metadata.fromCache) return; // wait for the server copy
+      // Only skip a fromCache snapshot when it's also empty — that pattern shows
+      // up on listener startup with no cached data, and clobbering STATE.broll
+      // with [] there would flash an empty grid. Cached snapshots with data are
+      // fine to use (they populate immediately on reconnect); server snapshots
+      // (fromCache=false) always take priority as they arrive.
+      if (snapshot.metadata.fromCache && snapshot.empty) return;
       var clips = [];
       snapshot.forEach(function(d) { clips.push(d.data()); });
       STATE.broll = clips;
       if (typeof render === 'function' && Auth._booted && STATE.tab === 'clips') render();
     }, function(err) {
       console.warn('[Fb] broll listener error:', err);
+      // Self-heal: detach the dead listener and try again after a short backoff.
+      // Common triggers are transient permission blips and quota-exhausted from
+      // an unrelated write path putting the SDK into backoff. Preserves the
+      // current STATE.broll so the grid keeps showing the last known data.
+      if (Fb._brollUnsub) { try { Fb._brollUnsub(); } catch (_) {} Fb._brollUnsub = null; }
+      setTimeout(function() { Fb.subscribeBroll(); }, 5000);
     });
   },
   unsubscribeBroll: function() {
@@ -13992,6 +14003,13 @@ var App = {
     }).then(function() {
       STATE.brollSyncBusy = false;
       saveState();
+      // Force-reattach the broll listener so a big write burst (added +
+      // updated + archived across thousands of docs) can't leave the client
+      // showing stale data. Detach inline instead of via unsubscribeBroll so
+      // STATE.broll stays populated during the swap (no empty-grid flicker),
+      // then let the fresh listener re-hydrate it from the server.
+      if (Fb._brollUnsub) { try { Fb._brollUnsub(); } catch (_) {} Fb._brollUnsub = null; }
+      Fb.subscribeBroll();
       render();
     });
   },
