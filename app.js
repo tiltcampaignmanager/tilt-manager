@@ -375,6 +375,7 @@ var Fb = {
       countryWebhooks: STATE.countryWebhooks,
       categoryHeadWebhook: STATE.categoryHeadWebhook,
       qcWebhooks: STATE.qcWebhooks,
+      qcWebhookOrganic: STATE.qcWebhookOrganic,
       slackWorkspace: STATE.slackWorkspace,
       editorSlackChannels: STATE.editorSlackChannels,
       editorSlackIds: STATE.editorSlackIds,
@@ -1661,6 +1662,10 @@ var STATE = {
   //  (b) any video's QC in that sub-campaign is changed (re-dirty \u2192 card reappears).
   qcDismissed: {},
   qcWebhooks: { UK: '', IT: '', ES: '', US: '', PL: '' },
+  // Special QC-report route for Organic campaigns. When set, Organic sub-campaign QC
+  // reports post here instead of the country-level qcWebhooks slot. Cross-country —
+  // Organic is a campaign type, not a country. Falls through to country → global if empty.
+  qcWebhookOrganic: '',
   // Transient (not persisted): per-editor override to disable auto-split on mixed-country batches.
   // Only meaningful for editors whose pending batch spans >1 country (today: Zidni).
   noSplit: {},
@@ -8922,8 +8927,31 @@ function renderAutomationsView() {
 
     '<div class="auto-card">' +
       '<div class="auto-header"><div class="auto-icon">06</div><div><div class="auto-title">Slack Webhooks \u2014 QC Reports</div><div class="auto-sub">Manual QC reports route here when you hit Send on a campaign\u2019s QC card</div></div></div>' +
-      '<div class="auto-desc">One webhook per country, separate from the PM review route above. QC reports are never batched \u2014 you send them manually from the Notifications tab when a campaign is ready for review. Empty rows fall through to the global fallback. Save and Test are per-row.</div>' +
+      '<div class="auto-desc">One webhook per country, plus a dedicated slot for <strong style="color:var(--text1);">Organic</strong> campaigns that overrides the country row when set. Separate from the PM review route above. QC reports are never batched \u2014 you send them manually from the Notifications tab when a campaign is ready for review. Empty rows fall through to the global fallback. Save and Test are per-row.</div>' +
       '<div style="margin-top:10px;">' +
+        (function() {
+          var v = STATE.qcWebhookOrganic || '';
+          var vEsc = escapeHtml(v);
+          var valid = webhookValid(v);
+          var empty = !v;
+          var dotClass = valid ? 'ok' : (empty ? '' : 'bad');
+          var dotTitle = valid
+            ? 'Valid Organic QC webhook saved \u2014 overrides country row for Organic campaigns'
+            : (empty
+                ? 'No Organic QC webhook \u2014 Organic campaigns fall back to their country row'
+                : 'Saved value doesn\u2019t look like a real webhook URL');
+          var inputCls = empty ? 'cwh-empty' : (valid ? '' : 'cwh-invalid');
+          return '<div class="cwh-row">' +
+            '<div class="country-flag" style="background:var(--muted-slate,#64748b);">ORG</div>' +
+            '<span class="cwh-dot ' + dotClass + '" title="' + escapeHtml(dotTitle) + '"></span>' +
+            '<input type="text" id="qcwh-input-ORGANIC" class="' + inputCls + '" ' +
+              'placeholder="https://hooks.slack.com/services/... (Organic campaigns route here; falls back to country/global if empty)" ' +
+              'value="' + vEsc + '" ' +
+              'onblur="App.saveQcOrganicWebhook(this.value)">' +
+            '<button class="save-btn" onclick="App.saveQcOrganicWebhook(document.getElementById(\'qcwh-input-ORGANIC\').value)">Save</button>' +
+            '<button class="edit-btn" onclick="App.testQcOrganicWebhook()">\u{1F4E1} Test</button>' +
+          '</div>';
+        })() +
         STATE.countries.map(function(c) {
           var v = (STATE.qcWebhooks && STATE.qcWebhooks[c.code]) || '';
           var vEsc = escapeHtml(v);
@@ -12570,14 +12598,18 @@ function resolveWebhookForEditor(recipient, items) {
 
 // Resolve the Slack webhook URL for a QC report targeting one campaign. Priority:
 //   1. Campaign-level slackOverride (if set and valid)
-//   2. Country-level qcWebhook (qcWebhooks[countryCode])
-//   3. Global fallback (STATE.webhookUrl)
+//   2. Organic-type QC webhook (qcWebhookOrganic) when the campaign is Organic
+//   3. Country-level qcWebhook (qcWebhooks[countryCode])
+//   4. Global fallback (STATE.webhookUrl)
 function resolveQcWebhookForCampaign(campaignId) {
   var fallback = STATE.webhookUrl || '';
   var camp = findCampaignById(campaignId);
   if (!camp) return fallback;
   var override = (camp.slackOverride || '').trim();
   if (webhookValid(override)) return override;
+  if ((camp.type || DEFAULT_CAMPAIGN_TYPE) === 'Organic' && webhookValid(STATE.qcWebhookOrganic)) {
+    return STATE.qcWebhookOrganic;
+  }
   var qw = STATE.qcWebhooks || {};
   return qw[camp.country] || fallback;
 }
@@ -17237,6 +17269,43 @@ var App = {
       }
     }).catch(function(e) {
       toast('Network error sending QC ping: ' + (e && e.message ? e.message : 'unknown'), 'error');
+    });
+  },
+
+  // Save the Organic-specific QC webhook. When set, QC reports for any Organic-type
+  // campaign route here regardless of country (overrides qcWebhooks[country]).
+  saveQcOrganicWebhook: function(url) {
+    var trimmed = (url || '').trim();
+    if (STATE.qcWebhookOrganic === trimmed) return;
+    STATE.qcWebhookOrganic = trimmed;
+    saveState();
+    logAction('updated', 'Organic QC report webhook ' + (trimmed === '' ? 'cleared' : 'updated'));
+    var label = trimmed === '' ? 'cleared (Organic falls back to country/global)'
+              : (webhookValid(trimmed) ? 'saved' : 'saved, but doesn’t look like a real webhook URL');
+    toast('Organic QC webhook ' + label, webhookValid(trimmed) || trimmed === '' ? 'success' : 'error');
+    render();
+  },
+
+  // Test-ping the Organic QC webhook.
+  testQcOrganicWebhook: function() {
+    var input = document.getElementById('qcwh-input-ORGANIC');
+    var url = input ? input.value.trim() : (STATE.qcWebhookOrganic || '');
+    if (!url) { toast('No Organic QC webhook set — paste one first', 'error'); return; }
+    if (!looksLikeWebhookUrl(url)) { toast('That URL doesn’t look like a Slack incoming webhook', 'error'); return; }
+    if (isPlaceholderWebhook(url)) { toast('That webhook URL looks like a placeholder', 'error'); return; }
+    if (STATE.qcWebhookOrganic !== url) { STATE.qcWebhookOrganic = url; saveState(); }
+    toast('Sending test ping to Organic QC...', '');
+    var text = ':warning: Organic QC webhook test ping from Tilt Creative Tracker — ' + new Date().toLocaleString();
+    postToSlack(url, text).then(function(r) {
+      if (r.ok) {
+        toast('✓ Organic QC test ping delivered', 'success');
+        logAction('notified', 'Organic QC webhook test ping sent successfully');
+      } else {
+        toast('Slack rejected the Organic QC ping: "' + r.body + '" (status ' + r.status + ')', 'error');
+        logAction('deleted', 'Organic QC webhook test failed: ' + r.body);
+      }
+    }).catch(function(e) {
+      toast('Network error sending Organic QC ping: ' + (e && e.message ? e.message : 'unknown'), 'error');
     });
   },
 
