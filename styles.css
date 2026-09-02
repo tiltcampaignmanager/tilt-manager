@@ -1829,7 +1829,7 @@
   .clip-panel-pos { font-size: 11px; color: var(--text3); margin: 0 4px; }
   .clip-panel-nav button:last-of-type { margin-left: auto; }
   .clip-panel-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
-  .clip-preview-frame { width: 60%; max-width: 260px; aspect-ratio: 9 / 16; background: #000; border-radius: 6px; overflow: hidden; margin: 0 auto; }
+  .clip-preview-frame { width: 60%; max-width: 260px; aspect-ratio: 9 / 16; background: #000; border-radius: 6px; overflow: hidden; align-self: center; }
   .clip-preview-frame iframe, .clip-preview-frame video { width: 100%; height: 100%; border: 0; display: block; }
   .clip-preview-empty { padding: 30px; background: var(--bg3); border-radius: 6px; text-align: center; color: var(--text3); font-size: 12px; }
   .clip-preview-empty a { color: var(--accent2); }
