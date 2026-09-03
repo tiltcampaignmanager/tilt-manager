@@ -18932,6 +18932,71 @@ window.addEventListener('online', function() {
   if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload();
 });
 
+// ===================== AUTO-UPDATE CHECKER =====================
+// Detects when a new build has been deployed (deploy.sh cache-busts
+// app.js/styles.css with content-hash query strings in index.html) and
+// reloads the tab so no computer sits on an old version. Runs everywhere
+// EXCEPT this machine — the current dev doesn't need to be auto-reloaded
+// while iterating locally.
+(function () {
+  // Skip when running from file:// or on localhost — that's the dev loop.
+  if (location.protocol === 'file:' || /^(localhost|127\.|0\.0\.0\.0)/.test(location.hostname)) return;
+
+  // Capture the app.js hash this tab BOOTED with. The <script src="app.js?v=xxxx">
+  // tag in index.html carries it; parse the query string once and remember it.
+  var bootScript = document.querySelector('script[src*="app.js"]');
+  var bootMatch  = bootScript && bootScript.getAttribute('src').match(/[?&]v=([\w.\-]+)/);
+  var bootVer    = bootMatch ? bootMatch[1] : null;
+  if (!bootVer) return; // no version stamp — nothing to compare against, bail
+
+  var POLL_MS   = 60 * 1000;    // check once a minute
+  var reloading = false;
+
+  function isBusy() {
+    // Don't yank the page out from under an active edit: modal open, or an
+    // input/textarea/contenteditable currently focused. We'll retry next tick.
+    var modalOpen = !!document.querySelector('.modal-overlay.open');
+    if (modalOpen) return true;
+    var a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return true;
+    return false;
+  }
+
+  function scheduleReload() {
+    if (reloading) return;
+    reloading = true;
+    if (typeof toast === 'function') toast('New version available — reloading…', 'success');
+    // Give the toast a beat to render, then reload once the user's not mid-edit.
+    var tryReload = function () {
+      if (isBusy()) { setTimeout(tryReload, 3000); return; }
+      window.location.reload();
+    };
+    setTimeout(tryReload, 1500);
+  }
+
+  function check() {
+    if (reloading) return;
+    if (document.hidden) return;         // don't poll background tabs
+    if (!navigator.onLine) return;       // offline — wait for reconnect
+    fetch('index.html?_=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (html) {
+        if (!html) return;
+        var m = html.match(/app\.js\?v=([\w.\-]+)/);
+        if (m && m[1] && m[1] !== bootVer) scheduleReload();
+      })
+      .catch(function () { /* transient — try again next tick */ });
+  }
+
+  // Kick off after a short delay so it doesn't race the initial page load,
+  // then poll on an interval AND when the tab comes back to the foreground
+  // (people often leave the tracker open in a background tab).
+  setTimeout(check, 15 * 1000);
+  setInterval(check, POLL_MS);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+  window.addEventListener('focus', check);
+})();
+
 // ===================== HOST BRIDGE (postMessage) =====================
 // Two-way integration layer for when the tracker is embedded as an <iframe>
 // inside another web app (the "host"). Lets the host drive the tracker
