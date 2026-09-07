@@ -44,7 +44,7 @@ Creative output for paid social is a high-throughput, multi-stakeholder pipeline
 - Every mutation re-renders the whole app (debounced for typing).
 - Every mutation calls `saveState()` which schedules a debounced Firestore write (600ms). There is no localStorage write anywhere. Firestore is the sole authoritative store.
 - Firestore writes use a **batch commit**: the main `state/app` document (campaigns, config, etc.) and any changed/deleted asset documents in the `state/app/assets` subcollection are written atomically in one batch. Only assets that have actually changed (diffed by JSON comparison) are included in the batch.
-- A Firestore listener on `state/app` pulls remote snapshots back into `STATE` (last-write-wins). A second listener on the `state/app/assets` subcollection keeps `STATE.assets` in sync in real time. Both listeners reject `fromCache: true` snapshots (stale IndexedDB) — only server-confirmed data is ever applied. Incoming snapshots are deferred while a local upload is pending (up to 2s, 8 retries × 250ms) so in-flight edits are never overwritten by a simultaneous sync from another browser.
+- A Firestore listener on `state/app` pulls remote snapshots back into `STATE` via `Fb.applySnapshot`. A second listener on the `state/app/assets` subcollection keeps `STATE.assets` in sync in real time. Both listeners reject `fromCache: true` snapshots (stale IndexedDB) — only server-confirmed data is ever applied. Incoming snapshots are deferred while a local upload is pending (up to 2s, 8 retries × 250ms) so in-flight edits are never overwritten by a simultaneous sync from another browser. **Conflict resolution is per-field, not blanket last-write-wins** — see §2.2 for the per-field merge rules that protect fresh additions from stale-tab overwrites.
 - If the Firestore write fails, a red toast shows the error. Upload is retried with exponential backoff (3s → 8s → 20s → 60s cap). If the device is offline, the toast reads **"Upload failed: Offline"**.
 - A **sync indicator** in the topbar shows real-time Firestore status. It transitions as follows: "Saving…" (spinner) appears immediately when any change is queued (before the 600ms debounce fires); "✓ All changes saved" (green) for 2.5s after Firestore confirms the write; "⚠ Save failed — retrying…" if Firestore is temporarily unreachable; "⚠ Save failed" on quota exhaustion or if the user is not signed in. If `uploadNow()` finds no diff (nothing actually changed), the indicator returns to idle without showing any status.
 - An **offline indicator** in the topbar shows a persistent amber **⚡ Offline** chip when the device loses network (`window.offline` event). When the connection is restored, the chip is replaced by a green **✓ Back Online** chip that fades out after 3 seconds. On reconnect `scheduleUpload()` is called immediately to flush any pending changes.
@@ -62,6 +62,53 @@ Who's online is shown as a row of avatar circles in the topbar, matching the Goo
 - **Avatars**: up to 5 shown; any beyond 5 collapse into a "+N" chip. Each avatar is colour-coded deterministically from the user's UID (10 preset colours). Initials are first + last initial of the display name.
 - **Tooltip**: hovering an avatar shows the person's name and their current location (e.g. "Today tab", "UK · Campaign Name").
 - **DOM update**: the `.presence-stack` wrapper is always rendered in the topbar. The `Presence._updateDom()` method sets `innerHTML` directly — no full `render()` call — so presence updates never trigger a re-render loop.
+
+### 2.2 Multi-tab & cross-device sync
+
+Every open tab (yours in another window, a teammate in another city) is a live view onto the same Firestore doc. Local edit → mutate `STATE` → re-render → debounced upload (600ms; category adds flush immediately) → Firestore fans out → every other tab's `onSnapshot` fires → `applySnapshot` merges into their `STATE` → they re-render. End-to-end latency is typically **200–500ms globally**. Your own tab's echo is skipped via `hasPendingWrites`.
+
+**The core race problem.** Every `saveState()` uploads the WHOLE `state/app` doc from that browser's in-memory `STATE`. When two tabs edit in parallel, the last writer's blob overwrites the first writer's blob field-by-field. A teammate saving a video edit could silently wipe a category, grade, or Slack channel URL you just set in a different tab — because their upload carried their stale copy of that field. The disappearing-categories bug (2026-09-07) was the most visible symptom.
+
+**Per-field merge rules** (applied in `Fb.applySnapshot`, after the generic `STATE[k] = data[k]` overwrite pass, with the affected keys skipped in that pass):
+
+| Field | Merge rule |
+|---|---|
+| `categories`, `categoriesOrganic` | Union by lowercase name; incoming order preserved, local-only entries appended after |
+| `sellers`, `products` | Union by lowercase string; incoming first, local-only appended |
+| `countries` | Union by `code`; incoming first, local-only appended |
+| `campaigns` | Union by `id` when `nextCampaignId` isn't stale; incoming wins on same-id (edits still last-write-wins per campaign, but fresh CREATIONS never disappear) |
+| `grades` | Union by `id`; on same-id conflict newer `updatedAt` wins |
+| `scorecardMeta` | Per-editor, per-field merge; local overrides on conflict (protects a just-set target from a stale echo) |
+| `editorSlackChannels`, `editorSlackIds`, `categoryHeadSlackIds`, `pmSlackIds`, `categoryHeadOverrides`, `qcWebhooks`, `countryWebhooks` | Per-key: non-empty local beats empty incoming; otherwise incoming (last-writer for intentional edits) |
+| `metaAdAccountIds` | Fixed 4-slot array; per-slot non-empty local beats empty incoming |
+| `qcDismissed` | Union of `true` flags (a stale save can't un-dismiss a video another tab just dismissed) |
+| `gradingStreak` | `best = max(local, incoming)`; `last`/`count` pair whichever side has the more recent `last` date |
+| `pendingBatches` | Per-recipient union of items by id; batch metadata (`firstQueuedAt`, `sendingSince`) prefers incoming |
+| `nextAssetId`, `nextCampaignId`, `nextBatchItemId` | `Math.max` (monotonic — a stale writer's lower counter never rolls ours back) |
+| `recentNotifKeys` | Union by `key` keeping newest `ts`, pruned to the recency window |
+| `dailyThreads`, `catHeadDailyThreads`, `intlDailyThread`, `contentLeadDailyThreads` | Per-slot reconcile by `setAt` timestamp — the most-recently-set thread wins |
+| `assets`, `assetCount` | Never applied from the main doc — the `state/app/assets/{id}` subcollection is the sole source of truth |
+| `broll` | Never applied from the main doc — the `state/app/broll/{id}` subcollection is the sole source of truth |
+| everything else | Direct overwrite (`STATE[k] = data[k]`) — matches every stored snapshot's existing shape |
+
+**Trade-off:** because the merges are union-based, deleting an unused entry (category, seller, country) can be resurrected briefly if another still-open tab hadn't yet seen the delete when it uploaded. The user just deletes again. This is deliberate — silently losing ADDS was the far worse failure mode and is what the fix targets.
+
+**Cross-tab update pill.** Every upload is stamped with a per-tab random UUID (`Fb._tabId`) in `_lastEditedByTab`. When an incoming snapshot arrives with a *different* tab id — meaning it came from another tab (yours in another window OR a teammate's) — a persistent pill appears top-right: **"N updates from [name] · Reload · ×"**. Data has already synced via `onSnapshot` (no reload needed to see it), so the pill is a comfort signal + one-click reload for anyone who wants a hard refresh. Rapid consecutive cross-tab writes batch into a single pill with a counter. Auto-hides after 20s of quiet; dismissable with ×. Own-tab echoes never trigger it.
+
+**Category-add toast.** In addition to the pill, remote category additions get a specific bottom-right toast: *"New category added by [name]: [category]"*. Own adds are pre-marked as seen via `Fb._seenCategories` so this doesn't fire for your own writes.
+
+**Per-user UI state is intentionally isolated** so a teammate's view doesn't hijack yours. Never uploaded to Firestore (kept in memory only, some in `localStorage` under the tracker key). Full list mirrored in both `buildSnapshot` (exclusion) and `applySnapshot`'s `PER_USER_UI_FIELDS` guard:
+- Selection: current tab, active campaign, expanded countries, sidebar collapse/month filter
+- Filters: status, editor, QC, search, date-approved / est-delivery, cat-review window, video weekly group
+- Reporting choices: period, month, week offset, quarter, country, type, category, view, approval
+- Editor Stats view: selected peer, badges collapsed, group collapse map
+- Grading view: period, editor filter, custom entry, campaign, year, month, show-dismissed, type, week
+- Clips tab UI: search, type/category/seller/product/tagged filters, show-archived / show-dismissed, done-strip height, right-panel width, selected clip, bulk selection, last sync stats
+
+**Failure modes:**
+- **Offline mid-edit** — writes queue locally, `⚡ Offline` chip appears. On reconnect: `scheduleUpload()` fires immediately; incoming remote snapshots are blocked until the local write completes (`_pendingLocalJson` guard).
+- **Firestore unreachable on boot** — warning banner shown, STATE stays in-memory only, no writes accepted. `Fb._ready` is never set, so no data corruption.
+- **Stale tab on old code** — the auto-update checker polls `index.html` every minute, detects a new content-hash on `app.js`, and auto-reloads once the tab is idle (no focused input, no open modal). Nobody sits on an outdated build for more than ~1 minute.
 
 ### Routing model
 There is no router. Tabs in the topbar swap visible panels via state. Tab order is user-draggable and persisted in `STATE.tabOrder`.
@@ -667,6 +714,8 @@ A separate import modal handles Italy-specific CSV files, which use a different 
 
 - **Category order and Streetwear**: `DEFAULT_CATEGORIES` reordered to the canonical team order (Sneakers, TCG, Stone Island, Luxury, Vintage, Bags and Accessories, Y2K, Streetwear, Health and Beauty, Jewellery; Essentials and BTS kept at end for backward compat). Streetwear added as a new category. On `applySnapshot`, existing `STATE.categories` arrays are automatically reordered to match and Streetwear is injected if absent, so existing users pick up the change without a data reset. The **Category field** in the Add/Edit Video Asset modal changed from a free-text `<input>` to a `<select>` dropdown populated from `STATE.categories`, preventing typos and ensuring new assets always get a valid category. Category Head assignments also updated to reflect the current team: Sneakers → Anand, TCG → Hanyan, Stone Island/Vintage/Bags and Accessories/Y2K/Jewellery/Health and Beauty → Nazy, Luxury → Cristian.
 
+- **Stale-tab overwrite wiping fresh data across every tab (2026-09-07)**: Every `saveState()` uploaded the WHOLE `state/app` document from that browser's in-memory `STATE`. When two tabs edited in parallel (yours in another window, or a teammate elsewhere), the last writer's blob overwrote the first writer's field-by-field. Most visibly, an admin-added organic category disappeared on next reload — but the same race silently wiped `grades`, `scorecardMeta`, `campaigns` (newly created), `countries`, `sellers`, `products`, every Slack channel/ID map, `qcWebhooks`, `countryWebhooks`, `metaAdAccountIds`, `qcDismissed`, `gradingStreak`, and `pendingBatches` under the right timing. Reproduced with `applySnapshot(staleBlob)` for each field. Fixed by adding **per-field merge rules** in `Fb.applySnapshot` (see §2.2 for the full table) that skip the generic overwrite for these keys and apply a tailored merge instead — union by name/id for growing lists, "non-empty local beats empty incoming" for string maps, `Math.max` for `best` streaks, and so on. Category adds now also flush immediately (bypass the 600ms debounce). Also added: **per-tab UUID** stamped as `_lastEditedByTab` on every upload, and a **cross-tab update pill** top-right ("N updates from [name] · Reload · ×") that appears whenever a snapshot arrives from a different tab. Own-tab echoes never trigger the pill; rapid consecutive writes batch into a single pill with a counter. A category-specific bottom-right toast ("New category added by [name]: X") fires when the picker's list changes. Verified with **40 stress tests** — 8 categories, 5 pill, 7 grading, 20 every-tab, plus a 1000-op chaotic all-tabs stress — 0 losses. Trade-off documented: deleting an unused entry can resurrect briefly if another tab hasn't seen the delete yet; user just deletes again. Silently losing ADDS was the far worse failure mode.
+
 ---
 
 ## 10. Known Gaps (as-built)
@@ -675,7 +724,7 @@ These are flagged so future work can address them — they are **not** broken, t
 
 - No analytics / reporting dashboard (no monthly burn chart, no editor utilisation chart).
 - Search within the campaign toolbar is scoped to the current campaign; the sidebar global search covers all campaigns but is limited to asset name matching (no status/editor filtering).
-- Firestore conflict resolution is last-write-wins — no CRDT, no merge UI.
+- Firestore conflict resolution is **per-field merge** (see §2.2), not a full CRDT and not blanket last-write-wins. Growing lists (categories, grades, campaigns, sellers, etc.) union — safe for concurrent adds; edits to existing campaign fields are still last-write-wins per campaign since campaigns lack a per-object `updatedAt`. Deletes of unused entries can resurrect briefly if another tab hadn't synced the delete yet — user simply deletes again.
 - No file uploads — Drive / Brief / Final Video are URL fields only.
 - QC-report send is manual; there is no auto-send when a campaign hits 100% approval.
 - Activity log is text-only; no query, filter, or export UI.
