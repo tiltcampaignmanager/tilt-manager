@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-**Tilt Creative Tracker** is a video-asset workflow tool for a creative team producing short-form videos across five markets (UK, IT, ES, US, PL). It centralises:
+**Tilt Creative Tracker** is a video-asset workflow tool for a creative team producing short-form videos across four markets (UK, IT, ES, US). It centralises:
 
 - Asset tracking through an approval pipeline
 - Editor workload scheduling
@@ -85,20 +85,21 @@ Every open tab (yours in another window, a teammate in another city) is a live v
 | `gradingStreak` | `best = max(local, incoming)`; `last`/`count` pair whichever side has the more recent `last` date |
 | `pendingBatches` | Per-recipient union of items by id; batch metadata (`firstQueuedAt`, `sendingSince`) prefers incoming |
 | `nextAssetId`, `nextCampaignId`, `nextBatchItemId` | `Math.max` (monotonic — a stale writer's lower counter never rolls ours back) |
+| `deletedCampaignIds` | `{id: ts}` tombstone ledger, unioned and pruned to a 24h window. `campaigns` merge drops any id in the ledger before returning — so a stale tab that still has a just-deleted campaign in its local STATE can't resurrect it on next upload. |
 | `recentNotifKeys` | Union by `key` keeping newest `ts`, pruned to the recency window |
 | `dailyThreads`, `catHeadDailyThreads`, `intlDailyThread`, `contentLeadDailyThreads` | Per-slot reconcile by `setAt` timestamp — the most-recently-set thread wins |
 | `assets`, `assetCount` | Never applied from the main doc — the `state/app/assets/{id}` subcollection is the sole source of truth |
 | `broll` | Never applied from the main doc — the `state/app/broll/{id}` subcollection is the sole source of truth |
 | everything else | Direct overwrite (`STATE[k] = data[k]`) — matches every stored snapshot's existing shape |
 
-**Trade-off:** because the merges are union-based, deleting an unused entry (category, seller, country) can be resurrected briefly if another still-open tab hadn't yet seen the delete when it uploaded. The user just deletes again. This is deliberate — silently losing ADDS was the far worse failure mode and is what the fix targets.
+**Trade-off:** because the merges are union-based, deleting an unused entry (category, seller, country) can be resurrected briefly if another still-open tab hadn't yet seen the delete when it uploaded. The user just deletes again. This is deliberate — silently losing ADDS was the far worse failure mode and is what the fix targets. **Exception**: campaign deletes have a dedicated 24h tombstone ledger (`deletedCampaignIds`) so they don't resurrect at all — same-day fix after the resurrection was reported on a very visible surface.
 
 **Cross-tab update pill.** Every upload is stamped with a per-tab random UUID (`Fb._tabId`) in `_lastEditedByTab`. When an incoming snapshot arrives with a *different* tab id — meaning it came from another tab (yours in another window OR a teammate's) — a persistent pill appears top-right: **"N updates from [name] · Reload · ×"**. Data has already synced via `onSnapshot` (no reload needed to see it), so the pill is a comfort signal + one-click reload for anyone who wants a hard refresh. Rapid consecutive cross-tab writes batch into a single pill with a counter. Auto-hides after 20s of quiet; dismissable with ×. Own-tab echoes never trigger it.
 
 **Category-add toast.** In addition to the pill, remote category additions get a specific bottom-right toast: *"New category added by [name]: [category]"*. Own adds are pre-marked as seen via `Fb._seenCategories` so this doesn't fire for your own writes.
 
 **Per-user UI state is intentionally isolated** so a teammate's view doesn't hijack yours. Never uploaded to Firestore (kept in memory only, some in `localStorage` under the tracker key). Full list mirrored in both `buildSnapshot` (exclusion) and `applySnapshot`'s `PER_USER_UI_FIELDS` guard:
-- Selection: current tab, active campaign, expanded countries, sidebar collapse/month filter
+- Selection: current tab, active campaign, expanded countries, sidebar collapse/month filter, per-country type/month expand state (`sidebarTypeExpanded`, `sidebarMonthExpanded`), per-country type priority order (`sidebarTypeOrder`)
 - Filters: status, editor, QC, search, date-approved / est-delivery, cat-review window, video weekly group
 - Reporting choices: period, month, week offset, quarter, country, type, category, view, approval
 - Editor Stats view: selected peer, badges collapsed, group collapse map
@@ -139,7 +140,7 @@ Auth is gated to `@tilt.app` emails. Each user's role lives in Firestore at `use
 |---|---|
 | Editors | **Zidni, Sharm, Patty** (Elsa is admin) |
 | Category Heads | **Anand** (Sneakers), **Hanyan** (TCG), **Nazy** (Stone Island, Vintage, Bags and Accessories, Y2K, Jewellery, Health and Beauty), **Cristian** (Luxury) |
-| PMs | One per country (UK, IT, ES, US, PL) |
+| PMs | One per country (UK, IT, ES, US) |
 | Admin | **Elsa** (bootstrap admin; auto-promoted on sign-in via `Fb.BOOTSTRAP_ADMIN_EMAILS`) |
 
 Auto-scheduling (the 3pm scheduler) treats **Zidni, Sharm, Patty** as auto-assigned and **Elsa** as manual-only (she receives reactive pings, not scheduled drops).
@@ -169,7 +170,7 @@ All entities live as arrays/objects on the global `STATE`. Identifiers are local
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string or number | Local UID. Seed data uses plain integers (`1`–`5`); campaigns created via the UI or imported from CSV use prefixed strings (`c7`, `c8`, …). All lookup functions normalise with `String()` so both forms work transparently. |
-| `country` | string | One of UK/IT/ES/US/PL |
+| `country` | string | One of UK/IT/ES/US |
 | `rank` | number | Order within its country |
 | `name` | string | e.g. "Privilege Supply – Luxury" |
 | `brief` | string | Free text |
@@ -201,7 +202,7 @@ All entities live as arrays/objects on the global `STATE`. Identifiers are local
 | `rawVideo` | string (URL) | Drive link |
 | `editingBrief` | string (URL) | Notion link |
 | `finalVideo` | string (URL) | Final cut link |
-| `sparksCode` | string | Sparks promotion code — only surfaced in the UI for IT, ES, PL campaigns |
+| `sparksCode` | string | Sparks promotion code — only surfaced in the UI for IT, ES campaigns |
 | `estDelivery` | string (YYYY-MM-DD) | ETA |
 | `dateApproved` | string (YYYY-MM-DD) | Stamped on transition to Approved |
 | `scheduledFor` | string (YYYY-MM-DD) | Stamped by the scheduler |
@@ -210,7 +211,7 @@ All entities live as arrays/objects on the global `STATE`. Identifiers are local
 | `assignedAt` | timestamp | Set when an editor is assigned |
 
 ### 4.3 Country
-`STATE.countries[]` — 5 hardcoded entries (UK, IT, ES, US, PL) with flag styling.
+`STATE.countries[]` — 4 entries (UK, IT, ES, US) with flag styling. Poland was removed 2026-09-07; a one-shot migration in `applySnapshot` strips any lingering `PL` entry from live Firestore state on next load.
 
 ### 4.4 Category
 `STATE.categories[]` — user-managed. Seeded in this canonical display order: **Sneakers, TCG, Stone Island, Luxury, Vintage, Bags and Accessories, Y2K, Streetwear, Health and Beauty, Jewellery** (Essentials and BTS retained at the end for backward compatibility). Each has a colour pair (bg/fg). Each category resolves to a Category Head via the `CATEGORY_HEADS` map. On first load after this change, existing `STATE.categories` arrays are automatically reordered to match and Streetwear is added if missing.
@@ -219,7 +220,7 @@ All entities live as arrays/objects on the global `STATE`. Identifiers are local
 `STATE.pendingBatches{}` — keyed by recipient:
 
 - `Zidni` / `Sharm` / `Patty` / `Elsa` — editor batches
-- `PM:UK` / `PM:IT` / `PM:ES` / `PM:US` / `PM:PL` — PM "For Review" queues
+- `PM:UK` / `PM:IT` / `PM:ES` / `PM:US` — PM "For Review" queues
 - `CHQ:<category>` — Category Head QC batches
 - `CHA:<country>` — Category Head Approved batches
 
@@ -269,8 +270,11 @@ All tabs are drag-reorderable in the topbar; order is persisted.
 
 ### 5.1 Campaigns (default)
 - **Sidebar**: countries grouped, sub-campaigns underneath. Compact toggle (110px / 280px). A **global search bar** at the top of the sidebar searches asset names across all campaigns — results show the flag, asset name, and campaign name; clicking a result navigates to the campaign and flashes the asset row. Month filter dropdown filters campaigns by whether any of their assets has `estDelivery` in that month. Campaigns with `done = true` display with a **green left accent border**, light green background tint, and dimmed name text. Below each country section (in full mode), two side-by-side buttons: **+ Add Campaign** and **⬇ Import** — both always visible regardless of whether the country is expanded.
+- **Per-country type + month grouping (2026-09-07)**: inside each country group, campaigns split into **Paid Ads** and **Organic** sub-sections, and each type further splits by `monthYear` (`Sep 2026`, `Aug 2026`, …, `No date` for undated campaigns). Current month opens by default, others collapse. State keys: `sidebarTypeExpanded['<COUNTRY>|paid'|'organic']` and `sidebarMonthExpanded['<COUNTRY>|<type>|YYYY-MM']`. Per-user (excluded from the Firestore snapshot). Compact mode skips the grouping — the strip is too narrow for the extra depth.
+- **Drag-to-reorder priority**: the two type headers (Paid Ads / Organic) are draggable within a country. Dropping one on the other swaps the pair — `STATE.sidebarTypeOrder[<COUNTRY>]` stores `['paid','organic']` or `['organic','paid']`. Each country's order is independent. A grip appears on hover; the click that would fire right after a drop is suppressed (via `TypeDragState.justDropped`) so releasing on the other section doesn't accidentally collapse it.
+- **Activity badges**: every type header and every month row carries a badge summarising how many campaigns inside are *active* (`!done && !killedDate`). **Amber `N active`** when work is still open — the month label also goes bold to stand out even when collapsed. **Green ✓ all done** when every campaign in the group is done or killed. Empty groups render no badge. `isCampActive()` is the shared predicate.
 - **Header**: campaign title, brief, rank, asset count, approval %, Drive/Brief/Finals link pills, month chip, Slack override warning (if any). A **Mark Done / ✓ Done** button toggles the campaign's `done` state; when done the button turns green. A **✓ Approve All Assigned (N)** button appears when the campaign has one or more `Assigned` assets — clicking it bulk-approves all of them, stamps `dateApproved = today`, and fires the normal Slack notifications.
-- **Asset table**: `# | Name | Category | Difficulty | Raw | Brief | Editor | Video | [Sparks Code] | ETA | Date Approved | QC | Status | Category Head QC | CH Date Approved | Actions`. Inline editing on most cells. The **Sparks Code** column is only shown for IT, ES, and PL campaigns. The **Video** cell shows a copy button (⧉) when a Final Video URL is set — clicking it copies `Video name: URL` to the clipboard. **For IT, ES, and PL campaigns**, the **Category Head QC** and **CH Date Approved** columns are hidden from the asset table, and the **"All CH QC Approved"** and **"Sync CH Date"** toolbar buttons are also hidden.
+- **Asset table**: `# | Name | Category | Difficulty | Raw | Brief | Editor | Video | [Sparks Code] | ETA | Date Approved | QC | Status | Category Head QC | CH Date Approved | Actions`. Inline editing on most cells. The **Sparks Code** column is only shown for IT and ES campaigns. The **Video** cell shows a copy button (⧉) when a Final Video URL is set — clicking it copies `Video name: URL` to the clipboard. **For IT and ES campaigns**, the **Category Head QC** and **CH Date Approved** columns are hidden from the asset table, and the **"All CH QC Approved"** and **"Sync CH Date"** toolbar buttons are also hidden.
 - **Filters**: search (scoped to current campaign), Status, QC, Editor.
 - **Actions**: + Add Video, edit, duplicate, delete (admin), version history.
 
@@ -282,7 +286,7 @@ All tabs are drag-reorderable in the topbar; order is persisted.
 - Daily pace pill: UK Paid Ads approved today vs **10/day** target.
 - Per-country approval tally for the day.
 - "This Week" section: campaign cards aggregated by status; weekly pace pill (workdays × 10).
-- **Monthly tally panel**: sits above the board. Shows video count vs 200 target, pace indicator, progress bar with expected-pace marker, and per-week chips (Friday-ending). Cancelled assets (status = Cancelled or categoryHeadQc = Cancelled) are excluded from total counts for all progress calculations — a campaign where every non-cancelled video is CH-approved shows 100%. The count is based on **campaign `monthYear` tag** — any video added to a campaign tagged to a given month counts toward that month's tally, regardless of approval status or when it was approved. Includes a **month dropdown** populated from the `monthYear` fields of existing campaigns — selecting a past month shows its final count and goal-met/not-met status instead of live pace. Organic videos are tracked separately in a sub-tally with no target. Month selection is transient (not persisted).
+- **Monthly tally panel** (2026-09-07: flipped from UK Paid Ads to Organic): sits above the board. Now tracks **Organic** approvals against a **1 video per workday** goal — the monthly target scales with the month (e.g. Sep 2026 has 22 workdays → 22-video goal). Shows video count vs. that target, pace indicator (Ahead / On pace / Behind / At risk), progress bar with expected-pace marker, and per-week chips (Friday-ending). Weekly chips also count organic approvals. Cancelled-by-QC aside is scoped to Organic campaigns (matches the primary tally). UK Paid Ads is no longer displayed here — the daily pace pill on the Today view still tracks the 10/day UK Paid target for reference. Month dropdown unchanged (populated from `monthYear` fields). Month selection is transient (not persisted).
 
 ### 5.3 Daily Log
 Accountability grid for **Zidni, Sharm, Patty** (Elsa excluded — she is manual-only).
@@ -355,7 +359,7 @@ Bucketing: a grade's period = the video's delivery month (`estDelivery || dateAp
 
 ### 5.9 Editor Stats
 
-Strava-style personal page per editor. Added 2026-07-30. Access is doubly gated (see §3.4): role must be `editor` (or `admin` for Elsa), AND the sign-in email must resolve via `emailToEditor` to a name in `EDITOR_STATS_EDITORS`, OR the email prefix must be in `EDITOR_STATS_VIEWERS`. Both lookups require the `@tilt.app` domain.
+Strava-style personal page per editor. Added 2026-07-30. **Content gated to admin only as of 2026-09-07**: the tab is still visible in the nav for anyone who previously had access (editors + admin + Elsa the viewer), but only `Auth.user.role === 'admin'` renders the wrap card / badges / scorecard. Everyone else sees a 🚧 **Under Construction** card ("Editor Stats is being rebuilt. Check back soon."). The gate lives at the very top of `renderEditorStatsView` — flip the check to re-enable for editors when the rebuild ships. Access is otherwise doubly gated (see §3.4): role must be `editor` (or `admin` for Elsa), AND the sign-in email must resolve via `emailToEditor` to a name in `EDITOR_STATS_EDITORS`, OR the email prefix must be in `EDITOR_STATS_VIEWERS`. Both lookups require the `@tilt.app` domain.
 
 Two access lanes:
 
@@ -714,6 +718,16 @@ A separate import modal handles Italy-specific CSV files, which use a different 
 
 - **Category order and Streetwear**: `DEFAULT_CATEGORIES` reordered to the canonical team order (Sneakers, TCG, Stone Island, Luxury, Vintage, Bags and Accessories, Y2K, Streetwear, Health and Beauty, Jewellery; Essentials and BTS kept at end for backward compat). Streetwear added as a new category. On `applySnapshot`, existing `STATE.categories` arrays are automatically reordered to match and Streetwear is injected if absent, so existing users pick up the change without a data reset. The **Category field** in the Add/Edit Video Asset modal changed from a free-text `<input>` to a `<select>` dropdown populated from `STATE.categories`, preventing typos and ensuring new assets always get a valid category. Category Head assignments also updated to reflect the current team: Sneakers → Anand, TCG → Hanyan, Stone Island/Vintage/Bags and Accessories/Y2K/Jewellery/Health and Beauty → Nazy, Luxury → Cristian.
 
+- **UK sidebar redesign + activity badges + Poland removal + Monthly Tally flip (2026-09-07)**: several UX cleanups shipped together the same day the stale-tab merge fix landed.
+  (1) **Per-country type + month grouping (§5.1)** — every country's campaigns now split into Paid Ads / Organic sub-sections, and each type further groups by `monthYear`. Current month opens by default. State keys: `sidebarTypeExpanded['<COUNTRY>|<type>']` and `sidebarMonthExpanded['<COUNTRY>|<type>|YYYY-MM']`, both per-user. Compact mode keeps the old flat layout.
+  (2) **Drag-to-reorder priority** — the two type headers inside a country are draggable; swapping them writes `STATE.sidebarTypeOrder[<COUNTRY>]` (`['paid','organic']` by default, or `['organic','paid']` after a swap). Each country's order is independent. A one-shot `TypeDragState.justDropped` flag suppresses the click that would otherwise fire right after a drop.
+  (3) **Activity badges** — every type header and month row carries an amber `N active` pill when any campaigns in the group are not done and not killed, or a green `✓ all done` pill when all wrapped. The month label goes bold when the group has active work so collapsed months still signal work. `isCampActive()` is the shared predicate.
+  (4) **Poland removed** — dropped from `CANONICAL_COUNTRIES`, seed state, all hard-coded country lists (`INTL_COUNTRIES`, IT/ES/PL simple-approval filter, ad-account meta labels, PRD text, etc.). Added a one-shot migration in `applySnapshot` that strips any stored `PL` entry from `STATE.countries` and `STATE.expandedCountries` on next load, so live Firestore state auto-cleans without a manual op. Idempotent — no-op after the first migration.
+  (5) **Board Monthly Tally scope flip** — was UK Paid Ads (200/month goal), now Organic (1/workday goal, so target scales with the month). Weekly chips + Cancelled-by-QC aside also scoped to Organic. UK Paid Ads reference card removed the same day. The Today view's daily-pace pill still tracks the 10/day UK Paid target for reference.
+  (6) **Editor Stats gated to admin only** — the tab still shows in the nav for anyone who previously had access, but only `Auth.user.role === 'admin'` renders the wrap card / badges / scorecard. Everyone else lands on a 🚧 Under Construction card. Flip the check at the top of `renderEditorStatsView` to re-enable for editors when the rebuild ships.
+  (7) **Clips atomic tag ops** — `addBrollTag` and `removeBrollTag` used to write the full `tags` array in a set-merge patch. Two tabs concurrently adding different tags would race and one add would be lost (last writer's array won). Fixed by switching to `firebase.firestore.FieldValue.arrayUnion(v)` / `arrayRemove(toRemove)` so Firestore applies each op atomically on the server. Local optimistic mutation still runs so the UI is instant. Verified with 6 unit tests + confirmed `FieldValue` sentinel on the wire.
+  (8) **Campaign delete tombstones** — a corollary to the union-merge fix: because merged snapshots preserve local-only entries by design, a stale tab's routine save could resurrect a campaign you had just deleted. Added a shared `STATE.deletedCampaignIds` ledger (`{id: ts}`), synced through Firestore and union-merged in `applySnapshot`, with a 24-hour TTL. `mergeCampaigns` now filters incoming (and local) campaigns by the tombstone set before returning; assets pointing at a tombstoned campaign are also purged from `STATE.assets` on apply. Two delete paths (`deleteCampaign` and `App.deleteSubcamp`) both call `tombstoneCampaign(id)`.
+
 - **Stale-tab overwrite wiping fresh data across every tab (2026-09-07)**: Every `saveState()` uploaded the WHOLE `state/app` document from that browser's in-memory `STATE`. When two tabs edited in parallel (yours in another window, or a teammate elsewhere), the last writer's blob overwrote the first writer's field-by-field. Most visibly, an admin-added organic category disappeared on next reload — but the same race silently wiped `grades`, `scorecardMeta`, `campaigns` (newly created), `countries`, `sellers`, `products`, every Slack channel/ID map, `qcWebhooks`, `countryWebhooks`, `metaAdAccountIds`, `qcDismissed`, `gradingStreak`, and `pendingBatches` under the right timing. Reproduced with `applySnapshot(staleBlob)` for each field. Fixed by adding **per-field merge rules** in `Fb.applySnapshot` (see §2.2 for the full table) that skip the generic overwrite for these keys and apply a tailored merge instead — union by name/id for growing lists, "non-empty local beats empty incoming" for string maps, `Math.max` for `best` streaks, and so on. Category adds now also flush immediately (bypass the 600ms debounce). Also added: **per-tab UUID** stamped as `_lastEditedByTab` on every upload, and a **cross-tab update pill** top-right ("N updates from [name] · Reload · ×") that appears whenever a snapshot arrives from a different tab. Own-tab echoes never trigger the pill; rapid consecutive writes batch into a single pill with a counter. A category-specific bottom-right toast ("New category added by [name]: X") fires when the picker's list changes. Verified with **40 stress tests** — 8 categories, 5 pill, 7 grading, 20 every-tab, plus a 1000-op chaotic all-tabs stress — 0 losses. Trade-off documented: deleting an unused entry can resurrect briefly if another tab hasn't seen the delete yet; user just deletes again. Silently losing ADDS was the far worse failure mode.
 
 ---
@@ -823,7 +837,6 @@ Descriptions are written in the app in a conversational voice (contractions, pun
 | IT | Italy |
 | ES | Spain |
 | US | United States |
-| PL | Poland |
 
 ### 11.8 Editors
 
