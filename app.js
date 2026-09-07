@@ -7587,6 +7587,21 @@ function computeEditorBadges(editor) {
 // badges yet). Wrap card visual grammar reuses .gr-hero from Grading so it
 // feels native and the rest of the layer stacks in later.
 function renderEditorStatsView() {
+  // Admin-only gate (2026-09-07): the tab still shows in the nav for anyone
+  // who was previously granted access (editors + viewers + admin), but only
+  // admin can see the live stats. Everyone else lands on an Under Construction
+  // card. Rationale: the tab is being rebuilt and we don't want editors seeing
+  // half-finished / incorrect numbers about themselves in the meantime.
+  var isAdmin = !!(Auth && Auth.user && Auth.user.role === 'admin');
+  if (!isAdmin) {
+    return '<div class="editor-stats-view">' +
+        '<div class="es-under-construction">' +
+          '<div class="es-uc-icon">🚧</div>' +
+          '<div class="es-uc-title">Under Construction</div>' +
+          '<div class="es-uc-msg">Editor Stats is being rebuilt. Check back soon.</div>' +
+        '</div>' +
+      '</div>';
+  }
   var currentE = currentEditorFromAuth();
   var isMappedEditor = !!(currentE && EDITOR_STATS_EDITORS.indexOf(currentE) >= 0);
   var isViewer = isEditorStatsViewer();
@@ -14589,7 +14604,10 @@ var App = {
     clip.tags = tags;
     saveState();
     render();
-    Fb.updateBrollTag(id, { tags: tags }).catch(function(e) {
+    // Atomic arrayUnion so a concurrent tag add from another tab doesn't wipe ours.
+    // The old full-array write raced: both tabs read tags=[foo], each locally
+    // pushed a different value, both wrote the whole array — last writer won.
+    Fb.updateBrollTag(id, { tags: firebase.firestore.FieldValue.arrayUnion(v) }).catch(function(e) {
       console.warn('[broll] tag update failed:', e);
       if (typeof toast === 'function') toast('Tag save failed — check console.', 'error');
     });
@@ -14597,12 +14615,16 @@ var App = {
   removeBrollTag: function(id, index) {
     var clip = (STATE.broll || []).filter(function(c) { return c.id === id; })[0];
     if (!clip || !Array.isArray(clip.tags)) return;
+    var toRemove = clip.tags[index];
     var tags = clip.tags.slice();
     tags.splice(index, 1);
     clip.tags = tags;
     saveState();
     render();
-    Fb.updateBrollTag(id, { tags: tags }).catch(function(e) {
+    // Atomic arrayRemove — same rationale as arrayUnion above. A concurrent remove
+    // from another tab won't clobber our removal by writing back the whole stale array.
+    if (toRemove === undefined) return;
+    Fb.updateBrollTag(id, { tags: firebase.firestore.FieldValue.arrayRemove(toRemove) }).catch(function(e) {
       console.warn('[broll] tag update failed:', e);
     });
   },
