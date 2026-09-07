@@ -884,6 +884,20 @@
   .toast.success { border-color: var(--green); box-shadow: 0 0 12px rgba(29,158,117,0.2); }
   .toast.error { border-color: var(--red); box-shadow: 0 0 12px rgba(226,75,74,0.2); }
 
+  /* Cross-tab update pill — top-right, appears when another tab/user just wrote
+     changes to Firestore. Data has already synced (onSnapshot fired), this is a
+     comfort signal + optional Reload button. Auto-hides after 20s of quiet. */
+  .cross-tab-pill { position: fixed; top: 52px; right: 20px; z-index: 100; display: none; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; background: var(--bg3); border: 1px solid var(--accent); border-radius: 999px; font-size: 12px; color: var(--text1); box-shadow: 0 4px 14px rgba(0,0,0,0.3); animation: cross-tab-pop 0.25s ease-out; }
+  .cross-tab-pill.visible { display: inline-flex; }
+  .cross-tab-pill-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent2); box-shadow: 0 0 6px var(--accent2); animation: cross-tab-blink 1.4s ease-in-out infinite; flex-shrink: 0; }
+  .cross-tab-pill-label { color: var(--text1); font-weight: 500; white-space: nowrap; }
+  .cross-tab-pill-reload { background: var(--accent); color: #fff; border: none; border-radius: 999px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit; transition: background 0.15s; }
+  .cross-tab-pill-reload:hover { background: var(--accent2); }
+  .cross-tab-pill-dismiss { background: transparent; color: var(--text3); border: none; padding: 0 4px; font-size: 16px; line-height: 1; cursor: pointer; font-family: inherit; }
+  .cross-tab-pill-dismiss:hover { color: var(--text1); }
+  @keyframes cross-tab-pop { from { transform: translateY(-6px) scale(0.96); opacity: 0; } to { transform: translateY(0) scale(1); opacity: 1; } }
+  @keyframes cross-tab-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
   /* Floating feedback button \u2014 bottom-left, persistent across tab renders */
   .feedback-fab { position: fixed; bottom: 20px; left: 20px; z-index: 90; width: 46px; height: 46px; border-radius: 50%; border: 1px solid var(--border2); background: var(--bg3); color: var(--text1); cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s; font-family: inherit; }
   .feedback-fab:hover { border-color: var(--accent); color: var(--accent2); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0,0,0,0.4); }

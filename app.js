@@ -332,6 +332,20 @@ var Fb = {
   ASSETS_COLL: 'state/app/assets',
   BROLL_COLL: 'state/app/broll',
   BROLL_CONFIG_DOC: 'config/broll',
+  // A random id unique to THIS tab. Stamped into every snapshot we upload as
+  // `_lastEditedByTab` so incoming snapshots can be attributed to "this tab" vs
+  // "another tab" (whether it's the same user in another window or a teammate).
+  // Used by the cross-tab update pill in the topbar to prompt a reload when
+  // another tab has just written changes to Firestore.
+  _tabId: (function() {
+    try {
+      if (window.crypto && crypto.getRandomValues) {
+        var a = new Uint8Array(8); crypto.getRandomValues(a);
+        return Array.prototype.map.call(a, function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+      }
+    } catch (_) {}
+    return String(Date.now()) + '-' + Math.floor(Math.random() * 1e9).toString(16);
+  })(),
   // Rolling 30-day snapshots of STATE.grades so an accidental wipe (a stale-snapshot
   // save overwriting ticks, someone unchecking in bulk) can be rolled back from the
   // Config tab. Docs are keyed by the London-civil date (yyyy-mm-dd). One write per
@@ -416,6 +430,7 @@ var Fb = {
       gradingVideosCollapsed: !!STATE.gradingVideosCollapsed,
       _lastEditedBy: Auth.user ? Auth.user.uid : null,
       _lastEditedByName: Auth.user ? Auth.user.displayName : null,
+      _lastEditedByTab: Fb._tabId,
       _lastEditedAt: Date.now()
     };
     // Safety net: if still over target, progressively trim history fields.
@@ -872,6 +887,16 @@ var Fb = {
         if (!STATE.dailyThreadHistory.Elsa) STATE.dailyThreadHistory.Elsa = [];
         setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
       }
+      // Cross-tab change signal: any snapshot stamped with a different `_lastEditedByTab`
+      // than ours came from ANOTHER tab (same user in another window OR a teammate). The
+      // data has already synced into STATE via onSnapshot — no reload needed to see it —
+      // but we surface a "New updates from X · Reload" pill in the topbar as a comfort
+      // signal so the user knows their view is fresh, and can force-reload if they don't
+      // trust the sync. Fired only after the first apply so first-load never pings.
+      if (data._lastEditedByTab && data._lastEditedByTab !== Fb._tabId && Fb._crossTabSignalReady) {
+        showCrossTabUpdatePill(data._lastEditedByName || null);
+      }
+      Fb._crossTabSignalReady = true;
       if (typeof render === 'function' && Auth._booted) render();
     } finally {
       // Defer un-suppressing past the synchronous render so any saveState calls fired
@@ -2458,6 +2483,44 @@ function toast(msg, type) {
   t.textContent = msg;
   t.className = 'toast show' + (type ? ' ' + type : '');
   setTimeout(function() { t.className = 'toast'; }, 2800);
+}
+
+// Cross-tab update pill: a persistent chip in the topbar right that appears
+// when another tab (same user in another window OR a teammate) has just written
+// changes to Firestore. Data has already synced via onSnapshot — this is a
+// comfort signal so the user knows their view was updated, with a Reload
+// button for the (rare) case where the sync missed something. Increments a
+// counter for repeated changes so the user sees activity, and auto-hides after
+// 20s of quiet. Click to reload; click × to dismiss without reloading.
+var _crossTabPill = { count: 0, lastName: null, hideTimer: null };
+function showCrossTabUpdatePill(fromName) {
+  _crossTabPill.count += 1;
+  if (fromName) _crossTabPill.lastName = String(fromName).split(' ')[0];
+  var el = document.getElementById('cross-tab-pill');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'cross-tab-pill';
+    el.className = 'cross-tab-pill';
+    document.body.appendChild(el);
+  }
+  var label = _crossTabPill.count === 1
+    ? ('New updates' + (_crossTabPill.lastName ? ' from ' + escapeHtml(_crossTabPill.lastName) : ''))
+    : (_crossTabPill.count + ' updates' + (_crossTabPill.lastName ? ' · latest from ' + escapeHtml(_crossTabPill.lastName) : ''));
+  el.innerHTML =
+    '<span class="cross-tab-pill-dot"></span>' +
+    '<span class="cross-tab-pill-label">' + label + '</span>' +
+    '<button type="button" class="cross-tab-pill-reload" onclick="location.reload()" title="Reload to get the latest">Reload</button>' +
+    '<button type="button" class="cross-tab-pill-dismiss" onclick="dismissCrossTabPill()" title="Dismiss (data has already synced)" aria-label="Dismiss">×</button>';
+  el.classList.add('visible');
+  if (_crossTabPill.hideTimer) clearTimeout(_crossTabPill.hideTimer);
+  _crossTabPill.hideTimer = setTimeout(dismissCrossTabPill, 20000);
+}
+function dismissCrossTabPill() {
+  var el = document.getElementById('cross-tab-pill');
+  if (el) el.classList.remove('visible');
+  _crossTabPill.count = 0;
+  _crossTabPill.lastName = null;
+  if (_crossTabPill.hideTimer) { clearTimeout(_crossTabPill.hideTimer); _crossTabPill.hideTimer = null; }
 }
 
 function timeStamp() {
