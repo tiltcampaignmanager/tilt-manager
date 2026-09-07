@@ -568,6 +568,19 @@ var Fb = {
         });
       }
 
+      // Snapshot the local growing lists BEFORE the forEach overwrites STATE so we can
+      // union-merge them below. Same class of last-write-wins race as the daily-thread
+      // merge: any teammate's routine save (e.g. editing a video) uploads the WHOLE
+      // categories array from their in-memory STATE. If they hadn't yet received your
+      // fresh "Watches" addition, their write silently wipes it in Firestore, then their
+      // snapshot lands here and clobbers your local copy too — so the new category
+      // disappears the next time you reload. Merge instead of overwrite: never lose an
+      // add that only one browser has yet.
+      var _localCategories = Array.isArray(STATE.categories) ? STATE.categories.slice() : [];
+      var _localCategoriesOrganic = Array.isArray(STATE.categoriesOrganic) ? STATE.categoriesOrganic.slice() : [];
+      var _localSellers = Array.isArray(STATE.sellers) ? STATE.sellers.slice() : [];
+      var _localProducts = Array.isArray(STATE.products) ? STATE.products.slice() : [];
+
       Object.keys(data).forEach(function(k) {
         if (k === '_lastEditedAt' || k === '_lastEditedBy' || k === '_lastEditedByName') return;
         if (PER_USER_UI_FIELDS[k]) return;
@@ -592,9 +605,109 @@ var Fb = {
         // a stale writer's copy could be missing a key we just recorded, and clobbering it
         // would let an already-sent notification be resurrected & re-sent. Merged below.
         if (k === 'recentNotifKeys') return;
+        // Growing lists — merged below so a stale writer never wipes a fresh add.
+        if (k === 'categories' || k === 'categoriesOrganic' || k === 'sellers' || k === 'products') return;
 
         STATE[k] = data[k];
       });
+
+      // Union-merge the growing lists (categories / sellers / products) instead of the
+      // naive overwrite. Ordering rule: incoming order first (canonical), then any local
+      // entries the incoming copy didn't have appended in their original local order.
+      // Trade-off: a category that was deleted on ONE browser and still exists on ANOTHER
+      // will get resurrected the next time the second browser uploads — but deletes are
+      // rare and only allowed on unused categories anyway, so the user can just delete
+      // again. Silently losing adds (the current bug) is much worse than a stray
+      // resurrected delete. Same trade for sellers/products (append-only in practice).
+      function mergeCategoryList(local, incoming) {
+        var byKey = {};
+        var order = [];
+        (incoming || []).forEach(function(c) {
+          if (!c || !c.name) return;
+          var kk = String(c.name).toLowerCase();
+          if (byKey[kk]) return;
+          byKey[kk] = c; order.push(kk);
+        });
+        (local || []).forEach(function(c) {
+          if (!c || !c.name) return;
+          var kk = String(c.name).toLowerCase();
+          if (byKey[kk]) return;
+          byKey[kk] = c; order.push(kk);
+        });
+        return order.map(function(kk) { return byKey[kk]; });
+      }
+      function mergeStringList(local, incoming) {
+        var seen = {};
+        var out = [];
+        (incoming || []).forEach(function(s) {
+          if (!s) return;
+          var kk = String(s).toLowerCase();
+          if (seen[kk]) return;
+          seen[kk] = true; out.push(s);
+        });
+        (local || []).forEach(function(s) {
+          if (!s) return;
+          var kk = String(s).toLowerCase();
+          if (seen[kk]) return;
+          seen[kk] = true; out.push(s);
+        });
+        return out;
+      }
+      STATE.categories        = mergeCategoryList(_localCategories,        data.categories);
+      STATE.categoriesOrganic = mergeCategoryList(_localCategoriesOrganic, data.categoriesOrganic);
+      STATE.sellers           = mergeStringList(_localSellers,             data.sellers);
+      STATE.products          = mergeStringList(_localProducts,            data.products);
+
+      // If the merge preserved a local-only entry (i.e. our list has something the
+      // incoming snapshot doesn't), Firestore is now behind us. Push a correction upload
+      // shortly so the missing entry lands there before another stale write can wipe it
+      // again. Deferred past the _suppressUpload window (cleared in finally via
+      // setTimeout(0)). Length-only compare is safe here because union-merge can only
+      // ADD entries — it can't shrink either side, so a strictly-longer merged list
+      // means at least one local-only entry survived.
+      var _incCats  = Array.isArray(data.categories) ? data.categories.length : 0;
+      var _incOrg   = Array.isArray(data.categoriesOrganic) ? data.categoriesOrganic.length : 0;
+      var _incSell  = Array.isArray(data.sellers) ? data.sellers.length : 0;
+      var _incProd  = Array.isArray(data.products) ? data.products.length : 0;
+      var _localOnlyRescued =
+        STATE.categories.length        > _incCats ||
+        STATE.categoriesOrganic.length > _incOrg  ||
+        STATE.sellers.length           > _incSell ||
+        STATE.products.length          > _incProd;
+      // Skip the corrective upload when the "local-only" content is just the defaults
+      // this browser started with and the incoming snapshot simply lacks those keys
+      // (e.g. legacy doc pre-dating the field). No fresh add to rescue — the seed
+      // block below will handle first-time initialization instead.
+      if (_localOnlyRescued && (data.categories || data.categoriesOrganic || data.sellers || data.products)) {
+        setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 50);
+      }
+
+      // Toast when a teammate just added a category. `_seenCategories` is the set of
+      // names this browser has ever known about — seeded on the very first apply from
+      // both local defaults and the incoming snapshot (so first-load never toasts) and
+      // topped up with local adds inside addCategory() (so our own echo doesn't toast).
+      // Anything new after that is a real remote addition worth surfacing.
+      if (!Fb._seenCategories) {
+        Fb._seenCategories = {};
+        _localCategories.forEach(function(c) { if (c && c.name) Fb._seenCategories[String(c.name).toLowerCase()] = true; });
+        _localCategoriesOrganic.forEach(function(c) { if (c && c.name) Fb._seenCategories[String(c.name).toLowerCase()] = true; });
+        (data.categories || []).forEach(function(c) { if (c && c.name) Fb._seenCategories[String(c.name).toLowerCase()] = true; });
+        (data.categoriesOrganic || []).forEach(function(c) { if (c && c.name) Fb._seenCategories[String(c.name).toLowerCase()] = true; });
+      } else {
+        var _newRemoteCats = [];
+        (data.categories || []).forEach(function(c) {
+          if (c && c.name && !Fb._seenCategories[String(c.name).toLowerCase()]) _newRemoteCats.push(c.name);
+        });
+        (data.categoriesOrganic || []).forEach(function(c) {
+          if (c && c.name && !Fb._seenCategories[String(c.name).toLowerCase()]) _newRemoteCats.push(c.name);
+        });
+        _newRemoteCats.forEach(function(nm) { Fb._seenCategories[String(nm).toLowerCase()] = true; });
+        if (_newRemoteCats.length && typeof toast === 'function') {
+          var _who = (data._lastEditedByName ? ' by ' + String(data._lastEditedByName).split(' ')[0] : '');
+          var _label = _newRemoteCats.length === 1 ? 'category added' : 'categories added';
+          toast('New ' + _label + _who + ': ' + _newRemoteCats.join(', '), 'success');
+        }
+      }
 
       // Merge the dedupe ledger: union local + incoming keyed by `key`, keep the newest ts.
       // Then drop any pending-batch item that duplicates a sent notification (resurrection
@@ -2998,6 +3111,13 @@ function addCategory(name, listKey) {
   if (existing) return existing;
   var cat = { name: trimmed, color: pickNextCategoryColor(list) };
   list.push(cat);
+  // Mark as already-seen so the confirmed-write snapshot echoing back doesn't
+  // toast us about our own addition (the "New category added by X" popup is
+  // meant for teammates' adds, not our own).
+  if (typeof Fb !== 'undefined') {
+    if (!Fb._seenCategories) Fb._seenCategories = {};
+    Fb._seenCategories[trimmed.toLowerCase()] = true;
+  }
   logAction('created', 'Category "' + trimmed + '" added to ' + typeForListKey(listKey || 'paid') + ' list');
   return cat;
 }
@@ -16540,7 +16660,9 @@ var App = {
     var existed = !!findCategory(name, listKey);
     var cat = addCategory(name, listKey);
     if (!cat) return;
-    saveState();
+    // Flush immediately (bypass the 600ms debounce) so a fast reload or a stale
+    // teammate's routine upload can't overwrite this add before it reaches Firestore.
+    if (typeof Fb !== 'undefined' && Fb._ready && Fb.uploadNow) Fb.uploadNow(); else saveState();
     // Full picker refresh so rename/delete buttons reflect the newly-selected category
     refreshModalCategoryPicker(cat.name);
     toast(existed ? 'Selected existing category "' + cat.name + '"' : 'Added category "' + cat.name + '"', 'success');
@@ -16614,6 +16736,12 @@ var App = {
     // Delegate to the shared rename helper so campaign.category rewrites cascade correctly.
     // It calls render() which would close our modal \u2014 so inline the logic instead.
     cat.name = proposed;
+    // Mark the renamed-to name as seen so the confirmed-write echo doesn't toast us
+    // about our own rename (the toast is for teammates' adds, not our own edits).
+    if (typeof Fb !== 'undefined') {
+      if (!Fb._seenCategories) Fb._seenCategories = {};
+      Fb._seenCategories[proposed.toLowerCase()] = true;
+    }
     var updated = 0;
     STATE.campaigns.forEach(function(camp) {
       if ((camp.type || DEFAULT_CAMPAIGN_TYPE) === type && camp.category === orig) { camp.category = proposed; updated++; }
@@ -16670,7 +16798,10 @@ var App = {
     var existed = !!findCategory(name, listKey);
     var cat = addCategory(name, listKey);
     if (!cat) return;
-    saveState();
+    // Flush immediately (bypass the 600ms debounce) so a fast reload or a stale
+    // teammate's routine upload can't overwrite this add before it reaches Firestore.
+    // saveState() would still run through debouncedUpload; uploadNow() skips it.
+    if (typeof Fb !== 'undefined' && Fb._ready && Fb.uploadNow) Fb.uploadNow(); else saveState();
     input.value = '';
     if (existed) toast('"' + cat.name + '" already exists', 'error');
     else toast('Added category "' + cat.name + '"', 'success');
@@ -16698,6 +16829,12 @@ var App = {
     }
     var oldName = cat.name;
     cat.name = trimmed;
+    // Mark the renamed-to name as seen so the confirmed-write echo doesn't toast us
+    // about our own rename (the toast is for teammates' adds, not our own edits).
+    if (typeof Fb !== 'undefined') {
+      if (!Fb._seenCategories) Fb._seenCategories = {};
+      Fb._seenCategories[trimmed.toLowerCase()] = true;
+    }
     // Rewrite campaign.category on every affected campaign of this type
     var updated = 0;
     STATE.campaigns.forEach(function(camp) {
