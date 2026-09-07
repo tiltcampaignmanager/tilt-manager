@@ -1802,11 +1802,20 @@ var Presence = {
     Presence.subscribe();
     _presenceHeartbeat = setInterval(Presence.update, 30000);
     window.addEventListener('beforeunload', Presence.leave);
-    // Warn the user if they try to reload/close while a Firestore save is still
-    // pending (debounce timer running or a failed write waiting to retry).
-    // Browsers show a generic "Changes you made may not be saved" dialog.
+    // Flush any pending Firestore save before the tab navigates away. Without this,
+    // an edit made inside the 600ms debounce window (Fb.scheduleUpload → Fb.uploadNow)
+    // never leaves the browser: the timer is cleared when the page unloads, so
+    // Firestore keeps the OLD value and on the next reload the edit looks lost.
+    // Fire uploadNow() synchronously to hand the batch to Firestore's SDK — the
+    // network request is dispatched immediately and, in practice, completes during
+    // the unload window. Also keep the "unsaved changes" warning so the user knows
+    // if a retry is still pending (the sync failed and hasn't landed yet).
     window.addEventListener('beforeunload', function(e) {
-      if (typeof Fb !== 'undefined' && (Fb._uploadTimer || Fb._pendingLocalJson)) {
+      if (typeof Fb === 'undefined') return;
+      if (Fb._uploadTimer) {
+        try { Fb.uploadNow(); } catch (_) {}
+      }
+      if (Fb._pendingLocalJson) {
         e.preventDefault();
         e.returnValue = '';
       }
