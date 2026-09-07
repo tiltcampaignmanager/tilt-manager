@@ -115,6 +115,30 @@
 
   .subcamp-list { display: none; padding: 2px 0 4px; }
   .subcamp-list.open { display: block; }
+
+  /* UK sidebar reorg (2026-09-07): campaigns grouped by TYPE (Paid Ads / Organic),
+     each type by MONTH. Two nested collapsible header rows sit above the campaign
+     list. Kept compact + subtle so the tree is scannable even with many months. */
+  .uk-type-row { display: flex; align-items: center; gap: 6px; padding: 6px 12px 6px 24px; margin: 4px 8px 2px; cursor: pointer; border-radius: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text2); transition: background 0.1s; }
+  .uk-type-row:hover { background: var(--bg3); color: var(--text1); }
+  .uk-type-row.open { color: var(--text1); }
+  .uk-type-chevron { display: inline-block; width: 12px; text-align: center; font-size: 10px; color: var(--text3); }
+  .uk-type-label { flex: 1; }
+  .uk-type-count { font-size: 10px; color: var(--text3); background: var(--bg3); padding: 1px 7px; border-radius: 999px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+  .uk-type-paid   .uk-type-label { color: inherit; }
+  .uk-type-organic .uk-type-label { color: inherit; }
+
+  .uk-month-row { display: flex; align-items: center; gap: 6px; padding: 4px 12px 4px 36px; margin: 1px 8px; cursor: pointer; border-radius: 6px; font-size: 11.5px; color: var(--text2); transition: background 0.1s; }
+  .uk-month-row:hover { background: var(--bg3); color: var(--text1); }
+  .uk-month-row.open { color: var(--text1); }
+  .uk-month-chevron { display: inline-block; width: 10px; text-align: center; font-size: 9px; color: var(--text3); }
+  .uk-month-label { flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.02em; }
+  .uk-month-count { font-size: 10px; color: var(--text3); font-family: 'JetBrains Mono', monospace; }
+
+  /* Campaigns rendered inside a month bucket get a deeper indent so the tree hierarchy is obvious. */
+  .subcamp-item.subcamp-in-month { padding-left: 44px; }
+  .subcamp-item.subcamp-in-month::before { left: 32px; }
+
   .subcamp-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 28px; cursor: pointer; transition: background 0.1s; margin: 0 8px 2px; border-radius: 6px; border: 1px solid transparent; position: relative; }
   .subcamp-item::before { content: ''; position: absolute; left: 16px; top: 0; bottom: 0; width: 1px; background: var(--border); }
   .subcamp-item:hover { background: var(--bg3); }

@@ -490,6 +490,8 @@ var Fb = {
         expandedCountries: true,
         sidebarCompact: true,
         sidebarMonthFilter: true,
+        sidebarUKType: true,
+        sidebarUKMonths: true,
         feedbackName: true,
         statusFilter: true,
         editorFilter: true,
@@ -2057,6 +2059,14 @@ var STATE = {
   tabOrder: ['campaigns', 'notifications', 'today', 'log', 'automations', 'config'],
   activeSubCampaignId: 1,
   expandedCountries: { UK: true, IT: false, ES: false, US: false, PL: false },
+  // UK sidebar reorg (2026-09-07): UK campaigns are grouped by TYPE (Paid Ads /
+  // Organic), and each type is further grouped by monthYear ('YYYY-MM'). The two
+  // maps below track which of those sub-groups are expanded. Per-user (not synced).
+  //   sidebarUKType:   { paid: true, organic: true }  — top-level type toggles
+  //   sidebarUKMonths: { 'paid|2026-09': true, ... } — per-type per-month
+  // Undated campaigns bucket under a synthetic 'none' month.
+  sidebarUKType: { paid: true, organic: true },
+  sidebarUKMonths: {},
   // UI preference: when true, sidebar collapses to a compact strip showing only flags +
   // counts (country rows) or flag + rank + category pill (sub-campaign rows). Persisted.
   sidebarCompact: false,
@@ -5021,12 +5031,107 @@ function renderSidebar() {
     }
     if (isOpen) {
       html += '<div class="subcamp-list open" data-country="' + country.code + '">';
-      // In compact mode, only show the currently-selected sub-campaign for this country.
-      // Full mode keeps showing every sub-campaign as before. `subs` is already filtered
-      // by the month dropdown if active.
+      // UK sidebar reorg (2026-09-07): campaigns are grouped by TYPE (Paid Ads /
+      // Organic), and each type by monthYear. Everything else keeps the flat layout.
+      // Compact mode always uses the flat layout (nesting doesn't fit the narrow strip).
+      var isUKGrouped = country.code === 'UK' && !compact;
       var subsToRender = compact
         ? subs.filter(function(s) { return String(s.id) === String(STATE.activeSubCampaignId); })
         : subs;
+
+      if (isUKGrouped) {
+        // Split by type. Each type gets its own collapsible header + month buckets.
+        var ukTypeState = STATE.sidebarUKType || { paid: true, organic: true };
+        var ukMonthState = STATE.sidebarUKMonths || {};
+        var byType = { paid: [], organic: [] };
+        subs.forEach(function(s) {
+          var t = (s.type || DEFAULT_CAMPAIGN_TYPE) === 'Organic' ? 'organic' : 'paid';
+          byType[t].push(s);
+        });
+        var typeMeta = [
+          { key: 'paid',    label: 'Paid Ads' },
+          { key: 'organic', label: 'Organic' }
+        ];
+        typeMeta.forEach(function(tm) {
+          var typeSubs = byType[tm.key];
+          if (!typeSubs.length) return; // hide empty type groups
+          var typeOpen = ukTypeState[tm.key] !== false; // default open
+          var typeChevron = typeOpen ? '▾' : '▸';
+          html +=
+            '<div class="uk-type-row uk-type-' + tm.key + ' ' + (typeOpen ? 'open' : '') + '" onclick="App.toggleUKType(\'' + tm.key + '\')">' +
+              '<span class="uk-type-chevron">' + typeChevron + '</span>' +
+              '<span class="uk-type-label">' + tm.label + '</span>' +
+              '<span class="uk-type-count">' + typeSubs.length + '</span>' +
+            '</div>';
+          if (!typeOpen) return;
+          // Bucket by monthYear. 'none' = undated. Sort month keys DESC so newest first.
+          var byMonth = {};
+          typeSubs.forEach(function(s) {
+            var mk = (s.monthYear || '').slice(0, 7);
+            if (!/^\d{4}-\d{2}$/.test(mk)) mk = 'none';
+            (byMonth[mk] = byMonth[mk] || []).push(s);
+          });
+          var monthKeys = Object.keys(byMonth).filter(function(k){return k!=='none';}).sort().reverse();
+          if (byMonth.none) monthKeys.push('none');
+          var currentIso = (function(){ var d=bizNow(); var mm=d.getMonth()+1; return d.getFullYear()+'-'+(mm<10?'0':'')+mm; })();
+          monthKeys.forEach(function(mk) {
+            var monthCampaigns = byMonth[mk];
+            var stateKey = tm.key + '|' + mk;
+            // Default: current month open; everything else respects the stored toggle
+            // (undefined means "use default" — current open, others closed).
+            var stored = ukMonthState[stateKey];
+            var monthOpen = (stored === undefined) ? (mk === currentIso) : !!stored;
+            var monthLabel;
+            if (mk === 'none') monthLabel = 'No date';
+            else {
+              var yr = mk.slice(0,4), mi = parseInt(mk.slice(5,7),10) - 1;
+              monthLabel = MONTH_SHORT[mi] + ' ' + yr;
+            }
+            var monthChevron = monthOpen ? '▾' : '▸';
+            html +=
+              '<div class="uk-month-row ' + (monthOpen ? 'open' : '') + '" onclick="App.toggleUKMonth(\'' + stateKey + '\')" title="' + escapeHtml(monthLabel) + '">' +
+                '<span class="uk-month-chevron">' + monthChevron + '</span>' +
+                '<span class="uk-month-label">' + escapeHtml(monthLabel) + '</span>' +
+                '<span class="uk-month-count">' + monthCampaigns.length + '</span>' +
+              '</div>';
+            if (!monthOpen) return;
+            monthCampaigns.forEach(function(s) {
+              var active = String(s.id) === String(STATE.activeSubCampaignId);
+              var isRenaming = String(SidebarEditState.renameCampId) === String(s.id);
+              var nameHtml = isRenaming
+                ? '<input type="text" class="subcamp-rename-input" id="subcamp-rename-' + s.id + '" ' +
+                    'value="' + escapeHtml(s.name) + '" ' +
+                    'onclick="event.stopPropagation();" ' +
+                    'onblur="App.commitRenameSubcamp(\'' + s.id + '\', this.value)" ' +
+                    'onkeydown="if(event.key===\'Enter\'){event.preventDefault();this.blur();}else if(event.key===\'Escape\'){event.preventDefault();App.cancelRenameSubcamp();}">'
+                : '<div class="subcamp-name">' + escapeHtml(s.name) + '</div>';
+              html +=
+                '<div class="subcamp-item subcamp-in-month ' + (active ? 'active' : '') + (s.done ? ' done' : '') + '" ' +
+                  (isRenaming ? '' : 'draggable="true" ') +
+                  'data-camp-id="' + s.id + '" ' +
+                  'data-country="' + country.code + '" ' +
+                  (isRenaming ? '' : 'onclick="App.selectCampaign(\'' + s.id + '\')" ') +
+                  'oncontextmenu="App.showSubcampContextMenu(event, \'' + s.id + '\')" ' +
+                  'ondragstart="App.onSubcampDragStart(event, \'' + s.id + '\', \'' + country.code + '\')" ' +
+                  'ondragover="App.onSubcampDragOver(event)" ' +
+                  'ondragleave="App.onSubcampDragLeave(event)" ' +
+                  'ondrop="App.onSubcampDrop(event, \'' + s.id + '\', \'' + country.code + '\')" ' +
+                  'ondragend="App.onSubcampDragEnd(event)">' +
+                  '<span class="drag-handle" title="Drag to reorder">⁝</span>' +
+                  '<div class="rank-badge">' + s.rank + '</div>' +
+                  '<span class="ad-status-dot ' + (s.killedDate ? 'dot-killed' : s.goneLive ? 'dot-live' : 'dot-notlive') + '" title="' + (s.killedDate ? (s.goneLive ? 'Live ' + formatDate(s.goneLive) + ' → Killed ' + formatDate(s.killedDate) : 'Killed ' + formatDate(s.killedDate) + ' (no live date)') : s.goneLive ? 'Live since ' + formatDate(s.goneLive) : 'Not yet live') + '"></span>' +
+                  nameHtml +
+                  (isRenaming ? '' : categoryBadgeHtml(s.category)) +
+                  (s.goneLive && !s.killedDate ? '<span class="live-badge" title="Gone live: ' + escapeHtml(formatDate(s.goneLive)) + '">live</span>' : '') +
+                '</div>';
+            });
+          });
+        });
+        html += '</div>';
+        html += '</div>';
+        continue;
+      }
+
       for (var j = 0; j < subsToRender.length; j++) {
         var s = subsToRender[j];
         var active = String(s.id) === String(STATE.activeSubCampaignId);
@@ -15583,6 +15688,19 @@ var App = {
     render();
   },
   toggleCountry: function(code) { STATE.expandedCountries[code] = !STATE.expandedCountries[code]; render(); },
+  // Toggle the Paid Ads or Organic sub-group under UK. `typeKey` is 'paid' or 'organic'.
+  toggleUKType: function(typeKey) {
+    if (!STATE.sidebarUKType) STATE.sidebarUKType = { paid: true, organic: true };
+    STATE.sidebarUKType[typeKey] = !STATE.sidebarUKType[typeKey];
+    render();
+  },
+  // Toggle a month bucket under a UK type. `key` is 'paid|YYYY-MM' or 'organic|YYYY-MM'
+  // (or 'paid|none' / 'organic|none' for undated campaigns).
+  toggleUKMonth: function(key) {
+    if (!STATE.sidebarUKMonths) STATE.sidebarUKMonths = {};
+    STATE.sidebarUKMonths[key] = !STATE.sidebarUKMonths[key];
+    render();
+  },
   // Flip the compact/full sidebar mode. Persists via saveState() inside render().
   toggleSidebarCompact: function() { STATE.sidebarCompact = !STATE.sidebarCompact; render(); },
   setSidebarMonthFilter: function(value) {
