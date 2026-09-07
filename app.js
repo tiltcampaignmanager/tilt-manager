@@ -5052,16 +5052,28 @@ function renderSidebar() {
           { key: 'paid',    label: 'Paid Ads' },
           { key: 'organic', label: 'Organic' }
         ];
+        // Helper: campaign is "active" if the team is still working it — not
+        // marked done and not killed. Used to tell you at a glance which months
+        // have live work vs. which are fully wrapped.
+        function isCampActive(s) { return !s.done && !s.killedDate; }
+        function activityBadge(activeN, totalN) {
+          if (totalN === 0) return '';
+          if (activeN > 0) return '<span class="uk-activity-badge active" title="' + activeN + ' of ' + totalN + ' campaigns still active (not marked done, not killed)">' + activeN + ' active</span>';
+          // All done — every campaign in this group has been marked done or killed.
+          return '<span class="uk-activity-badge done" title="Every campaign in this group is done or killed">✓ all done</span>';
+        }
         typeMeta.forEach(function(tm) {
           var typeSubs = byType[tm.key];
           if (!typeSubs.length) return; // hide empty type groups
           var typeOpen = ukTypeState[tm.key] !== false; // default open
           var typeChevron = typeOpen ? '▾' : '▸';
+          var typeActive = typeSubs.filter(isCampActive).length;
           html +=
             '<div class="uk-type-row uk-type-' + tm.key + ' ' + (typeOpen ? 'open' : '') + '" onclick="App.toggleUKType(\'' + tm.key + '\')">' +
               '<span class="uk-type-chevron">' + typeChevron + '</span>' +
               '<span class="uk-type-label">' + tm.label + '</span>' +
               '<span class="uk-type-count">' + typeSubs.length + '</span>' +
+              activityBadge(typeActive, typeSubs.length) +
             '</div>';
           if (!typeOpen) return;
           // Bucket by monthYear. 'none' = undated. Sort month keys DESC so newest first.
@@ -5088,11 +5100,13 @@ function renderSidebar() {
               monthLabel = MONTH_SHORT[mi] + ' ' + yr;
             }
             var monthChevron = monthOpen ? '▾' : '▸';
+            var monthActive = monthCampaigns.filter(isCampActive).length;
             html +=
-              '<div class="uk-month-row ' + (monthOpen ? 'open' : '') + '" onclick="App.toggleUKMonth(\'' + stateKey + '\')" title="' + escapeHtml(monthLabel) + '">' +
+              '<div class="uk-month-row ' + (monthOpen ? 'open' : '') + (monthActive > 0 ? ' has-active' : '') + '" onclick="App.toggleUKMonth(\'' + stateKey + '\')" title="' + escapeHtml(monthLabel) + '">' +
                 '<span class="uk-month-chevron">' + monthChevron + '</span>' +
                 '<span class="uk-month-label">' + escapeHtml(monthLabel) + '</span>' +
                 '<span class="uk-month-count">' + monthCampaigns.length + '</span>' +
+                activityBadge(monthActive, monthCampaigns.length) +
               '</div>';
             if (!monthOpen) return;
             monthCampaigns.forEach(function(s) {
