@@ -2114,7 +2114,12 @@ var STATE = {
   // Undated campaigns bucket under a synthetic 'none' month.
   sidebarTypeExpanded: {},
   sidebarMonthExpanded: {},
-  sidebarTypeOrder: {},
+  // Hydrated from localStorage so a user's Paid/Organic priority reorder survives
+  // reload. Per-user (not in Firestore snapshot), so localStorage is the only place
+  // it can live across sessions on this device.
+  sidebarTypeOrder: (function() {
+    try { return JSON.parse(localStorage.getItem('tilt-sidebar-type-order') || '{}') || {}; } catch (_) { return {}; }
+  })(),
   // UI preference: when true, sidebar collapses to a compact strip showing only flags +
   // counts (country rows) or flag + rank + category pill (sub-campaign rows). Persisted.
   sidebarCompact: false,
@@ -15820,6 +15825,10 @@ var App = {
     if (!STATE.sidebarTypeOrder) STATE.sidebarTypeOrder = {};
     // Only two types (paid / organic); a swap is a full re-order.
     STATE.sidebarTypeOrder[countryCode] = [srcType, srcType === 'paid' ? 'organic' : 'paid'];
+    // Persist locally — this field is per-user (PER_USER_UI_FIELDS at ~line 486) and
+    // is excluded from the Firestore snapshot, so localStorage is the only place it
+    // survives a reload. Without this the drag-reorder is memory-only.
+    try { localStorage.setItem('tilt-sidebar-type-order', JSON.stringify(STATE.sidebarTypeOrder)); } catch (_) {}
     TypeDragState.justDropped = true; // suppress the click that fires right after drop
     render();
   },
