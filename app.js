@@ -5749,12 +5749,11 @@ function renderMonthPanel() {
   var mr = getMonthRange(parseInt(parts[0]), parseInt(parts[1]) - 1);
 
   var today = todayISO();
-  // Monthly tally scope: ORGANIC (was UK Paid Ads pre-2026-09-07). Goal is 1
-  // organic video per WORKDAY, so the monthly target scales with the month
-  // (e.g. 22 workdays → 22-video goal). Paid Ads is shown as a side card for
-  // reference. Change scope back with a single swap if we flip priorities.
+  // Monthly tally scope: ORGANIC only (was UK Paid Ads pre-2026-09-07; UK Paid
+  // reference card removed same day). Goal is 1 organic video per WORKDAY, so
+  // the monthly target scales with the month (e.g. 22 workdays → 22-video goal).
+  // Change scope back with a single swap if we flip priorities.
   var approved = countApprovedForMonth(selectedKey, isOrganicApproval);
-  var paidUKApproved = countApprovedForMonth(selectedKey, isPaidAdsUKApproval);
   var totalWorkdays = countWorkdays(mr.start, mr.end);
   var dailyGoal = 1;                       // 1 organic video per workday
   var target = totalWorkdays * dailyGoal;  // dynamic monthly target
@@ -5823,13 +5822,9 @@ function renderMonthPanel() {
     return n;
   })();
 
-  // Side card: UK Paid Ads for reference (was the primary before 2026-09-07).
-  var organicAsideHtml = '<div class="month-organic-aside" title="UK Paid Ads approvals \u2014 tracked separately from the 1-per-workday Organic goal.">' +
-    '<span class="month-organic-label">UK Paid Ads this month</span>' +
-    '<span class="month-organic-num">' + paidUKApproved + '</span>' +
-    '<span class="month-organic-sub">no target</span>' +
-  '</div>' +
-  (cancelledQcCount > 0
+  // Only the Cancelled-by-QC aside remains (when non-zero). UK Paid Ads
+  // reference card was hidden 2026-09-07 \u2014 the tally is Organic-only now.
+  var organicAsideHtml = (cancelledQcCount > 0
     ? '<div class="month-organic-aside" title="These ' + cancelledQcCount + ' organic videos are approved but flagged as Cancelled by category head QC \u2014 included in the tally total.">' +
         '<span class="month-organic-label">Cancelled by QC</span>' +
         '<span class="month-organic-num">' + cancelledQcCount + '</span>' +
