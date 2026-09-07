@@ -431,7 +431,8 @@ var Fb = {
       _lastEditedBy: Auth.user ? Auth.user.uid : null,
       _lastEditedByName: Auth.user ? Auth.user.displayName : null,
       _lastEditedByTab: Fb._tabId,
-      _lastEditedAt: Date.now()
+      _lastEditedAt: Date.now(),
+      deletedCampaignIds: STATE.deletedCampaignIds || {}
     };
     // Safety net: if still over target, progressively trim history fields.
     if (JSON.stringify(snap).length > TARGET_BYTES) {
@@ -653,9 +654,30 @@ var Fb = {
             k === 'pmSlackIds' || k === 'categoryHeadOverrides' || k === 'qcWebhooks' || k === 'countryWebhooks') return;
         // Notification queue / dismiss ledger / streak / meta ad ids — all bespoke merges below.
         if (k === 'pendingBatches' || k === 'qcDismissed' || k === 'gradingStreak' || k === 'metaAdAccountIds') return;
+        // Campaign delete tombstones — merged (union, newest ts wins) below.
+        if (k === 'deletedCampaignIds') return;
 
         STATE[k] = data[k];
       });
+
+      // Merge the campaign tombstone ledger BEFORE the campaigns merge so the
+      // filter can drop resurrected ids. Union across local + incoming; keep the
+      // newest timestamp per id; prune anything older than TOMBSTONE_WINDOW_MS.
+      (function mergeCampaignTombstones() {
+        if (typeof TOMBSTONE_WINDOW_MS === 'undefined') return; // defined later in the file, guard for early apply
+        var out = {};
+        var local = (STATE.deletedCampaignIds && typeof STATE.deletedCampaignIds === 'object') ? STATE.deletedCampaignIds : {};
+        var incoming = (data.deletedCampaignIds && typeof data.deletedCampaignIds === 'object') ? data.deletedCampaignIds : {};
+        var cutoff = Date.now() - TOMBSTONE_WINDOW_MS;
+        [local, incoming].forEach(function(src) {
+          Object.keys(src).forEach(function(id) {
+            var ts = Number(src[id]) || 0;
+            if (ts < cutoff) return;
+            if (!out[id] || ts > out[id]) out[id] = ts;
+          });
+        });
+        STATE.deletedCampaignIds = out;
+      })();
 
       // Union-merge the growing lists (categories / sellers / products) instead of the
       // naive overwrite. Ordering rule: incoming order first (canonical), then any local
@@ -770,20 +792,29 @@ var Fb = {
       // for entries in both, prefer incoming (server's copy) — edits without a
       // per-object updatedAt are best-effort last-write-wins, same as today.
       if (!campaignsAreStale) {
+        var tombstoned = STATE.deletedCampaignIds || {};
         function mergeCampaigns(local, incoming) {
           var byId = {}, order = [];
           (incoming || []).forEach(function(c) {
             if (!c || !c.id) return;
+            if (tombstoned[String(c.id)]) return; // dropped-by-tombstone
             byId[c.id] = c; order.push(c.id);
           });
           (local || []).forEach(function(c) {
             if (!c || !c.id) return;
+            if (tombstoned[String(c.id)]) return;
             if (byId[c.id]) return; // incoming wins on same-id
             byId[c.id] = c; order.push(c.id);
           });
           return order.map(function(id) { return byId[id]; });
         }
         STATE.campaigns = mergeCampaigns(_localCampaigns, Array.isArray(data.campaigns) ? data.campaigns : []);
+        // Also filter out any assets pointing at a tombstoned campaign (a stale
+        // subcollection listener could echo them back before its per-doc delete
+        // has synced).
+        if (Object.keys(tombstoned).length && Array.isArray(STATE.assets)) {
+          STATE.assets = STATE.assets.filter(function(a) { return !tombstoned[String(a.campaignId)]; });
+        }
       }
 
       // Config maps (editorSlackChannels, editorSlackIds, categoryHeadSlackIds,
@@ -4381,11 +4412,32 @@ function deleteCampaign() {
   if (!confirm('Delete "' + c.name + '" and all ' + n + ' video assets?')) return;
   STATE.assets = STATE.assets.filter(function(a) { return a.campaignId !== c.id; });
   STATE.campaigns = STATE.campaigns.filter(function(x) { return x.id !== c.id; });
+  tombstoneCampaign(c.id);
   reorderCampaigns(true);
   STATE.activeSubCampaignId = STATE.campaigns.length ? STATE.campaigns[0].id : null;
   logAction('deleted', 'Campaign "' + c.name + '" deleted');
   toast('Campaign deleted', 'success');
   render();
+}
+
+// Campaign delete tombstones — a shared ledger of ids that were intentionally
+// deleted, with the timestamp of the delete. Merged across tabs so any teammate
+// (or your own second tab) whose local STATE still had the campaign can't
+// accidentally re-upload it and have the union-merge in applySnapshot resurrect
+// it. Entries expire after TOMBSTONE_WINDOW_MS so the ledger stays bounded —
+// by then every open tab has long since round-tripped through Firestore.
+var TOMBSTONE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+function tombstoneCampaign(id) {
+  if (!id) return;
+  if (!STATE.deletedCampaignIds || typeof STATE.deletedCampaignIds !== 'object') STATE.deletedCampaignIds = {};
+  STATE.deletedCampaignIds[String(id)] = Date.now();
+}
+function pruneCampaignTombstones() {
+  if (!STATE.deletedCampaignIds || typeof STATE.deletedCampaignIds !== 'object') { STATE.deletedCampaignIds = {}; return; }
+  var cutoff = Date.now() - TOMBSTONE_WINDOW_MS;
+  Object.keys(STATE.deletedCampaignIds).forEach(function(id) {
+    if ((STATE.deletedCampaignIds[id] || 0) < cutoff) delete STATE.deletedCampaignIds[id];
+  });
 }
 
 function reorderCampaigns(silent) {
@@ -17664,6 +17716,7 @@ var App = {
       var stillIn = STATE.assets.filter(function(a) { return a.campaignId === c.id; }).length;
       STATE.assets = STATE.assets.filter(function(a) { return a.campaignId !== c.id; });
       STATE.campaigns = STATE.campaigns.filter(function(x) { return x.id !== c.id; });
+      tombstoneCampaign(c.id);
       if (STATE.activeSubCampaignId === c.id) {
         var sameCountry = STATE.campaigns.filter(function(x) { return x.country === c.country; });
         STATE.activeSubCampaignId = sameCountry.length > 0 ? sameCountry[0].id : null;
