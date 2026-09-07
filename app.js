@@ -595,6 +595,8 @@ var Fb = {
       var _localCategoriesOrganic = Array.isArray(STATE.categoriesOrganic) ? STATE.categoriesOrganic.slice() : [];
       var _localSellers = Array.isArray(STATE.sellers) ? STATE.sellers.slice() : [];
       var _localProducts = Array.isArray(STATE.products) ? STATE.products.slice() : [];
+      var _localGrades = Array.isArray(STATE.grades) ? STATE.grades.slice() : [];
+      var _localScorecardMeta = (STATE.scorecardMeta && typeof STATE.scorecardMeta === 'object') ? STATE.scorecardMeta : {};
 
       Object.keys(data).forEach(function(k) {
         if (k === '_lastEditedAt' || k === '_lastEditedBy' || k === '_lastEditedByName') return;
@@ -622,6 +624,10 @@ var Fb = {
         if (k === 'recentNotifKeys') return;
         // Growing lists — merged below so a stale writer never wipes a fresh add.
         if (k === 'categories' || k === 'categoriesOrganic' || k === 'sellers' || k === 'products') return;
+        // Grading data — same race. `grades` grows; `scorecardMeta` is nested per-editor.
+        // Both merged below so a teammate's routine save can't wipe a fresh grade or
+        // scorecard input that hasn't finished round-tripping through Firestore yet.
+        if (k === 'grades' || k === 'scorecardMeta') return;
 
         STATE[k] = data[k];
       });
@@ -672,6 +678,48 @@ var Fb = {
       STATE.categoriesOrganic = mergeCategoryList(_localCategoriesOrganic, data.categoriesOrganic);
       STATE.sellers           = mergeStringList(_localSellers,             data.sellers);
       STATE.products          = mergeStringList(_localProducts,            data.products);
+
+      // Grades: array of {id, updatedAt, ...} objects. Merge by id — when both sides
+      // have the same grade, prefer whichever was edited more recently. When only one
+      // side has it, keep it (protects fresh grades from a stale teammate save). Same
+      // trade-off as categories: a locally-deleted grade may resurrect briefly if
+      // another tab still had it — user can just delete again.
+      function mergeGradesList(local, incoming) {
+        var byId = {};
+        var order = [];
+        (incoming || []).forEach(function(g) {
+          if (!g || !g.id) return;
+          byId[g.id] = g; order.push(g.id);
+        });
+        (local || []).forEach(function(g) {
+          if (!g || !g.id) return;
+          var ex = byId[g.id];
+          if (!ex) { byId[g.id] = g; order.push(g.id); return; }
+          if ((g.updatedAt || 0) > (ex.updatedAt || 0)) byId[g.id] = g;
+        });
+        return order.map(function(id) { return byId[id]; });
+      }
+      // scorecardMeta: nested map {editor: {field: value}}. Merge per editor per field,
+      // local wins on conflict (user's just-set value beats a stale echo). No timestamp
+      // is stored per field so this is best-effort — but far better than clobbering the
+      // whole map. Fields are only a couple of numbers per editor, tiny surface area.
+      function mergeScorecardMeta(local, incoming) {
+        var out = {};
+        var editorSet = {};
+        Object.keys(incoming || {}).forEach(function(e) { editorSet[e] = true; });
+        Object.keys(local    || {}).forEach(function(e) { editorSet[e] = true; });
+        Object.keys(editorSet).forEach(function(e) {
+          var merged = {};
+          var inc = (incoming && incoming[e]) || {};
+          var loc = (local    && local[e])    || {};
+          Object.keys(inc).forEach(function(f) { merged[f] = inc[f]; });
+          Object.keys(loc).forEach(function(f) { merged[f] = loc[f]; }); // local overrides
+          out[e] = merged;
+        });
+        return out;
+      }
+      STATE.grades        = mergeGradesList(_localGrades, data.grades);
+      STATE.scorecardMeta = mergeScorecardMeta(_localScorecardMeta, data.scorecardMeta);
 
       // If the merge preserved a local-only entry (i.e. our list has something the
       // incoming snapshot doesn't), Firestore is now behind us. Push a correction upload
