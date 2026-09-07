@@ -597,6 +597,21 @@ var Fb = {
       var _localProducts = Array.isArray(STATE.products) ? STATE.products.slice() : [];
       var _localGrades = Array.isArray(STATE.grades) ? STATE.grades.slice() : [];
       var _localScorecardMeta = (STATE.scorecardMeta && typeof STATE.scorecardMeta === 'object') ? STATE.scorecardMeta : {};
+      var _localCountries = Array.isArray(STATE.countries) ? STATE.countries.slice() : [];
+      var _localCampaigns = Array.isArray(STATE.campaigns) ? STATE.campaigns.slice() : [];
+      var _localPendingBatches = (STATE.pendingBatches && typeof STATE.pendingBatches === 'object') ? STATE.pendingBatches : {};
+      var _localQcDismissed = (STATE.qcDismissed && typeof STATE.qcDismissed === 'object') ? STATE.qcDismissed : {};
+      var _localGradingStreak = (STATE.gradingStreak && typeof STATE.gradingStreak === 'object') ? STATE.gradingStreak : { last: null, count: 0, best: 0 };
+      var _localMetaIds = Array.isArray(STATE.metaAdAccountIds) ? STATE.metaAdAccountIds.slice() : [];
+      // Config-map fields — string-valued maps keyed by editor/country/category. A stale
+      // teammate's routine save uploads the WHOLE map from their in-memory STATE; if
+      // they hadn't yet received your Slack-channel or webhook update, their empty
+      // slot wipes yours in Firestore. Snapshot pre-apply so we can merge slot-by-slot.
+      var _localConfigMaps = {};
+      ['editorSlackChannels','editorSlackIds','categoryHeadSlackIds','pmSlackIds',
+       'categoryHeadOverrides','qcWebhooks','countryWebhooks'].forEach(function(name) {
+        _localConfigMaps[name] = (STATE[name] && typeof STATE[name] === 'object') ? STATE[name] : {};
+      });
 
       Object.keys(data).forEach(function(k) {
         if (k === '_lastEditedAt' || k === '_lastEditedBy' || k === '_lastEditedByName') return;
@@ -628,6 +643,16 @@ var Fb = {
         // Both merged below so a teammate's routine save can't wipe a fresh grade or
         // scorecard input that hasn't finished round-tripping through Firestore yet.
         if (k === 'grades' || k === 'scorecardMeta') return;
+        // Countries + campaigns — merged by code/id below. Campaign edits still last-write-
+        // wins for existing entries, but a fresh CREATED campaign never gets wiped by a
+        // stale save from another tab.
+        if (k === 'countries' || k === 'campaigns') return;
+        // Config maps — string-valued per-editor/per-country/per-category setup that a
+        // stale tab's blank slot could otherwise wipe. Merged slot-by-slot below.
+        if (k === 'editorSlackChannels' || k === 'editorSlackIds' || k === 'categoryHeadSlackIds' ||
+            k === 'pmSlackIds' || k === 'categoryHeadOverrides' || k === 'qcWebhooks' || k === 'countryWebhooks') return;
+        // Notification queue / dismiss ledger / streak / meta ad ids — all bespoke merges below.
+        if (k === 'pendingBatches' || k === 'qcDismissed' || k === 'gradingStreak' || k === 'metaAdAccountIds') return;
 
         STATE[k] = data[k];
       });
@@ -720,6 +745,139 @@ var Fb = {
       }
       STATE.grades        = mergeGradesList(_localGrades, data.grades);
       STATE.scorecardMeta = mergeScorecardMeta(_localScorecardMeta, data.scorecardMeta);
+
+      // Countries: array of {code, name}. Union-merge by code so a stale writer's list
+      // can't drop a country another tab just added.
+      function mergeCountries(local, incoming) {
+        var byCode = {}, order = [];
+        (incoming || []).forEach(function(c) {
+          if (!c || !c.code) return;
+          if (byCode[c.code]) return;
+          byCode[c.code] = c; order.push(c.code);
+        });
+        (local || []).forEach(function(c) {
+          if (!c || !c.code) return;
+          if (byCode[c.code]) return;
+          byCode[c.code] = c; order.push(c.code);
+        });
+        return order.map(function(c) { return byCode[c]; });
+      }
+      STATE.countries = mergeCountries(_localCountries, data.countries);
+
+      // Campaigns: array of {id, ...}. Only merge when NOT campaignsAreStale (the
+      // existing coarse guard already dropped a stale batch entirely). Union-merge by
+      // id so a fresh CREATION on this tab can't be wiped by a stale save from another;
+      // for entries in both, prefer incoming (server's copy) — edits without a
+      // per-object updatedAt are best-effort last-write-wins, same as today.
+      if (!campaignsAreStale) {
+        function mergeCampaigns(local, incoming) {
+          var byId = {}, order = [];
+          (incoming || []).forEach(function(c) {
+            if (!c || !c.id) return;
+            byId[c.id] = c; order.push(c.id);
+          });
+          (local || []).forEach(function(c) {
+            if (!c || !c.id) return;
+            if (byId[c.id]) return; // incoming wins on same-id
+            byId[c.id] = c; order.push(c.id);
+          });
+          return order.map(function(id) { return byId[id]; });
+        }
+        STATE.campaigns = mergeCampaigns(_localCampaigns, Array.isArray(data.campaigns) ? data.campaigns : []);
+      }
+
+      // Config maps (editorSlackChannels, editorSlackIds, categoryHeadSlackIds,
+      // pmSlackIds, categoryHeadOverrides, qcWebhooks, countryWebhooks): keyed by
+      // editor / country / category. Per-slot merge — if incoming's slot is EMPTY
+      // and local's isn't, local wins (protects a fresh set from a stale wipe).
+      // Otherwise incoming wins (last-writer for intentional edits/clears — a user
+      // who explicitly typed nothing into a field expects that to save; but there's
+      // no distinguishing signal for "cleared" vs "never had", so a genuine clear
+      // may be rejected momentarily and the user needs to save again. Trade-off
+      // documented — silently losing set values is much worse than a rare re-save).
+      function mergeStringMap(local, incoming) {
+        var out = {}, keys = {};
+        Object.keys(incoming || {}).forEach(function(k) { keys[k] = true; });
+        Object.keys(local    || {}).forEach(function(k) { keys[k] = true; });
+        Object.keys(keys).forEach(function(k) {
+          var inc = (incoming && incoming[k]) || '';
+          var loc = (local    && local[k])    || '';
+          out[k] = (!inc && loc) ? loc : inc;
+        });
+        return out;
+      }
+      ['editorSlackChannels','editorSlackIds','categoryHeadSlackIds','pmSlackIds',
+       'categoryHeadOverrides','qcWebhooks','countryWebhooks'].forEach(function(name) {
+        STATE[name] = mergeStringMap(_localConfigMaps[name], data[name]);
+      });
+
+      // metaAdAccountIds: fixed 4-slot array of ids. Per-slot merge — local non-empty
+      // wins over incoming empty. Otherwise incoming.
+      STATE.metaAdAccountIds = (function() {
+        var out = ['', '', '', ''];
+        var inc = Array.isArray(data.metaAdAccountIds) ? data.metaAdAccountIds : [];
+        for (var s = 0; s < 4; s++) {
+          var incV = inc[s] || '';
+          var locV = _localMetaIds[s] || '';
+          out[s] = (!incV && locV) ? locV : incV;
+        }
+        return out;
+      })();
+
+      // qcDismissed: {assetId: true} boolean map from Cat Heads Review. Union so a
+      // stale save can't undo a dismissal another tab just made. If a value was
+      // intentionally UNDISMISSED, that key isn't set (it's deleted from the map),
+      // so local-side deletes won't get resurrected — only the "true" flags union.
+      STATE.qcDismissed = (function() {
+        var out = {};
+        Object.keys(data.qcDismissed || {}).forEach(function(k) { if (data.qcDismissed[k]) out[k] = true; });
+        Object.keys(_localQcDismissed || {}).forEach(function(k) { if (_localQcDismissed[k]) out[k] = true; });
+        return out;
+      })();
+
+      // gradingStreak: {last: 'YYYY-MM-DD', count: n, best: n}. `best` is a rolling
+      // record so we take the max. `last`/`count` pair belongs together — whichever
+      // side has the more recent `last` wins that pair.
+      STATE.gradingStreak = (function() {
+        var loc = _localGradingStreak || { last: null, count: 0, best: 0 };
+        var inc = data.gradingStreak || { last: null, count: 0, best: 0 };
+        var winner = ((inc.last || '') > (loc.last || '')) ? inc : loc;
+        return {
+          last: winner.last || null,
+          count: winner.count || 0,
+          best: Math.max(Number(loc.best) || 0, Number(inc.best) || 0)
+        };
+      })();
+
+      // pendingBatches: {recipient: {items: [], firstQueuedAt, sendingSince}}. Per
+      // recipient, union items by their id so a queued notification never gets wiped
+      // by a stale save. Non-item metadata (firstQueuedAt/sendingSince) — take
+      // incoming when it exists, else local (server is the authority on send state).
+      STATE.pendingBatches = (function() {
+        var out = {};
+        var recips = {};
+        Object.keys(data.pendingBatches || {}).forEach(function(r) { recips[r] = true; });
+        Object.keys(_localPendingBatches || {}).forEach(function(r) { recips[r] = true; });
+        Object.keys(recips).forEach(function(r) {
+          var inc = (data.pendingBatches && data.pendingBatches[r]) || { items: [], firstQueuedAt: null, sendingSince: null };
+          var loc = (_localPendingBatches && _localPendingBatches[r]) || { items: [], firstQueuedAt: null, sendingSince: null };
+          var byId = {}, order = [];
+          (inc.items || []).forEach(function(it) {
+            var id = (it && it.id) || JSON.stringify(it);
+            if (byId[id]) return; byId[id] = it; order.push(id);
+          });
+          (loc.items || []).forEach(function(it) {
+            var id = (it && it.id) || JSON.stringify(it);
+            if (byId[id]) return; byId[id] = it; order.push(id);
+          });
+          out[r] = {
+            items: order.map(function(id) { return byId[id]; }),
+            firstQueuedAt: inc.firstQueuedAt || loc.firstQueuedAt || null,
+            sendingSince: (inc.sendingSince !== undefined) ? inc.sendingSince : (loc.sendingSince || null)
+          };
+        });
+        return out;
+      })();
 
       // If the merge preserved a local-only entry (i.e. our list has something the
       // incoming snapshot doesn't), Firestore is now behind us. Push a correction upload
