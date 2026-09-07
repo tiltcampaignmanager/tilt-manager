@@ -490,6 +490,12 @@ var Fb = {
         expandedCountries: true,
         sidebarCompact: true,
         sidebarMonthFilter: true,
+        sidebarTypeExpanded: true,
+        sidebarMonthExpanded: true,
+        sidebarTypeOrder: true,
+        // Legacy UK-only keys (superseded by the per-country maps above) — kept
+        // in the exclusion list so a teammate on an older build can't push them
+        // back into the shared snapshot.
         sidebarUKType: true,
         sidebarUKMonths: true,
         feedbackName: true,
@@ -1113,6 +1119,37 @@ var Fb = {
         (STATE.campaigns || []).forEach(fix);
         if (fixed) setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
       })();
+      // Migration (2026-09-07): Poland was removed from the country roster. Drop
+      // any stored PL entry so old snapshots don't resurrect it via merge. Also
+      // strip PL from the per-user expanded map. Idempotent — no-op after the
+      // first apply.
+      if (Array.isArray(STATE.countries) && STATE.countries.some(function(c) { return c && c.code === 'PL'; })) {
+        STATE.countries = STATE.countries.filter(function(c) { return !c || c.code !== 'PL'; });
+        setTimeout(function() { if (typeof Fb !== 'undefined' && Fb.scheduleUpload) Fb.scheduleUpload(); }, 100);
+      }
+      if (STATE.expandedCountries && STATE.expandedCountries.PL !== undefined) delete STATE.expandedCountries.PL;
+
+      // Migration (2026-09-07): the sidebar TYPE / MONTH expand state was
+      // originally UK-only under sidebarUKType / sidebarUKMonths. Same day it
+      // was extended to every country under per-country maps. Move any stored
+      // UK-only values into the new maps so a returning user's expand state
+      // survives. Idempotent — deletes the old keys after copy.
+      if (STATE.sidebarUKType && typeof STATE.sidebarUKType === 'object') {
+        if (!STATE.sidebarTypeExpanded) STATE.sidebarTypeExpanded = {};
+        Object.keys(STATE.sidebarUKType).forEach(function(t) {
+          var v = STATE.sidebarUKType[t];
+          if (v === false) STATE.sidebarTypeExpanded['UK|' + t] = false;
+        });
+        delete STATE.sidebarUKType;
+      }
+      if (STATE.sidebarUKMonths && typeof STATE.sidebarUKMonths === 'object') {
+        if (!STATE.sidebarMonthExpanded) STATE.sidebarMonthExpanded = {};
+        Object.keys(STATE.sidebarUKMonths).forEach(function(k) {
+          STATE.sidebarMonthExpanded['UK|' + k] = STATE.sidebarUKMonths[k];
+        });
+        delete STATE.sidebarUKMonths;
+      }
+
       // Migration: seed Avy's category-head Slack ID if a stored snapshot's
       // categoryHeadSlackIds map predates Womenswear/Avy being added.
       if (STATE.categoryHeadSlackIds && !STATE.categoryHeadSlackIds.Avy) {
@@ -1842,7 +1879,7 @@ function renderStatusLegend(badgeCls) {
 // ===================== EDITOR RULES =====================
 var EDITORS = ['Zidni', 'Sharm', 'Patty', 'Elsa', 'Seller'];
 // Editors available only for specific countries.
-var EDITOR_COUNTRY_RESTRICT = { Seller: ['IT', 'ES', 'PL'] };
+var EDITOR_COUNTRY_RESTRICT = { Seller: ['IT', 'ES'] };
 // Subset of EDITORS whose accountability the Daily Log tab tracks. Elsa is a PM
 // doing occasional edits, not a full-time editor on the 3-a-day target, so she's
 // excluded here. Seller is an external assignee, not a tracked internal editor.
@@ -1855,8 +1892,7 @@ var CANONICAL_COUNTRIES = [
   { code: 'UK', name: 'United Kingdom' },
   { code: 'IT', name: 'Italy' },
   { code: 'ES', name: 'Spain' },
-  { code: 'US', name: 'United States' },
-  { code: 'PL', name: 'Poland' }
+  { code: 'US', name: 'United States' }
 ];
 var STATUSES = ['Draft', 'Assigned', 'In Progress', 'For Review', 'Needs Revisions', 'Approved', 'Cancelled'];
 // QC pass/fail tracking \u2014 separate from the workflow status. A video could be 'For Review'
@@ -1903,13 +1939,12 @@ var DEFAULT_CATEGORIES = [
 
 // Each country has an assigned PM — gets @mentioned in PM Review queue messages
 // and in Category Head QC "Approved" notifications so they know a video is
-// ready to publish. Empty value = no auto-mention (US and PL not assigned yet).
+// ready to publish. Empty value = no auto-mention (US not assigned yet).
 var COUNTRY_PMS = {
   UK: 'Elsa',
   IT: 'Anasstassiya',
   ES: 'Laura',
-  US: '',
-  PL: ''
+  US: ''
 };
 
 // Each category has an assigned "category head" — the person responsible for
@@ -2058,15 +2093,19 @@ var STATE = {
   // top it up with any tab ids added in future versions.
   tabOrder: ['campaigns', 'notifications', 'today', 'log', 'automations', 'config'],
   activeSubCampaignId: 1,
-  expandedCountries: { UK: true, IT: false, ES: false, US: false, PL: false },
-  // UK sidebar reorg (2026-09-07): UK campaigns are grouped by TYPE (Paid Ads /
-  // Organic), and each type is further grouped by monthYear ('YYYY-MM'). The two
-  // maps below track which of those sub-groups are expanded. Per-user (not synced).
-  //   sidebarUKType:   { paid: true, organic: true }  — top-level type toggles
-  //   sidebarUKMonths: { 'paid|2026-09': true, ... } — per-type per-month
+  expandedCountries: { UK: true, IT: false, ES: false, US: false },
+  // Country sidebar reorg (2026-09-07, extended to all countries same day):
+  // every country's campaigns are grouped by TYPE (Paid Ads / Organic), and
+  // each type is further grouped by monthYear ('YYYY-MM'). The maps below
+  // track which sub-groups are expanded, and the priority order of the two
+  // types per country (user-draggable). Per-user (not synced).
+  //   sidebarTypeExpanded:  { 'UK|paid': true, 'IT|organic': false, ... }
+  //   sidebarMonthExpanded: { 'UK|paid|2026-09': true, ... }
+  //   sidebarTypeOrder:     { UK: ['paid','organic'], IT: ['organic','paid'], ... }
   // Undated campaigns bucket under a synthetic 'none' month.
-  sidebarUKType: { paid: true, organic: true },
-  sidebarUKMonths: {},
+  sidebarTypeExpanded: {},
+  sidebarMonthExpanded: {},
+  sidebarTypeOrder: {},
   // UI preference: when true, sidebar collapses to a compact strip showing only flags +
   // counts (country rows) or flag + rank + category pill (sub-campaign rows). Persisted.
   sidebarCompact: false,
@@ -2096,7 +2135,7 @@ var STATE = {
   // folder hourly. (Key name kept as sheetsWebhookUrl for backward compatibility.)
   sheetsWebhookUrl: '',
   webhookUrl: 'https://hooks.slack.com/services/T000/B000/XXXX',
-  countryWebhooks: { UK: '', IT: '', ES: '', US: '', PL: '' },
+  countryWebhooks: { UK: '', IT: '', ES: '', US: '' },
   // Single webhook URL for all Category Head QC batches. When set, every CHQ batch
   // (Sneakers, Bags, Apparel, etc.) routes here regardless of category. When blank,
   // falls back to the global webhook. Set in Automations under "Category Head QC".
@@ -2109,7 +2148,7 @@ var STATE = {
   //  (a) the page is refreshed (this map is NOT persisted), or
   //  (b) any video's QC in that sub-campaign is changed (re-dirty \u2192 card reappears).
   qcDismissed: {},
-  qcWebhooks: { UK: '', IT: '', ES: '', US: '', PL: '' },
+  qcWebhooks: { UK: '', IT: '', ES: '', US: '' },
   // Special QC-report route for Organic campaigns. When set, Organic sub-campaign QC
   // reports post here instead of the country-level qcWebhooks slot. Cross-country —
   // Organic is a campaign type, not a country. Falls through to country → global if empty.
@@ -2136,7 +2175,7 @@ var STATE = {
   // PM's Slack member ID. When set, PM Review queue and Category Head QC
   // Approved messages @mention the PM so they get pinged. Names of the PMs
   // come from COUNTRY_PMS (UK→Elsa, IT→Anasstassiya, ES→Laura).
-  pmSlackIds: { UK: '', IT: '', ES: '', US: '', PL: '' },
+  pmSlackIds: { UK: '', IT: '', ES: '', US: '' },
   // Slack Bot User OAuth Token (xoxb-...) used for chat.postMessage when posting
   // to a daily editor thread. Webhook fallback is still used when this is blank
   // or when an editor has no daily thread set for today.
@@ -2233,8 +2272,7 @@ var STATE = {
     { code: 'UK', name: 'United Kingdom' },
     { code: 'IT', name: 'Italy' },
     { code: 'ES', name: 'Spain' },
-    { code: 'US', name: 'United States' },
-    { code: 'PL', name: 'Poland' }
+    { code: 'US', name: 'United States' }
   ],
   // Sub-campaign category list. Seeded with the defaults but user-managed: can add via
   // the Add/Edit Sub-Campaign modal or the Config tab, rename/delete via Config.
@@ -2278,8 +2316,7 @@ var STATE = {
     { id: 1, country: 'UK', rank: 1, name: 'Privilege Supply \u2013 Luxury', brief: 'High-end product showcase, tone = aspirational', driveId: '1a2B3cD4eF5gH6iJ', category: 'Luxury', type: 'Paid Ads', slackOverride: '' },
     { id: 2, country: 'UK', rank: 2, name: 'Privilege Supply \u2013 Essentials', brief: 'Everyday essentials, tone = practical', driveId: '', category: 'Essentials', type: 'Paid Ads', slackOverride: '' },
     { id: 3, country: 'ES', rank: 1, name: 'Lujo Privilegio \u2013 Primavera', brief: 'Spring luxury drop for the Spanish market (Zidni only)', driveId: '', category: 'Luxury', type: 'Paid Ads', slackOverride: '' },
-    { id: 4, country: 'IT', rank: 1, name: 'Privilege Supply \u2013 Moda', brief: 'Italian fashion-forward editorial cuts (Zidni only)', driveId: '', category: 'Luxury', type: 'Paid Ads', slackOverride: '' },
-    { id: 5, country: 'PL', rank: 1, name: 'Privilege Supply \u2013 Codzienny', brief: 'Polish everyday essentials launch (empty for now)', driveId: '', category: 'Essentials', type: 'Paid Ads', slackOverride: '' }
+    { id: 4, country: 'IT', rank: 1, name: 'Privilege Supply \u2013 Moda', brief: 'Italian fashion-forward editorial cuts (Zidni only)', driveId: '', category: 'Luxury', type: 'Paid Ads', slackOverride: '' }
   ],
   assets: seedAssets(),
 
@@ -2292,8 +2329,7 @@ var STATE = {
     'PM:UK': { items: [], firstQueuedAt: null },
     'PM:IT': { items: [], firstQueuedAt: null },
     'PM:ES': { items: [], firstQueuedAt: null },
-    'PM:US': { items: [], firstQueuedAt: null },
-    'PM:PL': { items: [], firstQueuedAt: null }
+    'PM:US': { items: [], firstQueuedAt: null }
   },
   // Sent notifications history (for viewing in the Notifications tab)
   sentNotifications: [],
@@ -2867,7 +2903,7 @@ function mentionCategoryHead(category) {
 
 // Returns the Slack mention syntax for a country's PM when their member ID is
 // configured, or just the PM's plain name otherwise. Returns '' when no PM is
-// assigned for that country (US and PL by default) so the message header
+// assigned for that country (US by default) so the message header
 // doesn't end up with a stray '@' prefix.
 function mentionPm(country) {
   var pmName = (COUNTRY_PMS && COUNTRY_PMS[country]) || '';
@@ -4467,6 +4503,10 @@ function reorderCampaigns(silent) {
 // ===================== DRAG-AND-DROP REORDER =====================
 // Transient drag state for sub-campaign reordering. Not persisted.
 var DragState = { srcId: null, srcCountry: null };
+// Transient drag state for reordering the Paid Ads / Organic priority within a
+// country. `justDropped` is a one-shot flag consumed by toggleTypeSection to
+// suppress the click that fires right after a successful drop.
+var TypeDragState = { srcCountry: null, srcType: null, justDropped: false };
 
 // Transient sidebar-edit state. When `renameCampId` is set, the sidebar row for that
 // sub-campaign renders an inline <input> for renaming instead of the plain name. Cleared
@@ -5031,27 +5071,31 @@ function renderSidebar() {
     }
     if (isOpen) {
       html += '<div class="subcamp-list open" data-country="' + country.code + '">';
-      // UK sidebar reorg (2026-09-07): campaigns are grouped by TYPE (Paid Ads /
-      // Organic), and each type by monthYear. Everything else keeps the flat layout.
-      // Compact mode always uses the flat layout (nesting doesn't fit the narrow strip).
-      var isUKGrouped = country.code === 'UK' && !compact;
+      // Sidebar reorg (2026-09-07): every country's campaigns are grouped by
+      // TYPE (Paid Ads / Organic), then by monthYear. Compact mode always keeps
+      // the flat single-campaign strip since nesting doesn't fit.
+      var isGrouped = !compact;
       var subsToRender = compact
         ? subs.filter(function(s) { return String(s.id) === String(STATE.activeSubCampaignId); })
         : subs;
 
-      if (isUKGrouped) {
+      if (isGrouped) {
         // Split by type. Each type gets its own collapsible header + month buckets.
-        var ukTypeState = STATE.sidebarUKType || { paid: true, organic: true };
-        var ukMonthState = STATE.sidebarUKMonths || {};
+        var typeExpandedMap = STATE.sidebarTypeExpanded || {};
+        var monthExpandedMap = STATE.sidebarMonthExpanded || {};
         var byType = { paid: [], organic: [] };
         subs.forEach(function(s) {
           var t = (s.type || DEFAULT_CAMPAIGN_TYPE) === 'Organic' ? 'organic' : 'paid';
           byType[t].push(s);
         });
-        var typeMeta = [
-          { key: 'paid',    label: 'Paid Ads' },
-          { key: 'organic', label: 'Organic' }
-        ];
+        // Priority order: user-set via drag, defaults to [paid, organic].
+        var storedOrder = (STATE.sidebarTypeOrder && STATE.sidebarTypeOrder[country.code]) || ['paid', 'organic'];
+        // Guard against malformed stored order — must be a 2-element permutation of the two keys.
+        if (!Array.isArray(storedOrder) || storedOrder.length !== 2 || storedOrder.indexOf('paid') < 0 || storedOrder.indexOf('organic') < 0) {
+          storedOrder = ['paid', 'organic'];
+        }
+        var typeLabels = { paid: 'Paid Ads', organic: 'Organic' };
+        var typeMeta = storedOrder.map(function(k) { return { key: k, label: typeLabels[k] }; });
         // Helper: campaign is "active" if the team is still working it — not
         // marked done and not killed. Used to tell you at a glance which months
         // have live work vs. which are fully wrapped.
@@ -5065,11 +5109,24 @@ function renderSidebar() {
         typeMeta.forEach(function(tm) {
           var typeSubs = byType[tm.key];
           if (!typeSubs.length) return; // hide empty type groups
-          var typeOpen = ukTypeState[tm.key] !== false; // default open
+          var typeStateKey = country.code + '|' + tm.key;
+          // Default: expanded (undefined = true). Explicit false = collapsed.
+          var typeOpen = typeExpandedMap[typeStateKey] !== false;
           var typeChevron = typeOpen ? '▾' : '▸';
           var typeActive = typeSubs.filter(isCampActive).length;
           html +=
-            '<div class="uk-type-row uk-type-' + tm.key + ' ' + (typeOpen ? 'open' : '') + '" onclick="App.toggleUKType(\'' + tm.key + '\')">' +
+            '<div class="uk-type-row uk-type-' + tm.key + ' ' + (typeOpen ? 'open' : '') + '" ' +
+              'draggable="true" ' +
+              'data-type-key="' + tm.key + '" ' +
+              'data-country="' + country.code + '" ' +
+              'onclick="App.toggleTypeSection(\'' + country.code + '\', \'' + tm.key + '\')" ' +
+              'ondragstart="App.onTypeDragStart(event, \'' + country.code + '\', \'' + tm.key + '\')" ' +
+              'ondragover="App.onTypeDragOver(event)" ' +
+              'ondragleave="App.onTypeDragLeave(event)" ' +
+              'ondrop="App.onTypeDrop(event, \'' + country.code + '\', \'' + tm.key + '\')" ' +
+              'ondragend="App.onTypeDragEnd(event)" ' +
+              'title="Drag to reorder priority · click to expand/collapse">' +
+              '<span class="uk-type-grip" title="Drag to reorder">⁝</span>' +
               '<span class="uk-type-chevron">' + typeChevron + '</span>' +
               '<span class="uk-type-label">' + tm.label + '</span>' +
               '<span class="uk-type-count">' + typeSubs.length + '</span>' +
@@ -5088,10 +5145,10 @@ function renderSidebar() {
           var currentIso = (function(){ var d=bizNow(); var mm=d.getMonth()+1; return d.getFullYear()+'-'+(mm<10?'0':'')+mm; })();
           monthKeys.forEach(function(mk) {
             var monthCampaigns = byMonth[mk];
-            var stateKey = tm.key + '|' + mk;
+            var stateKey = country.code + '|' + tm.key + '|' + mk;
             // Default: current month open; everything else respects the stored toggle
             // (undefined means "use default" — current open, others closed).
-            var stored = ukMonthState[stateKey];
+            var stored = monthExpandedMap[stateKey];
             var monthOpen = (stored === undefined) ? (mk === currentIso) : !!stored;
             var monthLabel;
             if (mk === 'none') monthLabel = 'No date';
@@ -5102,7 +5159,7 @@ function renderSidebar() {
             var monthChevron = monthOpen ? '▾' : '▸';
             var monthActive = monthCampaigns.filter(isCampActive).length;
             html +=
-              '<div class="uk-month-row ' + (monthOpen ? 'open' : '') + (monthActive > 0 ? ' has-active' : '') + '" onclick="App.toggleUKMonth(\'' + stateKey + '\')" title="' + escapeHtml(monthLabel) + '">' +
+              '<div class="uk-month-row ' + (monthOpen ? 'open' : '') + (monthActive > 0 ? ' has-active' : '') + '" onclick="App.toggleMonthSection(\'' + stateKey + '\')" title="' + escapeHtml(monthLabel) + '">' +
                 '<span class="uk-month-chevron">' + monthChevron + '</span>' +
                 '<span class="uk-month-label">' + escapeHtml(monthLabel) + '</span>' +
                 '<span class="uk-month-count">' + monthCampaigns.length + '</span>' +
@@ -5328,9 +5385,9 @@ function renderCampaignsView() {
   // in the header instead of one-link-per-video. The columns are removed from
   // BOTH the <thead> below and each row, and the empty-state colspan adjusts.
   var hideLinkCols = !!camp.hideAssetLinkCols;
-  var showSparksCode = ['IT', 'ES', 'PL'].indexOf(camp.country) !== -1;
+  var showSparksCode = ['IT', 'ES'].indexOf(camp.country) !== -1;
   var showIgLink = camp.country === 'IT';
-  var hideCHQC = ['IT', 'ES', 'PL'].indexOf(camp.country) !== -1;
+  var hideCHQC = ['IT', 'ES'].indexOf(camp.country) !== -1;
   // Total column count for full-width rows (empty state, week-group headers). Mirrors the
   // conditional columns in the <thead>/row markup below.
   var colCount = 12 + (hideLinkCols ? 0 : 2) + (showSparksCode ? 1 : 0) + (showIgLink ? 1 : 0) + (hideCHQC ? 0 : 2);
@@ -5713,7 +5770,7 @@ function getCampaignWeeklyStats() {
     }
   });
   // Country sort index: prefer canonical STATE.countries order so the chip row reads
-  // UK \u2192 IT \u2192 ES \u2192 US \u2192 PL to match the sidebar.
+  // UK \u2192 IT \u2192 ES \u2192 US to match the sidebar.
   var countryIdx = {};
   STATE.countries.forEach(function(c, i) { countryIdx[c.code] = i; });
   var list = Object.keys(byId).map(function(k) { return byId[k]; }).filter(function(r) { return r.total > 0; });
@@ -9430,7 +9487,7 @@ function renderAutomationsView() {
     var row = '<div style="margin-top:10px;">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">' +
         '<span style="font-weight:600;font-size:13px;color:var(--text1);">International</span>' +
-        '<span style="font-size:12px;color:var(--text3);">IT · ES · PL · US</span>' +
+        '<span style="font-size:12px;color:var(--text3);">IT · ES · US</span>' +
         '<span class="webhook-dot ' + dot + '" title="' + escapeHtml(dotTitle) + '" style="margin-left:auto;"></span>' +
       '</div>' +
       '<div class="webhook-row">' +
@@ -9441,7 +9498,7 @@ function renderAutomationsView() {
     '</div>';
     return '<div class="auto-card">' +
       '<div class="auto-header"><div class="auto-icon">🌍</div><div><div class="auto-title">Daily Slack thread (International)</div><div class="auto-sub">paste today\'s thread URL — intl video notifications post as replies</div></div></div>' +
-      '<div class="auto-desc">One shared thread for all international (IT, ES, PL, US) video notifications. When set, any editor batch containing only international videos posts as a reply here instead of using the country webhook. Resets at local midnight.</div>' +
+      '<div class="auto-desc">One shared thread for all international (IT, ES, US) video notifications. When set, any editor batch containing only international videos posts as a reply here instead of using the country webhook. Resets at local midnight.</div>' +
       row +
     '</div>';
   }
@@ -9800,7 +9857,7 @@ function validateCampaignRow(row) {
   var errors = [];
   if (!row.country) errors.push('Missing country');
   if (!row.name) errors.push('Missing campaign name');
-  if (row.country && !['UK', 'IT', 'ES', 'US', 'PL'].includes(row.country)) {
+  if (row.country && !['UK', 'IT', 'ES', 'US'].includes(row.country)) {
     errors.push('Invalid country: ' + row.country);
   }
   if (row.type && !['Paid Ads', 'Organic'].includes(row.type)) {
@@ -10952,7 +11009,7 @@ function renderReportingView() {
     var periodLabelCap = period === 'weekly' ? 'This week' : period === 'quarterly' ? 'This quarter' : 'This month';
 
     // Helper: count assets in range respecting the approval filter
-    var paceSimple = ['IT','ES','PL'];
+    var paceSimple = ['IT','ES'];
     function paceApprovedInRange(a, campaignCountry) {
       if (approval !== 'pm' && a.categoryHeadQc === 'Cancelled') return false; // CH-cancelled excluded except when viewing PM-only approvals
       if (approval === 'pm') {
@@ -11060,7 +11117,7 @@ function renderReportingView() {
         if (a.categoryHeadQc === 'Approved') return false;
         var c = findCampaignById(a.campaignId);
         if (c) {
-          if (['IT','ES','PL'].indexOf(c.country) >= 0) return false;
+          if (['IT','ES'].indexOf(c.country) >= 0) return false;
           if (country !== 'all' && c.country !== country) return false;
           if (type !== 'all' && (c.type || 'Paid Ads') !== type) return false;
         }
@@ -11104,8 +11161,8 @@ function renderReportingView() {
            (dCh   && dCh   >= range.start && dCh   <= range.end);
   }
 
-  // IT, ES, PL use status/dateApproved; UK and US use categoryHeadQc/chDateApproved.
-  var SIMPLE_APPROVAL_COUNTRIES = ['IT', 'ES', 'PL'];
+  // IT, ES use status/dateApproved; UK and US use categoryHeadQc/chDateApproved.
+  var SIMPLE_APPROVAL_COUNTRIES = ['IT', 'ES'];
   function isSimpleCountry(c) { return SIMPLE_APPROVAL_COUNTRIES.indexOf(c.country) >= 0; }
 
   function assetApprovedInPeriod(a, campaignCountry) {
@@ -11334,7 +11391,7 @@ function renderReportingView() {
   }
 
   var countryOptsHtml = '<option value="all"' + (country === 'all' ? ' selected' : '') + '>All markets</option>' +
-    ['UK','IT','ES','US','PL'].map(function(c) {
+    ['UK','IT','ES','US'].map(function(c) {
       return '<option value="' + c + '"' + (country === c ? ' selected' : '') + '>' + c + '</option>';
     }).join('');
 
@@ -12870,7 +12927,7 @@ function renderConfigView() {
 
   // Country PM Slack member ID rows. One per country with an assigned PM in
   // COUNTRY_PMS — pings the PM in PM Review messages and Category Head QC
-  // Approved messages. Empty PM names (US, PL) are skipped.
+  // Approved messages. Empty PM names (US) are skipped.
   var pmRows = STATE.countries.map(function(c) {
     var pmName = (COUNTRY_PMS && COUNTRY_PMS[c.code]) || '';
     var slackId = (STATE.pmSlackIds && STATE.pmSlackIds[c.code]) || '';
@@ -13112,7 +13169,7 @@ function renderConfigView() {
     '<div class="section-title">Schema Overview</div>' +
     '<div class="auto-card">' +
       '<div class="auto-title" style="margin-bottom: 12px">Table 1 \u00B7 Countries</div>' +
-      '<div class="config-row"><div class="config-label">Country Code</div><div class="config-value">UK, IT, ES, US, PL</div></div>' +
+      '<div class="config-row"><div class="config-label">Country Code</div><div class="config-value">UK, IT, ES, US</div></div>' +
       '<div class="config-row" style="border-bottom:none"><div class="config-label">Country Name</div><div class="config-value">Single line text</div></div>' +
     '</div>' +
     '<div class="auto-card">' +
@@ -13564,7 +13621,7 @@ function resolveQcThreadForCampaign(campaignId) {
 }
 
 // International country codes — videos from these campaigns share the intl thread.
-var INTL_COUNTRIES = ['IT', 'ES', 'PL', 'US'];
+var INTL_COUNTRIES = ['IT', 'ES', 'US'];
 
 // Returns the intl daily-thread IFF its date matches today and all items are
 // from international countries. Falls back to null so the caller uses the webhook.
@@ -15702,18 +15759,67 @@ var App = {
     render();
   },
   toggleCountry: function(code) { STATE.expandedCountries[code] = !STATE.expandedCountries[code]; render(); },
-  // Toggle the Paid Ads or Organic sub-group under UK. `typeKey` is 'paid' or 'organic'.
-  toggleUKType: function(typeKey) {
-    if (!STATE.sidebarUKType) STATE.sidebarUKType = { paid: true, organic: true };
-    STATE.sidebarUKType[typeKey] = !STATE.sidebarUKType[typeKey];
+  // Toggle a type sub-group (Paid Ads / Organic) inside a country. Default is
+  // expanded; click flips it. State key is 'COUNTRY|typeKey'.
+  toggleTypeSection: function(countryCode, typeKey) {
+    // If the click came from a drag operation (drop just fired), skip the toggle
+    // so releasing on a different type doesn't collapse it — that's confusing.
+    if (TypeDragState.justDropped) { TypeDragState.justDropped = false; return; }
+    if (!STATE.sidebarTypeExpanded) STATE.sidebarTypeExpanded = {};
+    var k = countryCode + '|' + typeKey;
+    // Undefined counts as true (default expanded); flip to explicit false. If
+    // already false, flip back to true.
+    STATE.sidebarTypeExpanded[k] = !(STATE.sidebarTypeExpanded[k] !== false);
     render();
   },
-  // Toggle a month bucket under a UK type. `key` is 'paid|YYYY-MM' or 'organic|YYYY-MM'
-  // (or 'paid|none' / 'organic|none' for undated campaigns).
-  toggleUKMonth: function(key) {
-    if (!STATE.sidebarUKMonths) STATE.sidebarUKMonths = {};
-    STATE.sidebarUKMonths[key] = !STATE.sidebarUKMonths[key];
+  // Toggle a month bucket. `key` is 'COUNTRY|typeKey|YYYY-MM' (or '…|none').
+  toggleMonthSection: function(key) {
+    if (!STATE.sidebarMonthExpanded) STATE.sidebarMonthExpanded = {};
+    STATE.sidebarMonthExpanded[key] = !STATE.sidebarMonthExpanded[key];
     render();
+  },
+  // Drag-to-reorder the Paid Ads / Organic priority within a country. Only
+  // swaps within the SAME country; cross-country drop is ignored (each country
+  // has its own priority order).
+  onTypeDragStart: function(evt, countryCode, typeKey) {
+    TypeDragState.srcCountry = countryCode;
+    TypeDragState.srcType = typeKey;
+    TypeDragState.justDropped = false;
+    if (evt.dataTransfer) {
+      evt.dataTransfer.effectAllowed = 'move';
+      // Firefox requires setData for the drag to actually start.
+      try { evt.dataTransfer.setData('text/plain', 'type:' + countryCode + '|' + typeKey); } catch (_) {}
+    }
+    evt.currentTarget.classList.add('dragging');
+  },
+  onTypeDragOver: function(evt) {
+    if (!TypeDragState.srcType) return;
+    evt.preventDefault();
+    if (evt.dataTransfer) evt.dataTransfer.dropEffect = 'move';
+    evt.currentTarget.classList.add('drag-over');
+  },
+  onTypeDragLeave: function(evt) {
+    evt.currentTarget.classList.remove('drag-over');
+  },
+  onTypeDrop: function(evt, countryCode, dstType) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    evt.currentTarget.classList.remove('drag-over');
+    var srcCountry = TypeDragState.srcCountry, srcType = TypeDragState.srcType;
+    TypeDragState.srcCountry = null; TypeDragState.srcType = null;
+    if (!srcType || srcCountry !== countryCode || srcType === dstType) return;
+    if (!STATE.sidebarTypeOrder) STATE.sidebarTypeOrder = {};
+    // Only two types (paid / organic); a swap is a full re-order.
+    STATE.sidebarTypeOrder[countryCode] = [srcType, srcType === 'paid' ? 'organic' : 'paid'];
+    TypeDragState.justDropped = true; // suppress the click that fires right after drop
+    render();
+  },
+  onTypeDragEnd: function(evt) {
+    if (evt && evt.currentTarget) evt.currentTarget.classList.remove('dragging');
+    // Belt-and-braces: clear all drag-over indicators if any linger.
+    Array.prototype.forEach.call(document.querySelectorAll('.uk-type-row.drag-over'), function(el) { el.classList.remove('drag-over'); });
+    TypeDragState.srcCountry = null;
+    TypeDragState.srcType = null;
   },
   // Flip the compact/full sidebar mode. Persists via saveState() inside render().
   toggleSidebarCompact: function() { STATE.sidebarCompact = !STATE.sidebarCompact; render(); },
@@ -16032,7 +16138,7 @@ var App = {
   // state/app/linearPushes, so campaigns already pushed to Linear are
   // skipped — never re-updated or duplicated.
   pushToLinear: function() {
-    var SIMPLE = ['IT','ES','PL'];
+    var SIMPLE = ['IT','ES'];
     function campAssets(cid) {
       return (STATE.assets || []).filter(function(a) { return String(a.campaignId) === String(cid); });
     }
@@ -16175,7 +16281,7 @@ var App = {
     var type     = STATE.reportingType     || 'all';
     var category = STATE.reportingCategory || 'all';
     var approval = STATE.reportingApproval || 'all';
-    var SIMPLE   = ['IT','ES','PL'];
+    var SIMPLE   = ['IT','ES'];
     var now = bizNow();
     var cy = now.getFullYear(), cm = now.getMonth();
     var MONTH_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -16286,7 +16392,7 @@ var App = {
     var type     = STATE.reportingType     || 'all';
     var category = STATE.reportingCategory || 'all';
     var approval = STATE.reportingApproval || 'all';
-    var SIMPLE   = ['IT','ES','PL'];
+    var SIMPLE   = ['IT','ES'];
     var now = bizNow();
     var cy = now.getFullYear(), cm = now.getMonth();
     var MONTH_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -16378,7 +16484,7 @@ var App = {
     } else if (approval === 'not_ch') {
       approvalExplain = 'Approval filter: Not yet Cat Head approved — these videos have PM sign-off but are still awaiting category head review (UK/US only).';
     } else {
-      approvalExplain = 'Approval filter: All statuses — counts reflect the full standard approval pipeline (category head sign-off for UK/US; PM approval for IT/ES/PL).';
+      approvalExplain = 'Approval filter: All statuses — counts reflect the full standard approval pipeline (category head sign-off for UK/US; PM approval for IT/ES).';
     }
 
     // Build filter context line
